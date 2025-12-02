@@ -89,3 +89,8 @@ uv run mypy src/triage
 - Docker image: `ghcr.io/devonjones/cortex-triage:latest`
 - Stack: `cortex-triage` on Hades (or Ares)
 - Depends on: Postgres, Ollama, postmark queue
+
+## GitHub Integrations
+
+- **Gemini Code Assist**: Automatic code review on PRs
+- **Renovate**: Automated dependency updates
