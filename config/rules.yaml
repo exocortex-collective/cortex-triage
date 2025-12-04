@@ -1,0 +1,72 @@
+# Triage Rules Configuration
+version: 1
+label_prefix: "Cortex"
+
+chains:
+  main:
+    # Self-to-self emails get special handling
+    - match:
+        from: "devon.jones@gmail.com"
+        to: "devon.jones@gmail.com"
+      jump: self_note
+
+    # GitHub noise - archive silently
+    - match:
+        from_glob: "*@github.com"
+      action:
+        label: "Automated/GitHub"
+        archive: true
+        mark_read: true
+
+    # Known noise domains
+    - match:
+        from_glob: "*@linkedin.com"
+      action:
+        label: "Automated/Social"
+        archive: true
+
+    # Fallback: LLM classification
+    - match: {}
+      jump: llm_classify
+
+  self_note:
+    # Archive workflow for URLs
+    - match:
+        subject_intent: "archive_request"
+      action:
+        workflow: archiver
+
+    # Todo items via n8n
+    - match:
+        subject_intent: "todo_request"
+      action:
+        webhook: "n8n/todo-from-email"
+
+    # Unmatched self-notes
+    - match: {}
+      action:
+        label: "Self-Note"
+
+  llm_classify:
+    # LLM classification with routes
+    - llm:
+        model: "qwen2.5:7b"
+        prompt_version: "v1"
+      routes:
+        human_request:
+          label: "Human/NeedsResponse"
+          star: true
+        action_item:
+          label: "Action/Required"
+          star: true
+        wrong_email:
+          label: "WrongEmail"
+          archive: true
+        subscription:
+          label: "Commercial/Subscription"
+        school:
+          label: "School"
+        automated_noise:
+          label: "Automated"
+          archive: true
+          mark_read: true
