@@ -12,8 +12,11 @@ RUN addgroup --system app && adduser --system --ingroup app app
 RUN pip install uv
 
 # Copy dependency definitions and install dependencies (layer caching)
-COPY pyproject.toml uv.lock README.md ./
+COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-dev
+
+# Copy README (needed for package metadata)
+COPY README.md ./
 
 # Copy application source
 COPY src/ ./src/
