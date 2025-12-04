@@ -24,8 +24,8 @@ jobs:
       - name: Lint (Format)
         run: uv run black --check .
 
-      - name: Lint (Imports)
-        run: uv run isort --check-only .
+      - name: Lint (Ruff)
+        run: uv run ruff check .
 
       - name: Type check
         run: uv run mypy src/triage
