@@ -745,8 +745,8 @@ services:
       - RULES_PATH=/app/config/rules.yaml
       - N8N_BASE_URL=${N8N_BASE_URL}
     volumes:
-      - /home/devon/cortex-secrets:/app/secrets:ro
-      - /home/devon/cortex-config:/app/config:ro
+      - ./secrets:/app/secrets:ro
+      - ./config:/app/config:ro
 ```
 
 Environment variables are configured in Portainer stack settings.

@@ -41,14 +41,14 @@ Firewall-style rules engine:
 
 ## Postgres Access
 
-Postgres runs in a Docker container on hades. To run queries:
+Postgres runs in a Docker container. To run queries:
 
 ```bash
 # Via docker exec
-ssh devon@10.5.2.21 "docker exec -i cortex-postgres psql -U cortex -d cortex -c 'SELECT ...'"
+ssh <user>@<postgres-host> "docker exec -i cortex-postgres psql -U cortex -d cortex -c 'SELECT ...'"
 
 # Interactive
-ssh devon@10.5.2.21 "docker exec -it cortex-postgres psql -U cortex -d cortex"
+ssh <user>@<postgres-host> "docker exec -it cortex-postgres psql -U cortex -d cortex"
 ```
 
 ## Queue Interface
@@ -67,17 +67,17 @@ FOR UPDATE SKIP LOCKED;
 
 ```bash
 # Postgres (shared with postmark)
-POSTGRES_HOST=10.5.2.21
+POSTGRES_HOST=<postgres-host>
 POSTGRES_PORT=5432
 POSTGRES_DB=cortex
 POSTGRES_USER=cortex
 POSTGRES_PASSWORD=<secret>
 
 # Ollama (for LLM classification and intent matching)
-OLLAMA_URL=http://10.5.2.21:11434
+OLLAMA_URL=http://<ollama-host>:11434
 
 # DuckDB API (for body preview)
-DUCKDB_API_URL=http://duckdb-api:8081
+DUCKDB_API_URL=http://<duckdb-api-host>:8081
 
 # Gmail API (for labels)
 GMAIL_TOKEN_PATH=/app/secrets/gmail-token.json
@@ -93,7 +93,7 @@ uv sync
 uv run pytest
 uv run mypy src/triage
 uv run black .
-uv run isort .
+uv run ruff check .
 ```
 
 ## Deployment
