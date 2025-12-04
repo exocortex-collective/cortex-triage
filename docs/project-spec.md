@@ -600,15 +600,15 @@ triage-worker --reprocess-unclassified --dry-run
 
 **Query: Emails with label prefix (for reprocessing)**
 ```sql
-SELECT DISTINCT e.id, e.gmail_id
-FROM emails_raw e
-JOIN classifications c ON e.id = c.email_id
-WHERE c.id = (
-    SELECT id FROM classifications c2
-    WHERE c2.email_id = e.id
-    ORDER BY classified_at DESC LIMIT 1
+WITH latest_classifications AS (
+    SELECT DISTINCT ON (email_id) *
+    FROM classifications
+    ORDER BY email_id, classified_at DESC
 )
-AND (c.action_taken->>'label') LIKE 'Commercial%';
+SELECT e.id, e.gmail_id
+FROM emails_raw e
+JOIN latest_classifications lc ON e.id = lc.email_id
+WHERE (lc.action_taken->>'label') LIKE 'Cortex/Commercial%';
 ```
 
 ## Workflows
@@ -735,19 +735,21 @@ services:
     container_name: cortex-triage-worker
     restart: unless-stopped
     environment:
-      - POSTGRES_HOST=10.5.2.21
-      - POSTGRES_DB=cortex
-      - POSTGRES_USER=cortex
+      - POSTGRES_HOST=${POSTGRES_HOST}
+      - POSTGRES_DB=${POSTGRES_DB:-cortex}
+      - POSTGRES_USER=${POSTGRES_USER:-cortex}
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
-      - OLLAMA_URL=http://10.5.2.21:11434
-      - DUCKDB_API_URL=http://duckdb-api:8081
+      - OLLAMA_URL=${OLLAMA_URL}
+      - DUCKDB_API_URL=${DUCKDB_API_URL}
       - GMAIL_TOKEN_PATH=/app/secrets/gmail-token.json
       - RULES_PATH=/app/config/rules.yaml
-      - N8N_BASE_URL=http://10.5.2.8:5678
+      - N8N_BASE_URL=${N8N_BASE_URL}
     volumes:
       - /home/devon/cortex-secrets:/app/secrets:ro
       - /home/devon/cortex-config:/app/config:ro
 ```
+
+Environment variables are configured in Portainer stack settings.
 
 ## MVP Scope
 

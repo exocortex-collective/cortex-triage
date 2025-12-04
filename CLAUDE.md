@@ -71,7 +71,7 @@ POSTGRES_HOST=10.5.2.21
 POSTGRES_PORT=5432
 POSTGRES_DB=cortex
 POSTGRES_USER=cortex
-POSTGRES_PASSWORD=cortex
+POSTGRES_PASSWORD=<secret>
 
 # Ollama (for LLM classification and intent matching)
 OLLAMA_URL=http://10.5.2.21:11434
