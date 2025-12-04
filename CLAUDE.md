@@ -1,13 +1,13 @@
 # Triage - Email Classification & Routing
 
-Email classification, Gmail label routing, and digest generation for Cortex.
+Rule-based email classification and workflow dispatch, with LLM fallback.
 
 ## Quick Reference
 
-- **Spec**: `docs/project-spec.md`
-- **Services**: `src/triage/services/` (classifier, router, digest)
-- **Consumes**: Queue from postmark (`classify` queue)
-- **Produces**: Gmail labels, Obsidian digests
+- **Spec**: `docs/project-spec.md` (full specification)
+- **Services**: `src/triage/services/worker.py` (main triage worker)
+- **Consumes**: Queue from postmark (`triage` queue)
+- **Produces**: Gmail labels (`Cortex/*`), workflow dispatches
 
 ## Project Structure
 
@@ -15,11 +15,15 @@ Email classification, Gmail label routing, and digest generation for Cortex.
 triage/
 ├── src/triage/
 │   ├── services/
-│   │   ├── classifier.py    # LLM classification via Ollama
-│   │   ├── router.py        # Gmail label application
-│   │   └── digest.py        # Daily/weekly digest generation
-│   ├── prompts/             # Classification prompts (versioned)
-│   └── models/              # Data models
+│   │   └── worker.py       # Main triage worker
+│   ├── engine/
+│   │   ├── rules.py        # Rule loading and evaluation
+│   │   ├── matcher.py      # Match condition evaluation
+│   │   └── actions.py      # Action execution
+│   ├── intents/            # Built-in intent prompts
+│   └── models/             # Data models
+├── config/
+│   └── rules.yaml          # Rules configuration
 ├── tests/
 ├── docs/
 │   └── project-spec.md
@@ -27,35 +31,24 @@ triage/
 └── Dockerfile
 ```
 
-## Classification Categories
+## Architecture
 
-- **automated_noise**: GitHub notifications, service alerts, low-value newsletters
-- **human_request**: Personal emails requiring response
-- **action_item**: Deadlines, invoices, permission slips
-- **archive_content**: Self-emailed URLs for archival
-- **wrong_email**: Misdirected mail (other Devon Joneses)
-- **subscription**: Newsletters, marketing
-- **school**: Kids' school communications
+Firewall-style rules engine:
+- Rules evaluated in order (first match wins)
+- Chains for sub-evaluation (like iptables -j CHAIN)
+- Actions: label, archive, workflow dispatch, webhook
+- LLM fallback for fuzzy matching
 
-## Environment Variables
+## Postgres Access
+
+Postgres runs in a Docker container. To run queries:
 
 ```bash
-# Postgres (shared with postmark)
-POSTGRES_HOST=10.5.2.21
-POSTGRES_PORT=5432
-POSTGRES_DB=cortex
-POSTGRES_USER=cortex
-POSTGRES_PASSWORD=<secret>
+# Via docker exec
+ssh <user>@<postgres-host> "docker exec -i cortex-postgres psql -U cortex -d cortex -c 'SELECT ...'"
 
-# Ollama
-OLLAMA_URL=http://10.5.2.21:11434
-OLLAMA_MODEL=qwen2.5:7b
-
-# Gmail API (for router)
-GMAIL_TOKEN_PATH=/app/secrets/gmail-token.json
-
-# Obsidian (for digests)
-OBSIDIAN_REPO_PATH=/app/obsidian
+# Interactive
+ssh <user>@<postgres-host> "docker exec -it cortex-postgres psql -U cortex -d cortex"
 ```
 
 ## Queue Interface
@@ -64,16 +57,33 @@ Consumes from postmark:
 ```sql
 -- Dequeue pattern (SKIP LOCKED)
 SELECT * FROM queue
-WHERE queue_name = 'classify' AND status = 'pending'
+WHERE queue_name = 'triage' AND status = 'pending'
 ORDER BY created_at
 LIMIT 1
 FOR UPDATE SKIP LOCKED;
 ```
 
-Produces for router:
-```sql
-INSERT INTO queue (queue_name, payload)
-VALUES ('route', '{"email_id": 123, "gmail_id": "abc", "category": "human_request"}');
+## Environment Variables
+
+```bash
+# Postgres (shared with postmark)
+POSTGRES_HOST=<postgres-host>
+POSTGRES_PORT=5432
+POSTGRES_DB=cortex
+POSTGRES_USER=cortex
+POSTGRES_PASSWORD=<secret>
+
+# Ollama (for LLM classification and intent matching)
+OLLAMA_URL=http://<ollama-host>:11434
+
+# DuckDB API (for body preview)
+DUCKDB_API_URL=http://<duckdb-api-host>:8081
+
+# Gmail API (for labels)
+GMAIL_TOKEN_PATH=/app/secrets/gmail-token.json
+
+# Rules
+RULES_PATH=/app/config/rules.yaml
 ```
 
 ## Development
@@ -82,13 +92,15 @@ VALUES ('route', '{"email_id": 123, "gmail_id": "abc", "category": "human_reques
 uv sync
 uv run pytest
 uv run mypy src/triage
+uv run black .
+uv run ruff check .
 ```
 
 ## Deployment
 
-- Docker image: `ghcr.io/devonjones/cortex-triage:latest`
-- Stack: `cortex-triage` on Hades (or Ares)
-- Depends on: Postgres, Ollama, postmark queue
+- Docker image: `us-central1-docker.pkg.dev/cortex-gmail/cortex/triage:latest`
+- Stack: `cortex-triage` on Hades (endpoint 11)
+- Depends on: Postgres, Ollama, DuckDB API, postmark queue
 
 ## GitHub Integrations
 
