@@ -1,13 +1,16 @@
 # Triage Rules Configuration
+# Copy this file to your config location and customize for your use case.
+# Set RULES_PATH environment variable to point to your rules file.
 version: 1
 label_prefix: "Cortex"
 
 chains:
   main:
     # Self-to-self emails get special handling
+    # Replace with your own email address
     - match:
-        from: "devon.jones@gmail.com"
-        to: "devon.jones@gmail.com"
+        from: "you@example.com"
+        to: "you@example.com"
       jump: self_note
 
     # GitHub noise - archive silently

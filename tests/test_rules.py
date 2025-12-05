@@ -206,10 +206,10 @@ chains:
 
 
 def test_load_sample_rules() -> None:
-    """Test loading the sample rules.yaml file."""
-    rules_path = Path(__file__).parent.parent / "config" / "rules.yaml"
+    """Test loading the example rules.yaml file."""
+    rules_path = Path(__file__).parent.parent / "examples" / "rules.yaml.example"
     if not rules_path.exists():
-        pytest.skip("Sample rules.yaml not found")
+        pytest.skip("Example rules.yaml not found")
 
     config = load_rules(rules_path)
     errors = validate_rules(config)

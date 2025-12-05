@@ -19,8 +19,8 @@ class MatchCondition(BaseModel):
     to_glob: str | None = None
 
     # Substring matches
-    from_contains: str | None = None
-    to_contains: str | None = None
+    from_contains: list[str] | str | None = None
+    to_contains: list[str] | str | None = None
     subject_contains: list[str] | str | None = None
     body_contains: list[str] | str | None = None
 
@@ -50,12 +50,6 @@ class LLMConfig(BaseModel):
 
     model: str = "qwen2.5:7b"
     prompt_version: str = "v1"
-
-
-class LLMRoutes(BaseModel):
-    """Routes for LLM classification results."""
-
-    routes: dict[str, Action] = Field(default_factory=dict)
 
 
 class Rule(BaseModel):

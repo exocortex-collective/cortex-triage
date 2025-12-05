@@ -5,6 +5,7 @@ import re
 from typing import Protocol
 
 from triage.models.rules import (
+    Action,
     Email,
     EvaluationResult,
     MatchCondition,
@@ -76,6 +77,13 @@ def _match_regex(pattern: str | None, value: str) -> bool:
         return False
 
 
+def _apply_label_prefix(action: Action, prefix: str) -> Action:
+    """Apply label prefix to an action if it has a label."""
+    if action.label and prefix:
+        return action.model_copy(update={"label": f"{prefix}/{action.label}"})
+    return action
+
+
 def matches_condition(
     condition: MatchCondition,
     email: Email,
@@ -120,14 +128,14 @@ def matches_condition(
         return False
 
     # Contains
-    if condition.from_contains is not None and _normalize(
-        condition.from_contains
-    ) not in _normalize(email.from_addr):
+    if condition.from_contains is not None and not _match_contains(
+        condition.from_contains, email.from_addr
+    ):
         return False
 
-    if condition.to_contains is not None and _normalize(
-        condition.to_contains
-    ) not in _normalize(email.to_addr):
+    if condition.to_contains is not None and not _match_contains(
+        condition.to_contains, email.to_addr
+    ):
         return False
 
     if condition.subject_contains is not None and not _match_contains(
@@ -247,12 +255,7 @@ def evaluate_chain(
             )
 
             if category in rule.routes:
-                action = rule.routes[category]
-                # Apply label prefix
-                if action.label:
-                    action = action.model_copy(
-                        update={"label": f"{config.label_prefix}/{action.label}"}
-                    )
+                action = _apply_label_prefix(rule.routes[category], config.label_prefix)
                 return EvaluationResult(
                     matched=True,
                     chain=chain_name,
@@ -267,12 +270,7 @@ def evaluate_chain(
 
         # Handle action
         if rule.action:
-            action = rule.action
-            # Apply label prefix
-            if action.label:
-                action = action.model_copy(
-                    update={"label": f"{config.label_prefix}/{action.label}"}
-                )
+            action = _apply_label_prefix(rule.action, config.label_prefix)
             return EvaluationResult(
                 matched=True,
                 chain=chain_name,
