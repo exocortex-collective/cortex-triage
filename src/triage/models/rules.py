@@ -61,7 +61,9 @@ class LLMRoutes(BaseModel):
 class Rule(BaseModel):
     """A single rule in a chain."""
 
-    match: MatchCondition = MatchCondition()  # type: ignore[call-arg]
+    match: MatchCondition = Field(
+        default_factory=lambda: MatchCondition()  # type: ignore[call-arg]
+    )
     action: Action | None = None
     jump: str | None = None
     llm: LLMConfig | None = None

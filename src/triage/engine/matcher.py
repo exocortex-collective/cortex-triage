@@ -5,7 +5,6 @@ import re
 from typing import Protocol
 
 from triage.models.rules import (
-    Action,
     Email,
     EvaluationResult,
     MatchCondition,
@@ -186,6 +185,7 @@ def evaluate_chain(
     email: Email,
     llm_client: LLMClient | None = None,
     _visited: set[str] | None = None,
+    _intents: dict | None = None,
 ) -> EvaluationResult:
     """Evaluate a chain of rules against an email.
 
@@ -195,6 +195,7 @@ def evaluate_chain(
         email: The email to evaluate.
         llm_client: Optional LLM client for intent/classification.
         _visited: Set of visited chains (for cycle detection).
+        _intents: Pre-computed intents dict (for efficiency in recursive calls).
 
     Returns:
         EvaluationResult with match details and action.
@@ -211,7 +212,8 @@ def evaluate_chain(
     if chain is None:
         return EvaluationResult(matched=False)
 
-    intents = {k: v.model_dump() for k, v in config.intents.items()}
+    # Use pre-computed intents or compute once
+    intents = _intents or {k: v.model_dump() for k, v in config.intents.items()}
 
     for i, rule in enumerate(chain):
         # Check if rule matches
@@ -223,7 +225,7 @@ def evaluate_chain(
         # Handle jump
         if rule.jump:
             result = evaluate_chain(
-                config, rule.jump, email, llm_client, _visited.copy()
+                config, rule.jump, email, llm_client, _visited.copy(), intents
             )
             if result.matched:
                 return result
@@ -248,11 +250,8 @@ def evaluate_chain(
                 action = rule.routes[category]
                 # Apply label prefix
                 if action.label:
-                    action = Action(
-                        **{
-                            **action.model_dump(),
-                            "label": f"{config.label_prefix}/{action.label}",
-                        }
+                    action = action.model_copy(
+                        update={"label": f"{config.label_prefix}/{action.label}"}
                     )
                 return EvaluationResult(
                     matched=True,
@@ -271,11 +270,8 @@ def evaluate_chain(
             action = rule.action
             # Apply label prefix
             if action.label:
-                action = Action(
-                    **{
-                        **action.model_dump(),
-                        "label": f"{config.label_prefix}/{action.label}",
-                    }
+                action = action.model_copy(
+                    update={"label": f"{config.label_prefix}/{action.label}"}
                 )
             return EvaluationResult(
                 matched=True,
@@ -303,4 +299,6 @@ def evaluate(
     Returns:
         EvaluationResult with match details and action.
     """
-    return evaluate_chain(config, "main", email, llm_client)
+    # Pre-compute intents once for all chain evaluations
+    intents = {k: v.model_dump() for k, v in config.intents.items()}
+    return evaluate_chain(config, "main", email, llm_client, None, intents)
