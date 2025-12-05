@@ -82,7 +82,7 @@ def validate_rules(config: RulesConfig) -> list[str]:
     if "main" not in config.chains:
         errors.append("Rules must have a 'main' chain")
 
-    # Validate jump targets exist
+    # Validate jump targets, actions, and intent references
     for chain_name, rules in config.chains.items():
         for i, rule in enumerate(rules):
             if rule.jump and rule.jump not in config.chains:
@@ -104,9 +104,7 @@ def validate_rules(config: RulesConfig) -> list[str]:
                     f"Chain '{chain_name}' rule {i}: " "LLM rule must have 'routes'"
                 )
 
-    # Validate intent references
-    for chain_name, rules in config.chains.items():
-        for i, rule in enumerate(rules):
+            # Validate intent references
             intent = rule.match.subject_intent
             if isinstance(intent, str) and intent not in config.intents:
                 errors.append(
