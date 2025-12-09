@@ -4,6 +4,8 @@ import fnmatch
 import re
 from typing import Protocol
 
+import structlog
+
 from triage.models.rules import (
     Action,
     Email,
@@ -11,6 +13,8 @@ from triage.models.rules import (
     MatchCondition,
     RulesConfig,
 )
+
+log = structlog.get_logger()
 
 
 class LLMClient(Protocol):
@@ -243,7 +247,11 @@ def evaluate_chain(
         # Handle LLM classification
         if rule.llm and rule.routes:
             if llm_client is None:
-                # Can't do LLM without client
+                log.warning(
+                    "LLM rule found but no LLM client provided, skipping rule",
+                    rule_index=i,
+                    chain=chain_name,
+                )
                 continue
 
             category, confidence, reasoning = llm_client.classify(

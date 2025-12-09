@@ -1,5 +1,6 @@
 """Rules loading and configuration."""
 
+import re
 from pathlib import Path
 
 import yaml
@@ -50,7 +51,7 @@ def load_rules(path: str | Path) -> RulesConfig:
     if not path.exists():
         raise FileNotFoundError(f"Rules file not found: {path}")
 
-    with open(path) as f:
+    with open(path, encoding="utf-8") as f:
         data = yaml.safe_load(f)
 
     if data is None:
@@ -98,5 +99,15 @@ def validate_rules(config: RulesConfig) -> list[str]:
                 errors.append(
                     f"Chain '{chain_name}' rule {i}: " f"unknown intent '{intent}'"
                 )
+
+            # Validate regex patterns
+            if rule.match.subject_regex:
+                try:
+                    re.compile(rule.match.subject_regex)
+                except re.error as e:
+                    errors.append(
+                        f"Chain '{chain_name}' rule {i}: "
+                        f"invalid subject_regex '{rule.match.subject_regex}': {e}"
+                    )
 
     return errors
