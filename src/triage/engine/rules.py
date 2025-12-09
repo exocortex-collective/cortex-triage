@@ -82,26 +82,14 @@ def validate_rules(config: RulesConfig) -> list[str]:
     if "main" not in config.chains:
         errors.append("Rules must have a 'main' chain")
 
-    # Validate jump targets, actions, and intent references
+    # Validate jump targets and intent references
+    # Note: Rule model_validator handles action/jump/llm exclusivity and llm+routes
     for chain_name, rules in config.chains.items():
         for i, rule in enumerate(rules):
             if rule.jump and rule.jump not in config.chains:
                 errors.append(
                     f"Chain '{chain_name}' rule {i}: "
                     f"jump target '{rule.jump}' does not exist"
-                )
-
-            # Can't have both action and jump
-            if rule.action and rule.jump:
-                errors.append(
-                    f"Chain '{chain_name}' rule {i}: "
-                    "cannot have both 'action' and 'jump'"
-                )
-
-            # LLM rules must have routes
-            if rule.llm and not rule.routes:
-                errors.append(
-                    f"Chain '{chain_name}' rule {i}: " "LLM rule must have 'routes'"
                 )
 
             # Validate intent references
