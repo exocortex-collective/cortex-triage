@@ -366,7 +366,7 @@ class TestSelfNoteChain:
         assert result.action.label == "Cortex/Self-Note"
 
     def test_self_email_with_archive_subject(self) -> None:
-        """Test self email with archive keyword triggers workflow."""
+        """Test self email with archive keyword gets Archiver label."""
         email = Email(
             id=1,
             gmail_id="abc123",
@@ -388,7 +388,7 @@ class TestSelfNoteChain:
                 "self_note": [
                     Rule(
                         match=MatchCondition(subject_contains=["archive", "save"]),
-                        action=Action(workflow="archiver"),
+                        action=Action(label="Archiver"),
                     ),
                     Rule(
                         match=MatchCondition(),
@@ -401,4 +401,5 @@ class TestSelfNoteChain:
         result = evaluate(config, email)
         assert result.matched
         assert result.action is not None
-        assert result.action.workflow == "archiver"
+        # Label triggers actions service which dispatches to archiver workflow
+        assert result.action.label == "Cortex/Archiver"
