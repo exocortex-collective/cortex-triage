@@ -33,17 +33,17 @@ chains:
       jump: llm_classify
 
   self_note:
-    # Archive workflow for URLs
+    # Archive workflow for URLs - label triggers actions service
     - match:
         subject_intent: "archive_request"
       action:
-        workflow: archiver
+        label: "Archiver"
 
-    # Todo items via n8n
+    # Todo items - label triggers actions service → n8n webhook
     - match:
         subject_intent: "todo_request"
       action:
-        webhook: "n8n/todo-from-email"
+        label: "Todo"
 
     # Unmatched self-notes
     - match: {}

@@ -51,14 +51,16 @@ class MatchCondition(BaseModel):
 
 
 class Action(BaseModel):
-    """Action to take when a rule matches."""
+    """Action to take when a rule matches.
+
+    Triage handles inbox management only. Workflow dispatch happens via the
+    actions service which watches for Cortex/* label events.
+    """
 
     label: str | None = None
     archive: bool | None = None
     mark_read: bool | None = None
     star: bool | None = None
-    workflow: str | None = None
-    webhook: str | None = None
 
 
 class LLMConfig(BaseModel):

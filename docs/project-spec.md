@@ -271,15 +271,20 @@ def match_intent(subject: str, intent_config: dict) -> bool:
 
 ### Actions
 
+Triage handles **inbox management only** - applying labels and organizing email. Workflow dispatch (archiver, webhooks, etc.) is handled by the separate `actions` service which watches for label events.
+
 | Action | Description |
 |--------|-------------|
-| `label` | Apply Gmail label |
+| `label` | Apply Gmail label (triggers actions service via label event) |
 | `archive` | Archive email (remove from inbox) |
 | `mark_read` | Mark as read |
 | `star` | Star the email |
-| `workflow` | Enqueue to named workflow (e.g., "archiver") |
-| `webhook` | POST to n8n webhook URL |
 | `jump` | Evaluate another chain |
+
+**Why no workflow/webhook actions?** Labels are the API. When triage applies a label like `Cortex/Archiver`, postmark sees the label event and enqueues to the `actions` queue. The actions service then dispatches to workflows. This means:
+- Gmail filters can trigger workflows (not just triage rules)
+- Manual drag-and-drop to a label triggers workflows
+- Replay is easy: re-enqueue all emails with label X
 
 ## Services
 
