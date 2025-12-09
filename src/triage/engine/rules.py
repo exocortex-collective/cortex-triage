@@ -59,13 +59,13 @@ def load_rules(path: str | Path) -> RulesConfig:
     # Merge built-in intents with user-defined ones
     # User intents override built-ins
     intents = dict(BUILTIN_INTENTS)
-    if "intents" in data:
-        for name, config in data["intents"].items():
-            if name in intents:
-                # Merge: user config overrides built-in fields
-                intents[name] = {**intents[name], **config}
-            else:
-                intents[name] = config
+    user_intents = data.get("intents") or {}
+    for name, config in user_intents.items():
+        if name in intents:
+            # Merge: user config overrides built-in fields
+            intents[name] = {**intents[name], **config}
+        else:
+            intents[name] = config
     data["intents"] = intents
 
     return RulesConfig.model_validate(data)
