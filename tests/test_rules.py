@@ -134,9 +134,9 @@ chains:
         f.write(yaml_content)
         f.flush()
 
-        config = load_rules(f.name)
-        errors = validate_rules(config)
-        assert any("both" in e.lower() for e in errors)
+        # Validation now happens at model construction via model_validator
+        with pytest.raises(ValueError, match="only have one of"):
+            load_rules(f.name)
 
 
 def test_validate_rules_llm_without_routes() -> None:
@@ -154,9 +154,9 @@ chains:
         f.write(yaml_content)
         f.flush()
 
-        config = load_rules(f.name)
-        errors = validate_rules(config)
-        assert any("routes" in e.lower() for e in errors)
+        # Validation now happens at model construction via model_validator
+        with pytest.raises(ValueError, match="must have 'routes'"):
+            load_rules(f.name)
 
 
 def test_validate_rules_unknown_intent() -> None:

@@ -2,7 +2,15 @@
 
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+
+class IntentConfig(BaseModel):
+    """Configuration for a named intent."""
+
+    prompt: str
+    model: str = "qwen2.5:0.5b"
+    threshold: float = 0.8
 
 
 class MatchCondition(BaseModel):
@@ -28,10 +36,18 @@ class MatchCondition(BaseModel):
     subject_regex: str | None = None
 
     # Intent (LLM-based)
-    subject_intent: str | dict[str, Any] | None = None
+    subject_intent: str | IntentConfig | None = None
 
     # Other
     has_attachment: bool | None = None
+
+    @field_validator("subject_intent", mode="before")
+    @classmethod
+    def validate_subject_intent(cls, v: Any) -> Any:
+        """Parse inline intent dict into an IntentConfig model."""
+        if isinstance(v, dict):
+            return IntentConfig.model_validate(v)
+        return v
 
 
 class Action(BaseModel):
@@ -63,13 +79,25 @@ class Rule(BaseModel):
     llm: LLMConfig | None = None
     routes: dict[str, Action] | None = None
 
+    @model_validator(mode="after")
+    def check_exclusive_outcomes(self) -> "Rule":
+        """Ensure a rule has exactly one outcome defined."""
+        outcomes_defined = sum(
+            x is not None for x in (self.action, self.jump, self.llm)
+        )
 
-class IntentConfig(BaseModel):
-    """Configuration for a named intent."""
+        if outcomes_defined == 0:
+            raise ValueError("Rule must have one of 'action', 'jump', or 'llm'.")
 
-    prompt: str
-    model: str = "qwen2.5:0.5b"
-    threshold: float = 0.8
+        if outcomes_defined > 1:
+            raise ValueError(
+                "Rule can only have one of 'action', 'jump', or 'llm' defined."
+            )
+
+        if self.llm and not self.routes:
+            raise ValueError("LLM rule must have 'routes'.")
+
+        return self
 
 
 class RulesConfig(BaseModel):

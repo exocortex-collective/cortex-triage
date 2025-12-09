@@ -174,12 +174,12 @@ def matches_condition(
             if intents is None or intent_config not in intents:
                 return False
             cfg = intents[intent_config]
-            prompt = cfg.get("prompt", "")
-            model = cfg.get("model", "qwen2.5:0.5b")
+            prompt = cfg["prompt"]
+            model = cfg["model"]
         else:
-            # Inline intent config
-            prompt = intent_config.get("prompt", "")
-            model = intent_config.get("model", "qwen2.5:0.5b")
+            # Inline intent config (IntentConfig instance)
+            prompt = intent_config.prompt
+            model = intent_config.model
 
         if not llm_client.check_intent(email.subject, prompt, model):
             return False
