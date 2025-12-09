@@ -766,6 +766,7 @@ Phase 2:
 - [ ] digest generation (daily/weekly Obsidian notes)
 - [ ] Web UI for rule management
 - [ ] Postgres rules storage (multi-user)
+- [ ] Queue cleanup job (purge completed items older than N days)
 
 ## Testing Strategy
 
