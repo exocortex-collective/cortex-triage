@@ -102,9 +102,16 @@ class Action(BaseModel):
 
     Triage handles inbox management only. Workflow dispatch happens via the
     actions service which watches for Cortex/* label events.
+
+    Labels:
+    - label: Gets prefixed with label_prefix (e.g., "Todo" -> "Cortex/Todo")
+    - add_label: Applied as-is, no prefix (e.g., "Work/Projects")
+    - remove_label: Removed as-is, no prefix
     """
 
-    label: str | None = None
+    label: str | None = None  # Auto-prefixed with label_prefix
+    add_label: str | list[str] | None = None  # Raw label(s), no prefix
+    remove_label: str | list[str] | None = None  # Raw label(s) to remove
     archive: bool | None = None
     mark_read: bool | None = None
     star: bool | None = None
