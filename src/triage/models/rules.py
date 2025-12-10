@@ -125,9 +125,11 @@ class ClassificationPrompt(BaseModel):
     model: str = "qwen2.5:7b"
 
 
-# Default classification prompt template
-DEFAULT_CLASSIFICATION_PROMPT = ClassificationPrompt(
-    template="""You are categorizing emails for a personal Gmail inbox.
+# Built-in classification prompts as raw dicts (single source of truth)
+# Used by both _default_prompts() and load_rules() for merging
+BUILTIN_PROMPTS_DATA: dict[str, dict[str, Any]] = {
+    "v1": {
+        "template": """You are categorizing emails for a personal Gmail inbox.
 
 Categories:
 {categories}
@@ -139,21 +141,25 @@ Body preview: {body_preview}
 
 Respond with JSON only:
 {{"category": "...", "confidence": 0.0-1.0, "reasoning": "brief explanation"}}""",
-    categories=[
-        "automated_noise",
-        "human_request",
-        "action_item",
-        "wrong_email",
-        "subscription",
-        "school",
-    ],
-    model="qwen2.5:7b",
-)
+        "categories": [
+            "automated_noise",
+            "human_request",
+            "action_item",
+            "wrong_email",
+            "subscription",
+            "school",
+        ],
+        "model": "qwen2.5:7b",
+    },
+}
 
 
 def _default_prompts() -> dict[str, ClassificationPrompt]:
     """Return default prompts dict."""
-    return {"v1": DEFAULT_CLASSIFICATION_PROMPT}
+    return {
+        version: ClassificationPrompt.model_validate(data)
+        for version, data in BUILTIN_PROMPTS_DATA.items()
+    }
 
 
 class LLMConfig(BaseModel):

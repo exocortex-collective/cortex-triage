@@ -5,34 +5,7 @@ from pathlib import Path
 
 import yaml
 
-from triage.models.rules import RulesConfig
-
-# Built-in classification prompts (versioned)
-BUILTIN_PROMPTS = {
-    "v1": {
-        "template": """You are categorizing emails for a personal Gmail inbox.
-
-Categories:
-{categories}
-
-Email:
-From: {from_addr}
-Subject: {subject}
-Body preview: {body_preview}
-
-Respond with JSON only:
-{{"category": "...", "confidence": 0.0-1.0, "reasoning": "brief explanation"}}""",
-        "categories": [
-            "automated_noise",
-            "human_request",
-            "action_item",
-            "wrong_email",
-            "subscription",
-            "school",
-        ],
-        "model": "qwen2.5:7b",
-    },
-}
+from triage.models.rules import BUILTIN_PROMPTS_DATA, RulesConfig
 
 # Category descriptions for prompt generation
 CATEGORY_DESCRIPTIONS = {
@@ -105,7 +78,7 @@ def load_rules(path: str | Path) -> RulesConfig:
 
     # Merge built-in prompts with user-defined ones
     # User prompts override built-ins
-    prompts = dict(BUILTIN_PROMPTS)
+    prompts = {k: dict(v) for k, v in BUILTIN_PROMPTS_DATA.items()}
     user_prompts = data.get("prompts") or {}
     for version, config in user_prompts.items():
         if version in prompts:

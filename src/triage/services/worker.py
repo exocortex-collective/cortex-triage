@@ -15,6 +15,8 @@ from typing import Any
 
 import httpx
 import psycopg2
+from google.oauth2.credentials import Credentials
+from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from psycopg2.extras import Json
 from psycopg2.pool import SimpleConnectionPool
@@ -152,9 +154,6 @@ class GmailClient:
     def _get_service(self) -> Any:
         """Get authenticated Gmail API service."""
         if self._service is None:
-            from google.oauth2.credentials import Credentials
-            from googleapiclient.discovery import build
-
             creds = Credentials.from_authorized_user_file(self.token_path)
             self._service = build("gmail", "v1", credentials=creds)
         return self._service
@@ -203,68 +202,42 @@ class GmailClient:
             logger.error(f"Failed to apply label {label_name} to {gmail_id}: {e}")
             return False
 
-    def archive(self, gmail_id: str) -> bool:
-        """Archive an email (remove INBOX label)."""
+    def _modify_message(
+        self, gmail_id: str, body: dict[str, Any], action_name: str
+    ) -> bool:
+        """Helper to modify a message with a given body."""
         try:
             service = self._get_service()
             service.users().messages().modify(
                 userId="me",
                 id=gmail_id,
-                body={"removeLabelIds": ["INBOX"]},
+                body=body,
             ).execute()
-            logger.debug(f"Archived {gmail_id}")
+            logger.debug(f"{action_name} {gmail_id}")
             return True
         except HttpError as e:
             logger.error(
-                f"Gmail API error archiving {gmail_id}: "
+                f"Gmail API error {action_name.lower()} {gmail_id}: "
                 f"HTTP {e.resp.status} - {e.reason}"
             )
             return False
         except Exception as e:
-            logger.error(f"Failed to archive {gmail_id}: {e}")
+            logger.error(f"Failed to {action_name.lower()} {gmail_id}: {e}")
             return False
+
+    def archive(self, gmail_id: str) -> bool:
+        """Archive an email (remove INBOX label)."""
+        return self._modify_message(gmail_id, {"removeLabelIds": ["INBOX"]}, "Archived")
 
     def mark_read(self, gmail_id: str) -> bool:
         """Mark an email as read (remove UNREAD label)."""
-        try:
-            service = self._get_service()
-            service.users().messages().modify(
-                userId="me",
-                id=gmail_id,
-                body={"removeLabelIds": ["UNREAD"]},
-            ).execute()
-            logger.debug(f"Marked read {gmail_id}")
-            return True
-        except HttpError as e:
-            logger.error(
-                f"Gmail API error marking read {gmail_id}: "
-                f"HTTP {e.resp.status} - {e.reason}"
-            )
-            return False
-        except Exception as e:
-            logger.error(f"Failed to mark read {gmail_id}: {e}")
-            return False
+        return self._modify_message(
+            gmail_id, {"removeLabelIds": ["UNREAD"]}, "Marked read"
+        )
 
     def star(self, gmail_id: str) -> bool:
         """Star an email."""
-        try:
-            service = self._get_service()
-            service.users().messages().modify(
-                userId="me",
-                id=gmail_id,
-                body={"addLabelIds": ["STARRED"]},
-            ).execute()
-            logger.debug(f"Starred {gmail_id}")
-            return True
-        except HttpError as e:
-            logger.error(
-                f"Gmail API error starring {gmail_id}: "
-                f"HTTP {e.resp.status} - {e.reason}"
-            )
-            return False
-        except Exception as e:
-            logger.error(f"Failed to star {gmail_id}: {e}")
-            return False
+        return self._modify_message(gmail_id, {"addLabelIds": ["STARRED"]}, "Starred")
 
     def remove_label(self, gmail_id: str, label_name: str) -> bool:
         """Remove a label from an email. Returns True on success."""
