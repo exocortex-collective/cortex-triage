@@ -764,6 +764,8 @@ Phase 1 (MVP):
 - [x] Actions: label, archive, mark_read, star, workflow
 - [x] self_note chain → archiver workflow
 - [x] LLM fallback chain
+- [x] Compound conditions (any_of, all_of)
+- [x] List fields (OR within field)
 - [ ] Gmail API integration for labels
 
 Phase 2:
@@ -772,6 +774,93 @@ Phase 2:
 - [ ] Web UI for rule management
 - [ ] Postgres rules storage (multi-user)
 - [ ] Queue cleanup job (purge completed items older than N days)
+
+### Gmail Filter Parity Checklist
+
+Synapse should support everything Gmail filters can do, plus more. This checklist tracks parity with Gmail's native filtering capabilities.
+
+**Sender/Recipient Matching:**
+- [x] `from` - Exact sender address
+- [x] `from_glob` - Glob pattern (e.g., `*@github.com`)
+- [x] `from_contains` - Substring in sender
+- [x] `to` - Exact recipient address
+- [x] `to_glob` - Glob pattern for recipient
+- [x] `to_contains` - Substring in recipient
+- [ ] `cc` - CC field matching
+- [ ] `bcc` - BCC field matching (Gmail: `bcc:me`)
+- [ ] `deliveredto` - Delivered-to header (useful for aliases)
+- [ ] `list` - Mailing list header (List-ID)
+- [ ] `replyto` - Reply-To header matching
+
+**Content Matching:**
+- [x] `subject_contains` - Substring in subject
+- [x] `subject_regex` - Regex pattern for subject
+- [x] `body_contains` - Substring in body
+- [ ] `body_regex` - Regex pattern for body
+- [ ] Exact phrase matching (Gmail: `"exact phrase"`)
+- [ ] Word proximity (Gmail: `AROUND n`)
+- [ ] Negation (Gmail: `-term` to exclude)
+
+**Attachment Matching:**
+- [x] `has_attachment` - Boolean has/doesn't have
+- [ ] `filename` - Attachment filename pattern (e.g., `*.pdf`)
+- [ ] `filename_regex` - Regex for attachment name
+- [ ] `has_drive` - Has Google Drive attachment
+- [ ] `has_document` - Has Google Docs
+- [ ] `has_spreadsheet` - Has Google Sheets
+- [ ] `has_presentation` - Has Google Slides
+- [ ] `has_youtube` - Has YouTube link
+
+**Size Matching:**
+- [ ] `size` - Exact size in bytes
+- [ ] `larger` - Larger than size (e.g., `larger:5M`)
+- [ ] `smaller` - Smaller than size
+
+**Date/Time Matching:**
+- [ ] `before` - Before date (YYYY/MM/DD)
+- [ ] `after` - After date
+- [ ] `older_than` - Older than duration (e.g., `older_than:7d`)
+- [ ] `newer_than` - Newer than duration
+
+**Status Matching:**
+- [ ] `is_read` - Read/unread status
+- [ ] `is_starred` - Starred status
+- [ ] `is_important` - Gmail importance marker
+- [ ] `is_muted` - Muted conversations
+- [ ] `in_inbox` - Is in inbox
+- [ ] `in_spam` - Is in spam
+- [ ] `in_trash` - Is in trash
+- [ ] `has_label` - Has specific label
+- [ ] `has_userlabels` - Has any user label
+- [ ] `has_nouserlabels` - Has no user labels
+
+**Gmail Categories:**
+- [ ] `category_primary` - Primary tab
+- [ ] `category_social` - Social tab
+- [ ] `category_promotions` - Promotions tab
+- [ ] `category_updates` - Updates tab
+- [ ] `category_forums` - Forums tab
+
+**Actions (Synapse has more than Gmail!):**
+- [x] `label` - Apply label
+- [x] `archive` - Archive (remove from inbox)
+- [x] `mark_read` - Mark as read
+- [x] `star` - Star the email
+- [ ] `mark_important` - Mark as important
+- [ ] `never_important` - Never mark important
+- [ ] `categorize` - Move to Gmail category
+- [ ] `forward` - Forward to address
+- [ ] `delete` - Move to trash
+- [ ] `never_spam` - Never send to spam
+
+**Synapse-only Features (beyond Gmail):**
+- [x] `any_of` / `all_of` - Compound conditions
+- [x] List fields - OR within a single field
+- [x] `jump` - Chain delegation
+- [x] `subject_intent` - LLM-based intent matching
+- [x] LLM classification with routes
+- [x] Regex patterns on any field
+- [x] Built-in intents (archive_request, todo_request, question)
 
 ## Testing Strategy
 
