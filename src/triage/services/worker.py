@@ -2,6 +2,7 @@
 """Triage worker service - processes emails from queue through rules engine."""
 
 import argparse
+import json
 import logging
 import os
 import signal
@@ -115,15 +116,21 @@ Respond with JSON only:
             response.raise_for_status()
             result = response.json()
             text = result.get("response", "{}")
-
-            import json
-
             data = json.loads(text)
             return (
                 data.get("category", "unknown"),
                 float(data.get("confidence", 0.5)),
                 data.get("reasoning", ""),
             )
+        except httpx.RequestError as e:
+            logger.error(f"Ollama network error: {e}")
+            return ("unknown", 0.0, f"network error: {e}")
+        except httpx.HTTPStatusError as e:
+            logger.error(f"Ollama HTTP error {e.response.status_code}: {e}")
+            return ("unknown", 0.0, f"HTTP {e.response.status_code}")
+        except json.JSONDecodeError as e:
+            logger.error(f"Ollama returned invalid JSON: {e}")
+            return ("unknown", 0.0, f"invalid JSON: {e}")
         except Exception as e:
             logger.error(f"Ollama classification failed: {e}")
             return ("unknown", 0.0, str(e))
@@ -134,7 +141,8 @@ class GmailClient:
 
     def __init__(self, token_path: str):
         self.token_path = token_path
-        self._service = None
+        self._service: Any = None
+        self._label_cache: dict[str, str] = {}  # name -> id
 
     def _get_service(self) -> Any:
         """Get authenticated Gmail API service."""
@@ -145,6 +153,17 @@ class GmailClient:
             creds = Credentials.from_authorized_user_file(self.token_path)
             self._service = build("gmail", "v1", credentials=creds)
         return self._service
+
+    def _ensure_label_cache(self) -> None:
+        """Populate label cache if empty."""
+        if self._label_cache:
+            return
+
+        service = self._get_service()
+        results = service.users().labels().list(userId="me").execute()
+        for label in results.get("labels", []):
+            self._label_cache[label["name"]] = label["id"]
+        logger.debug(f"Cached {len(self._label_cache)} Gmail labels")
 
     def apply_label(self, gmail_id: str, label_name: str) -> bool:
         """Apply a label to an email.
@@ -219,21 +238,20 @@ class GmailClient:
             return False
 
     def _get_or_create_label(self, label_name: str) -> str | None:
-        """Get label ID, creating the label if it doesn't exist."""
+        """Get label ID, creating the label if it doesn't exist.
+
+        Uses cached labels to avoid API calls on every message.
+        """
         try:
+            # Ensure cache is populated
+            self._ensure_label_cache()
+
+            # Check cache first
+            if label_name in self._label_cache:
+                return self._label_cache[label_name]
+
+            # Not in cache - create new label
             service = self._get_service()
-
-            # List all labels
-            results = service.users().labels().list(userId="me").execute()
-            labels = results.get("labels", [])
-
-            # Check if label exists
-            for label in labels:
-                if label["name"] == label_name:
-                    label_id: str = label["id"]
-                    return label_id
-
-            # Create label (handles nested labels automatically)
             label_body = {
                 "name": label_name,
                 "labelListVisibility": "labelShow",
@@ -244,6 +262,9 @@ class GmailClient:
             )
             logger.info(f"Created label: {label_name}")
             created_id: str = created["id"]
+
+            # Add to cache
+            self._label_cache[label_name] = created_id
             return created_id
         except Exception as e:
             logger.error(f"Failed to get/create label {label_name}: {e}")
@@ -344,14 +365,18 @@ class TriageWorker:
         return jobs
 
     def _get_email_data(self, gmail_id: str) -> Email | None:
-        """Fetch email data from emails_parsed."""
+        """Fetch email data from emails_parsed and check for attachments."""
         conn = self._get_pg_conn()
         with conn.cursor() as cur:
+            # Get parsed email data and check if attachments exist
             cur.execute(
                 """
-                SELECT id, gmail_id, from_addr, to_addrs, subject, body_text
-                FROM emails_parsed
-                WHERE gmail_id = %s
+                SELECT
+                    ep.id, ep.gmail_id, ep.from_addr, ep.to_addrs,
+                    ep.subject, ep.body_text,
+                    EXISTS(SELECT 1 FROM attachments a WHERE a.gmail_id = ep.gmail_id)
+                FROM emails_parsed ep
+                WHERE ep.gmail_id = %s
             """,
                 (gmail_id,),
             )
@@ -359,6 +384,7 @@ class TriageWorker:
             if row:
                 # to_addrs is an array, use first one
                 to_addr = row[3][0] if row[3] else ""
+                has_attachment: bool = row[6] if row[6] is not None else False
                 return Email(
                     id=row[0],
                     gmail_id=row[1],
@@ -366,7 +392,7 @@ class TriageWorker:
                     to_addr=to_addr,
                     subject=row[4] or "",
                     body=row[5],
-                    has_attachment=False,  # TODO: check attachments table
+                    has_attachment=has_attachment,
                 )
         return None
 
@@ -513,38 +539,53 @@ class TriageWorker:
             self._fail_job(job["id"], str(e))
             return False
 
+    def _process_batch(self) -> tuple[int, int]:
+        """Process a single batch of jobs. Returns (processed, failed)."""
+        jobs = self._claim_jobs(self.config.batch_size)
+
+        if not jobs:
+            return 0, 0
+
+        logger.info(f"Processing batch of {len(jobs)} jobs")
+
+        processed = 0
+        failed = 0
+        for job in jobs:
+            if self.process_job(job):
+                processed += 1
+            else:
+                failed += 1
+
+        return processed, failed
+
     def run(self) -> None:
         """Main processing loop."""
         self._ensure_schema()
 
         logger.info("Triage worker started")
 
-        processed = 0
-        failed = 0
+        total_processed = 0
+        total_failed = 0
 
-        while True:
-            if not self.running:
-                break
+        while self.running:
+            processed, failed = self._process_batch()
 
-            jobs = self._claim_jobs(self.config.batch_size)
-
-            if not jobs:
+            if processed == 0 and failed == 0:
                 logger.debug(f"No jobs, sleeping {self.config.poll_interval}s")
                 time.sleep(self.config.poll_interval)
                 continue
 
-            logger.info(f"Processing batch of {len(jobs)} jobs")
+            total_processed += processed
+            total_failed += failed
 
-            for job in jobs:
-                if self.process_job(job):
-                    processed += 1
-                else:
-                    failed += 1
+            if (total_processed + total_failed) % 100 == 0:
+                logger.info(
+                    f"Progress: {total_processed} processed, {total_failed} failed"
+                )
 
-                if (processed + failed) % 100 == 0:
-                    logger.info(f"Progress: {processed} processed, {failed} failed")
-
-        logger.info(f"Triage worker stopped: {processed} processed, {failed} failed")
+        logger.info(
+            f"Triage worker stopped: {total_processed} processed, {total_failed} failed"
+        )
 
     def run_once(self) -> tuple[int, int]:
         """Process all pending jobs once, then exit. Returns (processed, failed)."""
@@ -552,28 +593,28 @@ class TriageWorker:
 
         logger.info("Triage worker running once")
 
-        processed = 0
-        failed = 0
+        total_processed = 0
+        total_failed = 0
 
         while True:
-            jobs = self._claim_jobs(self.config.batch_size)
+            processed, failed = self._process_batch()
 
-            if not jobs:
+            if processed == 0 and failed == 0:
                 break
 
-            logger.info(f"Processing batch of {len(jobs)} jobs")
+            total_processed += processed
+            total_failed += failed
 
-            for job in jobs:
-                if self.process_job(job):
-                    processed += 1
-                else:
-                    failed += 1
+            if (total_processed + total_failed) % 100 == 0:
+                logger.info(
+                    f"Progress: {total_processed} processed, {total_failed} failed"
+                )
 
-                if (processed + failed) % 100 == 0:
-                    logger.info(f"Progress: {processed} processed, {failed} failed")
-
-        logger.info(f"Triage worker complete: {processed} processed, {failed} failed")
-        return processed, failed
+        logger.info(
+            f"Triage worker complete: {total_processed} processed, "
+            f"{total_failed} failed"
+        )
+        return total_processed, total_failed
 
     def stop(self) -> None:
         """Signal the worker to stop."""
