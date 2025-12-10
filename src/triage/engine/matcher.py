@@ -6,6 +6,7 @@ from typing import Protocol
 
 import structlog
 
+from triage.engine.rules import format_classification_prompt
 from triage.models.rules import (
     Action,
     Email,
@@ -33,17 +34,12 @@ class LLMClient(Protocol):
         """
         ...
 
-    def classify(
-        self, from_addr: str, subject: str, body: str, model: str, prompt_version: str
-    ) -> tuple[str, float, str]:
+    def classify(self, prompt: str, model: str) -> tuple[str, float, str]:
         """Classify an email.
 
         Args:
-            from_addr: Sender address.
-            subject: Email subject.
-            body: Email body.
+            prompt: Fully formatted classification prompt.
             model: Model name to use.
-            prompt_version: Prompt version to use.
 
         Returns:
             Tuple of (category, confidence, reasoning).
@@ -121,7 +117,7 @@ def matches_condition(
     """
     # Pre-normalize email fields for efficiency
     from_addr_norm = _normalize(email.from_addr)
-    to_addr_norm = _normalize(email.to_addr)
+    to_addrs_norm = [_normalize(a) for a in email.to_addrs]
     subject_norm = _normalize(email.subject)
     body_norm = _normalize(email.body) if email.body else None
 
@@ -133,34 +129,44 @@ def matches_condition(
     if from_addrs and not any(from_addr_norm == _normalize(a) for a in from_addrs):
         return False
 
-    # Exact to match (any in list)
-    to_addrs = _to_list(condition.to_addr)
-    if to_addrs and not any(to_addr_norm == _normalize(a) for a in to_addrs):
-        return False
+    # Exact to match - use set intersection for O(N+M) instead of O(N*M)
+    cond_to_addrs = _to_list(condition.to_addr)
+    if cond_to_addrs:
+        cond_addrs_set = {_normalize(addr) for addr in cond_to_addrs}
+        if not set(to_addrs_norm).intersection(cond_addrs_set):
+            return False
 
-    # Glob patterns (any in list)
+    # Glob patterns (any in list) - pre-normalize globs
     from_globs = _to_list(condition.from_glob)
-    if from_globs and not any(
-        fnmatch.fnmatch(from_addr_norm, _normalize(g)) for g in from_globs
-    ):
-        return False
+    if from_globs:
+        normalized_globs = [_normalize(g) for g in from_globs]
+        if not any(fnmatch.fnmatch(from_addr_norm, g) for g in normalized_globs):
+            return False
 
+    # To glob (any pattern matches any recipient) - pre-normalize globs
     to_globs = _to_list(condition.to_glob)
-    if to_globs and not any(
-        fnmatch.fnmatch(to_addr_norm, _normalize(g)) for g in to_globs
-    ):
-        return False
+    if to_globs:
+        normalized_globs = [_normalize(g) for g in to_globs]
+        if not any(
+            fnmatch.fnmatch(email_to, g)
+            for email_to in to_addrs_norm
+            for g in normalized_globs
+        ):
+            return False
 
-    # Contains (any needle in list)
+    # Contains (any needle in list) - pre-normalize needles
     from_contains = _to_list(condition.from_contains)
-    if from_contains and not any(
-        _normalize(n) in from_addr_norm for n in from_contains
-    ):
-        return False
+    if from_contains:
+        norm_contains = [_normalize(n) for n in from_contains]
+        if not any(n in from_addr_norm for n in norm_contains):
+            return False
 
+    # To contains (any needle in any recipient) - pre-normalize needles
     to_contains = _to_list(condition.to_contains)
-    if to_contains and not any(_normalize(n) in to_addr_norm for n in to_contains):
-        return False
+    if to_contains:
+        norm_contains = [_normalize(n) for n in to_contains]
+        if not any(n in email_to for email_to in to_addrs_norm for n in norm_contains):
+            return False
 
     subject_contains = _to_list(condition.subject_contains)
     if subject_contains and not any(
@@ -291,13 +297,19 @@ def evaluate_chain(
                 )
                 continue
 
-            category, confidence, reasoning = llm_client.classify(
-                from_addr=email.from_addr,
-                subject=email.subject,
-                body=email.body or "",
-                model=rule.llm.model,
-                prompt_version=rule.llm.prompt_version,
+            # Format prompt from config
+            prompt, model = format_classification_prompt(
+                config,
+                rule.llm.prompt_version,
+                email.from_addr,
+                email.subject,
+                email.body or "",
             )
+            # Override model if specified in rule
+            if rule.llm.model:
+                model = rule.llm.model
+
+            category, confidence, reasoning = llm_client.classify(prompt, model)
 
             if category in rule.routes:
                 action = _apply_label_prefix(rule.routes[category], config.label_prefix)

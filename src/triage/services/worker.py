@@ -1,0 +1,797 @@
+#!/usr/bin/env python3
+"""Triage worker service - processes emails from queue through rules engine."""
+
+import argparse
+import json
+import logging
+import os
+import signal
+import sys
+import time
+from collections.abc import Iterator
+from contextlib import contextmanager
+from dataclasses import dataclass
+from typing import Any
+
+import httpx
+import psycopg2
+from google.oauth2.credentials import Credentials
+from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
+from psycopg2.extras import Json
+from psycopg2.pool import SimpleConnectionPool
+
+from triage.engine.matcher import evaluate
+from triage.engine.rules import load_rules, validate_rules
+from triage.models.rules import Action, Email, EvaluationResult, RulesConfig
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+)
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class Config:
+    postgres_host: str
+    postgres_port: int
+    postgres_db: str
+    postgres_user: str
+    postgres_password: str
+    rules_path: str
+    duckdb_api_url: str
+    ollama_url: str
+    gmail_token_path: str
+    batch_size: int = 100
+    poll_interval: int = 5  # seconds between queue polls when empty
+
+
+class OllamaClient:
+    """Client for Ollama LLM calls."""
+
+    def __init__(self, base_url: str):
+        self.base_url = base_url.rstrip("/")
+        self.client = httpx.Client(timeout=60.0)
+
+    def check_intent(self, subject: str, prompt: str, model: str) -> bool:
+        """Check if subject matches an intent using LLM.
+
+        Args:
+            subject: Email subject (for logging/context).
+            prompt: The fully formatted prompt string to send.
+            model: Model name to use.
+
+        Returns:
+            True if the intent matches, False otherwise.
+        """
+        try:
+            response = self.client.post(
+                f"{self.base_url}/api/generate",
+                json={
+                    "model": model,
+                    "prompt": prompt,
+                    "stream": False,
+                },
+            )
+            response.raise_for_status()
+            result = response.json()
+            answer: str = result.get("response", "").strip().lower()
+            return answer == "yes"
+        except httpx.RequestError as e:
+            logger.error(f"Ollama intent check network error: {e}")
+            return False
+        except httpx.HTTPStatusError as e:
+            logger.error(
+                f"Ollama intent check HTTP error {e.response.status_code}: {e}"
+            )
+            return False
+        except Exception as e:
+            logger.error(f"Ollama intent check failed unexpectedly: {e}")
+            return False
+
+    def classify(self, prompt: str, model: str) -> tuple[str, float, str]:
+        """Classify an email using LLM.
+
+        Args:
+            prompt: Fully formatted classification prompt.
+            model: Model name to use.
+
+        Returns:
+            Tuple of (category, confidence, reasoning).
+        """
+        try:
+            response = self.client.post(
+                f"{self.base_url}/api/generate",
+                json={
+                    "model": model,
+                    "prompt": prompt,
+                    "stream": False,
+                    "format": "json",
+                },
+            )
+            response.raise_for_status()
+            result = response.json()
+            text = result.get("response", "{}")
+            data = json.loads(text)
+
+            # Validate response is a dict
+            if not isinstance(data, dict):
+                logger.error(f"Ollama returned non-dict JSON: {text}")
+                return ("unknown", 0.0, "invalid JSON format")
+
+            # Safe float conversion for confidence
+            raw_confidence = data.get("confidence")
+            try:
+                confidence = (
+                    float(raw_confidence) if raw_confidence is not None else 0.5
+                )
+            except (ValueError, TypeError):
+                logger.warning(f"Invalid confidence value from LLM: {raw_confidence}")
+                confidence = 0.5
+
+            return (
+                data.get("category", "unknown"),
+                confidence,
+                data.get("reasoning", ""),
+            )
+        except httpx.RequestError as e:
+            logger.error(f"Ollama network error: {e}")
+            return ("unknown", 0.0, f"network error: {e}")
+        except httpx.HTTPStatusError as e:
+            logger.error(f"Ollama HTTP error {e.response.status_code}: {e}")
+            return ("unknown", 0.0, f"HTTP {e.response.status_code}")
+        except json.JSONDecodeError as e:
+            logger.error(f"Ollama returned invalid JSON: {e}")
+            return ("unknown", 0.0, f"invalid JSON: {e}")
+        except Exception as e:
+            logger.error(f"Ollama classification failed: {e}")
+            return ("unknown", 0.0, str(e))
+
+
+class GmailClient:
+    """Client for Gmail API operations."""
+
+    def __init__(self, token_path: str):
+        self.token_path = token_path
+        self._service: Any = None
+        self._label_cache: dict[str, str] = {}  # name -> id
+
+    def _get_service(self) -> Any:
+        """Get authenticated Gmail API service."""
+        if self._service is None:
+            creds = Credentials.from_authorized_user_file(self.token_path)
+            self._service = build("gmail", "v1", credentials=creds)
+        return self._service
+
+    def _ensure_label_cache(self) -> None:
+        """Populate label cache if empty."""
+        if self._label_cache:
+            return
+
+        service = self._get_service()
+        results = service.users().labels().list(userId="me").execute()
+        for label in results.get("labels", []):
+            self._label_cache[label["name"]] = label["id"]
+        logger.debug(f"Cached {len(self._label_cache)} Gmail labels")
+
+    def apply_label(self, gmail_id: str, label_name: str) -> bool:
+        """Apply a label to an email.
+
+        Creates the label if it doesn't exist.
+        Returns True on success.
+        """
+        try:
+            service = self._get_service()
+
+            # Get or create label
+            label_id = self._get_or_create_label(label_name)
+            if not label_id:
+                return False
+
+            # Apply label
+            service.users().messages().modify(
+                userId="me",
+                id=gmail_id,
+                body={"addLabelIds": [label_id]},
+            ).execute()
+
+            logger.debug(f"Applied label {label_name} to {gmail_id}")
+            return True
+        except HttpError as e:
+            logger.error(
+                f"Gmail API error applying label {label_name} to {gmail_id}: "
+                f"HTTP {e.resp.status} - {e.reason}"
+            )
+            return False
+        except Exception as e:
+            logger.error(f"Failed to apply label {label_name} to {gmail_id}: {e}")
+            return False
+
+    def _modify_message(
+        self, gmail_id: str, body: dict[str, Any], action_name: str
+    ) -> bool:
+        """Helper to modify a message with a given body."""
+        try:
+            service = self._get_service()
+            service.users().messages().modify(
+                userId="me",
+                id=gmail_id,
+                body=body,
+            ).execute()
+            logger.debug(f"{action_name} {gmail_id}")
+            return True
+        except HttpError as e:
+            logger.error(
+                f"Gmail API error {action_name.lower()} {gmail_id}: "
+                f"HTTP {e.resp.status} - {e.reason}"
+            )
+            return False
+        except Exception as e:
+            logger.error(f"Failed to {action_name.lower()} {gmail_id}: {e}")
+            return False
+
+    def archive(self, gmail_id: str) -> bool:
+        """Archive an email (remove INBOX label)."""
+        return self._modify_message(gmail_id, {"removeLabelIds": ["INBOX"]}, "Archived")
+
+    def mark_read(self, gmail_id: str) -> bool:
+        """Mark an email as read (remove UNREAD label)."""
+        return self._modify_message(
+            gmail_id, {"removeLabelIds": ["UNREAD"]}, "Marked read"
+        )
+
+    def star(self, gmail_id: str) -> bool:
+        """Star an email."""
+        return self._modify_message(gmail_id, {"addLabelIds": ["STARRED"]}, "Starred")
+
+    def remove_label(self, gmail_id: str, label_name: str) -> bool:
+        """Remove a label from an email. Returns True on success."""
+        try:
+            service = self._get_service()
+            self._ensure_label_cache()
+
+            # Get label ID from cache
+            label_id = self._label_cache.get(label_name)
+            if not label_id:
+                logger.warning(f"Label not found: {label_name}")
+                return False
+
+            service.users().messages().modify(
+                userId="me",
+                id=gmail_id,
+                body={"removeLabelIds": [label_id]},
+            ).execute()
+
+            logger.debug(f"Removed label {label_name} from {gmail_id}")
+            return True
+        except HttpError as e:
+            logger.error(
+                f"Gmail API error removing label {label_name} from {gmail_id}: "
+                f"HTTP {e.resp.status} - {e.reason}"
+            )
+            return False
+        except Exception as e:
+            logger.error(f"Failed to remove label {label_name} from {gmail_id}: {e}")
+            return False
+
+    def _get_or_create_label(self, label_name: str) -> str | None:
+        """Get label ID, creating the label if it doesn't exist.
+
+        Uses cached labels to avoid API calls on every message.
+        """
+        try:
+            # Ensure cache is populated
+            self._ensure_label_cache()
+
+            # Check cache first
+            if label_name in self._label_cache:
+                return self._label_cache[label_name]
+
+            # Not in cache - create new label
+            service = self._get_service()
+            label_body = {
+                "name": label_name,
+                "labelListVisibility": "labelShow",
+                "messageListVisibility": "show",
+            }
+            created = (
+                service.users().labels().create(userId="me", body=label_body).execute()
+            )
+            logger.info(f"Created label: {label_name}")
+            created_id: str = created["id"]
+
+            # Add to cache
+            self._label_cache[label_name] = created_id
+            return created_id
+        except HttpError as e:
+            # Handle race condition: another worker created the label first
+            if e.resp.status == 409:
+                logger.info(
+                    f"Label '{label_name}' already exists (race condition), "
+                    "refreshing cache"
+                )
+                self._label_cache.clear()
+                self._ensure_label_cache()
+                return self._label_cache.get(label_name)
+
+            logger.error(
+                f"Gmail API error creating label {label_name}: "
+                f"HTTP {e.resp.status} - {e.reason}"
+            )
+            return None
+        except Exception as e:
+            logger.error(f"Failed to get/create label {label_name}: {e}")
+            return None
+
+
+class TriageWorker:
+    def __init__(
+        self,
+        config: Config,
+        rules: RulesConfig,
+        ollama: OllamaClient,
+        gmail: GmailClient,
+    ):
+        self.config = config
+        self.rules = rules
+        self.ollama = ollama
+        self.gmail = gmail
+        self.running = True
+        self._pool: SimpleConnectionPool | None = None
+
+    def stop(self) -> None:
+        """Signal the worker to stop."""
+        self.running = False
+
+    def close(self) -> None:
+        """Close resources like the database connection pool."""
+        if self._pool:
+            self._pool.closeall()
+            self._pool = None
+            logger.info("Database connection pool closed")
+
+    def _get_pool(self) -> SimpleConnectionPool:
+        """Get or create connection pool."""
+        if self._pool is None:
+            self._pool = SimpleConnectionPool(
+                minconn=1,
+                maxconn=5,
+                host=self.config.postgres_host,
+                port=self.config.postgres_port,
+                dbname=self.config.postgres_db,
+                user=self.config.postgres_user,
+                password=self.config.postgres_password,
+            )
+        return self._pool
+
+    @contextmanager
+    def _get_conn(self) -> Iterator[psycopg2.extensions.connection]:
+        """Get a connection from the pool, automatically returned when done."""
+        conn = self._get_pool().getconn()
+        try:
+            yield conn
+        finally:
+            self._get_pool().putconn(conn)
+
+    def _ensure_schema(self) -> None:
+        """Ensure classifications table exists."""
+        with self._get_conn() as conn, conn.cursor() as cur:
+            cur.execute(
+                """
+                    CREATE TABLE IF NOT EXISTS classifications (
+                        id BIGSERIAL PRIMARY KEY,
+                        email_id BIGINT NOT NULL,
+                        gmail_id TEXT NOT NULL,
+
+                        -- Rule matching
+                        matched_chain TEXT,
+                        matched_rule_index INT,
+                        rules_version TEXT,
+
+                        -- LLM (if used)
+                        llm_category TEXT,
+                        llm_confidence REAL,
+                        llm_reasoning TEXT,
+
+                        -- Action taken
+                        action_taken JSONB,
+                        action_executed BOOLEAN DEFAULT FALSE,
+
+                        classified_at TIMESTAMPTZ DEFAULT NOW()
+                    );
+
+                    CREATE INDEX IF NOT EXISTS idx_classifications_email
+                    ON classifications(email_id);
+
+                    CREATE INDEX IF NOT EXISTS idx_classifications_gmail
+                    ON classifications(gmail_id);
+
+                    CREATE INDEX IF NOT EXISTS idx_classifications_chain
+                    ON classifications(matched_chain);
+
+                    CREATE INDEX IF NOT EXISTS idx_classifications_date
+                    ON classifications(classified_at DESC);
+                """
+            )
+            conn.commit()
+        logger.info("classifications schema ensured")
+
+    def _claim_jobs(self, batch_size: int) -> list[dict[str, Any]]:
+        """Claim a batch of pending triage jobs."""
+        with self._get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE queue
+                    SET status = 'processing', claimed_at = NOW()
+                    WHERE id IN (
+                        SELECT id FROM queue
+                        WHERE queue_name = 'triage' AND status = 'pending'
+                        ORDER BY created_at
+                        LIMIT %s
+                        FOR UPDATE SKIP LOCKED
+                    )
+                    RETURNING id, payload
+                """,
+                    (batch_size,),
+                )
+                jobs = [{"id": row[0], "payload": row[1]} for row in cur.fetchall()]
+                conn.commit()
+            return jobs
+
+    def _get_email_data(self, gmail_id: str) -> Email | None:
+        """Fetch email data from emails_parsed and check for attachments."""
+        with self._get_conn() as conn, conn.cursor() as cur:
+            # Get parsed email data and check if attachments exist
+            cur.execute(
+                """
+                    SELECT
+                        ep.id, ep.gmail_id, ep.from_addr, ep.to_addrs,
+                        ep.subject, ep.body_text,
+                        EXISTS(
+                            SELECT 1 FROM attachments a WHERE a.gmail_id = ep.gmail_id
+                        )
+                    FROM emails_parsed ep
+                    WHERE ep.gmail_id = %s
+                """,
+                (gmail_id,),
+            )
+            row = cur.fetchone()
+            if row:
+                # to_addrs is an array from the DB
+                to_addrs = row[3] if row[3] else []
+                has_attachment: bool = row[6] if row[6] is not None else False
+                return Email(
+                    id=row[0],
+                    gmail_id=row[1],
+                    from_addr=row[2] or "",
+                    to_addrs=to_addrs,
+                    subject=row[4] or "",
+                    body=row[5],
+                    has_attachment=has_attachment,
+                )
+        return None
+
+    def _get_body_from_api(self, gmail_id: str) -> str | None:
+        """Fetch body from DuckDB API if not in parsed table."""
+        try:
+            response = httpx.get(
+                f"{self.config.duckdb_api_url}/body",
+                params={"gmail_id": gmail_id},
+                timeout=10.0,
+            )
+            response.raise_for_status()
+            data = response.json()
+            body: str | None = data.get("body_text") or data.get("body_html")
+            return body
+        except httpx.RequestError as e:
+            logger.warning(f"DuckDB API network error for {gmail_id}: {e}")
+        except httpx.HTTPStatusError as e:
+            logger.warning(
+                f"DuckDB API error for {gmail_id}: " f"HTTP {e.response.status_code}"
+            )
+        except Exception as e:
+            logger.warning(f"Failed to fetch body from API for {gmail_id}: {e}")
+        return None
+
+    def _labels_to_list(self, labels: str | list[str] | None) -> list[str]:
+        """Convert a string or list of strings to a list."""
+        if not labels:
+            return []
+        if isinstance(labels, str):
+            return [labels]
+        return labels
+
+    def _execute_action(self, action: Action, gmail_id: str) -> bool:
+        """Execute an action on an email. Returns True if all actions succeeded."""
+        success = True
+
+        # Prefixed label (Cortex/*)
+        if action.label and not self.gmail.apply_label(gmail_id, action.label):
+            success = False
+
+        # Raw labels to add (no prefix)
+        for label in self._labels_to_list(action.add_label):
+            if not self.gmail.apply_label(gmail_id, label):
+                success = False
+
+        # Raw labels to remove (no prefix)
+        for label in self._labels_to_list(action.remove_label):
+            if not self.gmail.remove_label(gmail_id, label):
+                success = False
+
+        if action.archive and not self.gmail.archive(gmail_id):
+            success = False
+
+        if action.mark_read and not self.gmail.mark_read(gmail_id):
+            success = False
+
+        if action.star and not self.gmail.star(gmail_id):
+            success = False
+
+        return success
+
+    def _store_classification(
+        self,
+        email: Email,
+        result: EvaluationResult,
+        action_executed: bool,
+    ) -> None:
+        """Store classification result."""
+        with self._get_conn() as conn, conn.cursor() as cur:
+            cur.execute(
+                """
+                    INSERT INTO classifications (
+                        email_id, gmail_id, matched_chain, matched_rule_index,
+                        rules_version, llm_category, llm_confidence, llm_reasoning,
+                        action_taken, action_executed
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """,
+                (
+                    email.id,
+                    email.gmail_id,
+                    result.chain,
+                    result.rule_index,
+                    f"v{self.rules.version}",
+                    result.llm_category,
+                    result.llm_confidence,
+                    result.llm_reasoning,
+                    Json(result.action.model_dump() if result.action else None),
+                    action_executed,
+                ),
+            )
+            conn.commit()
+
+    def _complete_job(self, job_id: int) -> None:
+        """Mark job as completed."""
+        with self._get_conn() as conn, conn.cursor() as cur:
+            cur.execute(
+                """
+                    UPDATE queue
+                    SET status = 'completed', completed_at = NOW()
+                    WHERE id = %s
+                """,
+                (job_id,),
+            )
+            conn.commit()
+
+    def _fail_job(self, job_id: int, error: str) -> None:
+        """Mark job as failed."""
+        with self._get_conn() as conn, conn.cursor() as cur:
+            cur.execute(
+                """
+                    UPDATE queue
+                    SET status = 'failed',
+                        last_error = %s,
+                        attempts = attempts + 1
+                    WHERE id = %s
+                """,
+                (error[:1000], job_id),
+            )
+            conn.commit()
+
+    def process_job(self, job: dict[str, Any]) -> bool:
+        """Process a single triage job. Returns True on success."""
+        gmail_id = job["payload"]["gmail_id"]
+
+        try:
+            # Get email data
+            email = self._get_email_data(gmail_id)
+            if not email:
+                logger.warning(f"Parsed email not found: {gmail_id}")
+                self._fail_job(job["id"], "Parsed email not found")
+                return False
+
+            # Fetch body from API if not in parsed table
+            if not email.body:
+                email.body = self._get_body_from_api(gmail_id)
+
+            # Evaluate rules
+            result = evaluate(self.rules, email, self.ollama)
+
+            # Execute action if matched
+            action_executed = False
+            if result.matched and result.action:
+                action_executed = self._execute_action(result.action, gmail_id)
+                if action_executed:
+                    logger.info(
+                        f"Processed {gmail_id}: chain={result.chain}, "
+                        f"rule={result.rule_index}, action={result.action}"
+                    )
+                else:
+                    logger.warning(f"Action failed for {gmail_id}: {result.action}")
+            else:
+                logger.info(f"No match for {gmail_id}")
+
+            # Store classification
+            self._store_classification(email, result, action_executed)
+
+            # Mark job complete
+            self._complete_job(job["id"])
+            return True
+
+        except Exception as e:
+            logger.error(f"Failed to process {gmail_id}: {e}")
+            self._fail_job(job["id"], str(e))
+            return False
+
+    def _process_batch(self) -> tuple[int, int]:
+        """Process a single batch of jobs. Returns (processed, failed)."""
+        jobs = self._claim_jobs(self.config.batch_size)
+
+        if not jobs:
+            return 0, 0
+
+        logger.info(f"Processing batch of {len(jobs)} jobs")
+
+        processed = 0
+        failed = 0
+        for job in jobs:
+            if self.process_job(job):
+                processed += 1
+            else:
+                failed += 1
+
+        return processed, failed
+
+    def run(self) -> None:
+        """Main processing loop."""
+        self._ensure_schema()
+
+        logger.info("Triage worker started")
+
+        total_processed = 0
+        total_failed = 0
+
+        while self.running:
+            processed, failed = self._process_batch()
+
+            if processed == 0 and failed == 0:
+                logger.debug(f"No jobs, sleeping {self.config.poll_interval}s")
+                time.sleep(self.config.poll_interval)
+                continue
+
+            total_processed += processed
+            total_failed += failed
+
+            if (total_processed + total_failed) % 100 == 0:
+                logger.info(
+                    f"Progress: {total_processed} processed, {total_failed} failed"
+                )
+
+        logger.info(
+            f"Triage worker stopped: {total_processed} processed, {total_failed} failed"
+        )
+
+    def run_once(self) -> tuple[int, int]:
+        """Process all pending jobs once, then exit. Returns (processed, failed)."""
+        self._ensure_schema()
+
+        logger.info("Triage worker running once")
+
+        total_processed = 0
+        total_failed = 0
+
+        while True:
+            processed, failed = self._process_batch()
+
+            if processed == 0 and failed == 0:
+                break
+
+            total_processed += processed
+            total_failed += failed
+
+            if (total_processed + total_failed) % 100 == 0:
+                logger.info(
+                    f"Progress: {total_processed} processed, {total_failed} failed"
+                )
+
+        logger.info(
+            f"Triage worker complete: {total_processed} processed, "
+            f"{total_failed} failed"
+        )
+        return total_processed, total_failed
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Triage worker service")
+    parser.add_argument(
+        "--once", action="store_true", help="Process all pending jobs once and exit"
+    )
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=100,
+        help="Number of jobs to process per batch (default: 100)",
+    )
+    args = parser.parse_args()
+
+    # All config from environment
+    required_vars = [
+        "POSTGRES_HOST",
+        "POSTGRES_DB",
+        "POSTGRES_USER",
+        "POSTGRES_PASSWORD",
+        "RULES_PATH",
+        "DUCKDB_API_URL",
+        "OLLAMA_URL",
+        "GMAIL_TOKEN_PATH",
+    ]
+    missing = [v for v in required_vars if not os.environ.get(v)]
+    if missing:
+        logger.error(f"Missing required environment variables: {', '.join(missing)}")
+        sys.exit(1)
+
+    config = Config(
+        postgres_host=os.environ["POSTGRES_HOST"],
+        postgres_port=int(os.environ.get("POSTGRES_PORT", "5432")),
+        postgres_db=os.environ["POSTGRES_DB"],
+        postgres_user=os.environ["POSTGRES_USER"],
+        postgres_password=os.environ["POSTGRES_PASSWORD"],
+        rules_path=os.environ["RULES_PATH"],
+        duckdb_api_url=os.environ["DUCKDB_API_URL"],
+        ollama_url=os.environ["OLLAMA_URL"],
+        gmail_token_path=os.environ["GMAIL_TOKEN_PATH"],
+        batch_size=args.batch_size,
+    )
+
+    # Load and validate rules
+    try:
+        rules = load_rules(config.rules_path)
+        errors = validate_rules(rules)
+        if errors:
+            for error in errors:
+                logger.error(f"Rules validation error: {error}")
+            sys.exit(1)
+        logger.info(f"Loaded rules from {config.rules_path}")
+    except Exception as e:
+        logger.error(f"Failed to load rules: {e}")
+        sys.exit(1)
+
+    # Initialize clients
+    ollama = OllamaClient(config.ollama_url)
+    gmail = GmailClient(config.gmail_token_path)
+
+    worker = TriageWorker(config, rules, ollama, gmail)
+
+    # Handle signals for graceful shutdown
+    def signal_handler(signum: int, frame: Any) -> None:
+        logger.info("Received shutdown signal")
+        worker.stop()
+
+    signal.signal(signal.SIGTERM, signal_handler)
+    signal.signal(signal.SIGINT, signal_handler)
+
+    try:
+        if args.once:
+            processed, failed = worker.run_once()
+            sys.exit(0 if failed == 0 else 1)
+        else:
+            worker.run()
+    finally:
+        worker.close()
+
+
+if __name__ == "__main__":
+    main()
