@@ -266,6 +266,36 @@ class GmailClient:
             logger.error(f"Failed to star {gmail_id}: {e}")
             return False
 
+    def remove_label(self, gmail_id: str, label_name: str) -> bool:
+        """Remove a label from an email. Returns True on success."""
+        try:
+            service = self._get_service()
+            self._ensure_label_cache()
+
+            # Get label ID from cache
+            label_id = self._label_cache.get(label_name)
+            if not label_id:
+                logger.warning(f"Label not found: {label_name}")
+                return False
+
+            service.users().messages().modify(
+                userId="me",
+                id=gmail_id,
+                body={"removeLabelIds": [label_id]},
+            ).execute()
+
+            logger.debug(f"Removed label {label_name} from {gmail_id}")
+            return True
+        except HttpError as e:
+            logger.error(
+                f"Gmail API error removing label {label_name} from {gmail_id}: "
+                f"HTTP {e.resp.status} - {e.reason}"
+            )
+            return False
+        except Exception as e:
+            logger.error(f"Failed to remove label {label_name} from {gmail_id}: {e}")
+            return False
+
     def _get_or_create_label(self, label_name: str) -> str | None:
         """Get label ID, creating the label if it doesn't exist.
 
@@ -463,8 +493,31 @@ class TriageWorker:
         """Execute an action on an email. Returns True if all actions succeeded."""
         success = True
 
+        # Prefixed label (Cortex/*)
         if action.label and not self.gmail.apply_label(gmail_id, action.label):
             success = False
+
+        # Raw labels to add (no prefix)
+        if action.add_label:
+            labels = (
+                [action.add_label]
+                if isinstance(action.add_label, str)
+                else action.add_label
+            )
+            for label in labels:
+                if not self.gmail.apply_label(gmail_id, label):
+                    success = False
+
+        # Raw labels to remove (no prefix)
+        if action.remove_label:
+            labels = (
+                [action.remove_label]
+                if isinstance(action.remove_label, str)
+                else action.remove_label
+            )
+            for label in labels:
+                if not self.gmail.remove_label(gmail_id, label):
+                    success = False
 
         if action.archive and not self.gmail.archive(gmail_id):
             success = False
