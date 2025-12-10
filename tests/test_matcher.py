@@ -9,6 +9,8 @@ from triage.engine.matcher import (
 from triage.models.rules import (
     Action,
     Email,
+    IntentConfig,
+    LLMConfig,
     MatchCondition,
     Rule,
     RulesConfig,
@@ -349,7 +351,7 @@ class TestSelfNoteChain:
                 "self_note": [
                     Rule(
                         match=MatchCondition(subject_contains=["archive", "save"]),
-                        action=Action(workflow="archiver"),
+                        action=Action(label="Archiver"),
                     ),
                     Rule(
                         match=MatchCondition(),
@@ -403,3 +405,243 @@ class TestSelfNoteChain:
         assert result.action is not None
         # Label triggers actions service which dispatches to archiver workflow
         assert result.action.label == "Cortex/Archiver"
+
+
+class MockLLMClient:
+    """Mock LLM client for testing."""
+
+    def __init__(
+        self,
+        intent_responses: dict[str, bool] | None = None,
+        classify_response: tuple[str, float, str] | None = None,
+    ):
+        self.intent_responses = intent_responses or {}
+        self.classify_response = classify_response or ("unknown", 0.5, "default")
+        self.intent_calls: list[tuple[str, str, str]] = []
+        self.classify_calls: list[tuple[str, str, str, str, str]] = []
+
+    def check_intent(self, subject: str, prompt: str, model: str) -> bool:
+        self.intent_calls.append((subject, prompt, model))
+        # Return based on subject content for testing
+        for key, value in self.intent_responses.items():
+            if key.lower() in subject.lower():
+                return value
+        return False
+
+    def classify(
+        self, from_addr: str, subject: str, body: str, model: str, prompt_version: str
+    ) -> tuple[str, float, str]:
+        self.classify_calls.append((from_addr, subject, body, model, prompt_version))
+        return self.classify_response
+
+
+class TestLLMMatching:
+    """Tests for LLM-based matching features."""
+
+    def test_subject_intent_with_named_intent(self) -> None:
+        """Test subject_intent matching with a named intent reference."""
+        email = Email(
+            id=1,
+            gmail_id="abc123",
+            from_addr="me@example.com",
+            to_addr="me@example.com",
+            subject="archive this article",
+        )
+        condition = MatchCondition(subject_intent="archive_request")
+        intents = {
+            "archive_request": {
+                "prompt": "Is this an archive request? Subject: {subject}",
+                "model": "test-model",
+            }
+        }
+        llm_client = MockLLMClient(intent_responses={"archive": True})
+
+        result = matches_condition(condition, email, llm_client, intents)
+
+        assert result is True
+        assert len(llm_client.intent_calls) == 1
+        assert "archive this article" in llm_client.intent_calls[0][0]
+
+    def test_subject_intent_no_match(self) -> None:
+        """Test subject_intent when intent doesn't match."""
+        email = Email(
+            id=1,
+            gmail_id="abc123",
+            from_addr="me@example.com",
+            to_addr="me@example.com",
+            subject="random email subject",
+        )
+        condition = MatchCondition(subject_intent="archive_request")
+        intents = {
+            "archive_request": {
+                "prompt": "Is this an archive request?",
+                "model": "test-model",
+            }
+        }
+        llm_client = MockLLMClient(intent_responses={"archive": True})
+
+        result = matches_condition(condition, email, llm_client, intents)
+
+        assert result is False
+
+    def test_subject_intent_with_inline_config(self) -> None:
+        """Test subject_intent with inline IntentConfig."""
+        email = Email(
+            id=1,
+            gmail_id="abc123",
+            from_addr="me@example.com",
+            to_addr="me@example.com",
+            subject="save this for later",
+        )
+        condition = MatchCondition(
+            subject_intent=IntentConfig(
+                prompt="Is this a save request?",
+                model="inline-model",
+            )
+        )
+        llm_client = MockLLMClient(intent_responses={"save": True})
+
+        result = matches_condition(condition, email, llm_client)
+
+        assert result is True
+        assert llm_client.intent_calls[0][2] == "inline-model"
+
+    def test_subject_intent_without_llm_client(self) -> None:
+        """Test subject_intent fails closed when no LLM client provided."""
+        email = Email(
+            id=1,
+            gmail_id="abc123",
+            from_addr="me@example.com",
+            to_addr="me@example.com",
+            subject="archive this",
+        )
+        condition = MatchCondition(subject_intent="archive_request")
+        intents = {"archive_request": {"prompt": "test", "model": "test"}}
+
+        result = matches_condition(condition, email, llm_client=None, intents=intents)
+
+        assert result is False
+
+    def test_subject_intent_unknown_intent_reference(self) -> None:
+        """Test subject_intent with unknown intent reference fails."""
+        email = Email(
+            id=1,
+            gmail_id="abc123",
+            from_addr="me@example.com",
+            to_addr="me@example.com",
+            subject="archive this",
+        )
+        condition = MatchCondition(subject_intent="nonexistent_intent")
+        llm_client = MockLLMClient()
+
+        result = matches_condition(condition, email, llm_client, intents={})
+
+        assert result is False
+
+
+class TestLLMClassification:
+    """Tests for LLM classification chain evaluation."""
+
+    def test_llm_classification_matches_route(self) -> None:
+        """Test LLM classification with matching route."""
+        email = Email(
+            id=1,
+            gmail_id="abc123",
+            from_addr="sender@example.com",
+            to_addr="recipient@example.com",
+            subject="Please respond to this",
+            body="Important message",
+        )
+        config = RulesConfig(
+            chains={
+                "main": [
+                    Rule(
+                        llm=LLMConfig(model="test-model", prompt_version="v1"),
+                        routes={
+                            "human_request": Action(label="NeedsResponse", star=True),
+                            "automated": Action(label="Automated", archive=True),
+                        },
+                    )
+                ]
+            }
+        )
+        llm_client = MockLLMClient(
+            classify_response=("human_request", 0.9, "This is a human request")
+        )
+
+        result = evaluate(config, email, llm_client)
+
+        assert result.matched
+        assert result.action is not None
+        assert result.action.label == "Cortex/NeedsResponse"
+        assert result.action.star is True
+        assert result.llm_category == "human_request"
+        assert result.llm_confidence == 0.9
+        assert result.llm_reasoning == "This is a human request"
+
+    def test_llm_classification_no_matching_route(self) -> None:
+        """Test LLM classification when category not in routes."""
+        email = Email(
+            id=1,
+            gmail_id="abc123",
+            from_addr="sender@example.com",
+            to_addr="recipient@example.com",
+            subject="Test",
+        )
+        config = RulesConfig(
+            chains={
+                "main": [
+                    Rule(
+                        llm=LLMConfig(model="test-model", prompt_version="v1"),
+                        routes={
+                            "human_request": Action(label="NeedsResponse"),
+                        },
+                    ),
+                    Rule(
+                        match=MatchCondition(),
+                        action=Action(label="Fallback"),
+                    ),
+                ]
+            }
+        )
+        llm_client = MockLLMClient(
+            classify_response=("unknown_category", 0.5, "Unknown")
+        )
+
+        result = evaluate(config, email, llm_client)
+
+        assert result.matched
+        assert result.action is not None
+        assert result.action.label == "Cortex/Fallback"
+
+    def test_llm_classification_without_client(self) -> None:
+        """Test LLM rule is skipped when no client provided."""
+        email = Email(
+            id=1,
+            gmail_id="abc123",
+            from_addr="sender@example.com",
+            to_addr="recipient@example.com",
+            subject="Test",
+        )
+        config = RulesConfig(
+            chains={
+                "main": [
+                    Rule(
+                        llm=LLMConfig(model="test-model", prompt_version="v1"),
+                        routes={
+                            "human_request": Action(label="NeedsResponse"),
+                        },
+                    ),
+                    Rule(
+                        match=MatchCondition(),
+                        action=Action(label="Fallback"),
+                    ),
+                ]
+            }
+        )
+
+        result = evaluate(config, email, llm_client=None)
+
+        assert result.matched
+        assert result.action is not None
+        assert result.action.label == "Cortex/Fallback"
