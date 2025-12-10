@@ -121,7 +121,7 @@ def matches_condition(
     """
     # Pre-normalize email fields for efficiency
     from_addr_norm = _normalize(email.from_addr)
-    to_addr_norm = _normalize(email.to_addr)
+    to_addrs_norm = [_normalize(a) for a in email.to_addrs]
     subject_norm = _normalize(email.subject)
     body_norm = _normalize(email.body) if email.body else None
 
@@ -133,9 +133,13 @@ def matches_condition(
     if from_addrs and not any(from_addr_norm == _normalize(a) for a in from_addrs):
         return False
 
-    # Exact to match (any in list)
-    to_addrs = _to_list(condition.to_addr)
-    if to_addrs and not any(to_addr_norm == _normalize(a) for a in to_addrs):
+    # Exact to match (any condition addr matches any email recipient)
+    cond_to_addrs = _to_list(condition.to_addr)
+    if cond_to_addrs and not any(
+        email_to == _normalize(cond_to)
+        for email_to in to_addrs_norm
+        for cond_to in cond_to_addrs
+    ):
         return False
 
     # Glob patterns (any in list)
@@ -145,9 +149,12 @@ def matches_condition(
     ):
         return False
 
+    # To glob (any pattern matches any recipient)
     to_globs = _to_list(condition.to_glob)
     if to_globs and not any(
-        fnmatch.fnmatch(to_addr_norm, _normalize(g)) for g in to_globs
+        fnmatch.fnmatch(email_to, _normalize(g))
+        for email_to in to_addrs_norm
+        for g in to_globs
     ):
         return False
 
@@ -158,8 +165,11 @@ def matches_condition(
     ):
         return False
 
+    # To contains (any needle in any recipient)
     to_contains = _to_list(condition.to_contains)
-    if to_contains and not any(_normalize(n) in to_addr_norm for n in to_contains):
+    if to_contains and not any(
+        _normalize(n) in email_to for email_to in to_addrs_norm for n in to_contains
+    ):
         return False
 
     subject_contains = _to_list(condition.subject_contains)
