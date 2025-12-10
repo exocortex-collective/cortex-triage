@@ -78,6 +78,11 @@ def _match_regex(pattern: str | None, value: str) -> bool:
     try:
         return bool(re.search(pattern, value, re.IGNORECASE))
     except re.error:
+        log.error(
+            "Invalid regex pattern encountered during matching",
+            pattern=pattern,
+            exc_info=True,
+        )
         return False
 
 
@@ -106,51 +111,72 @@ def matches_condition(
         True if all specified conditions match, False otherwise.
         Empty condition (no fields set) matches everything.
     """
+    # Pre-normalize email fields for efficiency
+    from_addr_norm = _normalize(email.from_addr)
+    to_addr_norm = _normalize(email.to_addr)
+    subject_norm = _normalize(email.subject)
+    body_norm = _normalize(email.body) if email.body else None
+
     # Check each condition type - all specified must match
 
     # Exact from match
-    if condition.from_addr is not None and _normalize(email.from_addr) != _normalize(
+    if condition.from_addr is not None and from_addr_norm != _normalize(
         condition.from_addr
     ):
         return False
 
     # Exact to match
-    if condition.to_addr is not None and _normalize(email.to_addr) != _normalize(
-        condition.to_addr
-    ):
+    if condition.to_addr is not None and to_addr_norm != _normalize(condition.to_addr):
         return False
 
     # Glob patterns
-    if condition.from_glob is not None and not _match_glob(
-        condition.from_glob, email.from_addr
+    if condition.from_glob is not None and not fnmatch.fnmatch(
+        from_addr_norm, _normalize(condition.from_glob)
     ):
         return False
 
-    if condition.to_glob is not None and not _match_glob(
-        condition.to_glob, email.to_addr
+    if condition.to_glob is not None and not fnmatch.fnmatch(
+        to_addr_norm, _normalize(condition.to_glob)
     ):
         return False
 
     # Contains
-    if condition.from_contains is not None and not _match_contains(
-        condition.from_contains, email.from_addr
-    ):
-        return False
+    if condition.from_contains is not None:
+        needles = (
+            [condition.from_contains]
+            if isinstance(condition.from_contains, str)
+            else condition.from_contains
+        )
+        if not any(_normalize(n) in from_addr_norm for n in needles):
+            return False
 
-    if condition.to_contains is not None and not _match_contains(
-        condition.to_contains, email.to_addr
-    ):
-        return False
+    if condition.to_contains is not None:
+        needles = (
+            [condition.to_contains]
+            if isinstance(condition.to_contains, str)
+            else condition.to_contains
+        )
+        if not any(_normalize(n) in to_addr_norm for n in needles):
+            return False
 
-    if condition.subject_contains is not None and not _match_contains(
-        condition.subject_contains, email.subject
-    ):
-        return False
+    if condition.subject_contains is not None:
+        needles = (
+            [condition.subject_contains]
+            if isinstance(condition.subject_contains, str)
+            else condition.subject_contains
+        )
+        if not any(_normalize(n) in subject_norm for n in needles):
+            return False
 
     if condition.body_contains is not None:
-        if email.body is None:
+        if body_norm is None:
             return False
-        if not _match_contains(condition.body_contains, email.body):
+        needles = (
+            [condition.body_contains]
+            if isinstance(condition.body_contains, str)
+            else condition.body_contains
+        )
+        if not any(_normalize(n) in body_norm for n in needles):
             return False
 
     # Regex
