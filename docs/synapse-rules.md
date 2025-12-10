@@ -108,7 +108,7 @@ For complex logic, use `any_of` and `all_of`:
 # Match if from VIP OR subject is urgent
 match:
   any_of:
-    - from_addr: "ceo@company.com"
+    - from: "ceo@company.com"
     - from_glob: "*@board.company.com"
     - subject_contains: "URGENT"
 ```
@@ -274,7 +274,7 @@ chains:
     # VIP senders always get attention
     - match:
         any_of:
-          - from_addr: "boss@company.com"
+          - from: "boss@company.com"
           - from_glob: "*@important-client.com"
           - subject_regex: "\\[URGENT\\]"
       action:
