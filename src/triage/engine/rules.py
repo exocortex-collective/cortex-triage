@@ -7,6 +7,43 @@ import yaml
 
 from triage.models.rules import RulesConfig
 
+# Built-in classification prompts (versioned)
+BUILTIN_PROMPTS = {
+    "v1": {
+        "template": """You are categorizing emails for a personal Gmail inbox.
+
+Categories:
+{categories}
+
+Email:
+From: {from_addr}
+Subject: {subject}
+Body preview: {body_preview}
+
+Respond with JSON only:
+{{"category": "...", "confidence": 0.0-1.0, "reasoning": "brief explanation"}}""",
+        "categories": [
+            "automated_noise",
+            "human_request",
+            "action_item",
+            "wrong_email",
+            "subscription",
+            "school",
+        ],
+        "model": "qwen2.5:7b",
+    },
+}
+
+# Category descriptions for prompt generation
+CATEGORY_DESCRIPTIONS = {
+    "automated_noise": "GitHub notifications, service alerts, social media, marketing",
+    "human_request": "Personal emails requiring response (friends, family, colleagues)",
+    "action_item": "Has deadline (invoices, permission slips, renewals, bills)",
+    "wrong_email": "Misdirected mail",
+    "subscription": "Newsletters, marketing, recurring service emails",
+    "school": "Kids' school communications",
+}
+
 # Built-in intents with default prompts
 BUILTIN_INTENTS = {
     "archive_request": {
@@ -66,7 +103,63 @@ def load_rules(path: str | Path) -> RulesConfig:
             intents[name] = config
     data["intents"] = intents
 
+    # Merge built-in prompts with user-defined ones
+    # User prompts override built-ins
+    prompts = dict(BUILTIN_PROMPTS)
+    user_prompts = data.get("prompts") or {}
+    for version, config in user_prompts.items():
+        if version in prompts:
+            prompts[version] = {**prompts[version], **config}
+        else:
+            prompts[version] = config
+    data["prompts"] = prompts
+
     return RulesConfig.model_validate(data)
+
+
+def format_classification_prompt(
+    config: RulesConfig,
+    prompt_version: str,
+    from_addr: str,
+    subject: str,
+    body: str,
+) -> tuple[str, str]:
+    """Format a classification prompt with email data.
+
+    Args:
+        config: Rules configuration containing prompts.
+        prompt_version: Version of prompt to use (e.g., "v1").
+        from_addr: Email sender address.
+        subject: Email subject.
+        body: Email body text.
+
+    Returns:
+        Tuple of (formatted_prompt, model_name).
+
+    Raises:
+        ValueError: If prompt_version not found in config.
+    """
+    if prompt_version not in config.prompts:
+        raise ValueError(f"Unknown prompt version: {prompt_version}")
+
+    prompt_config = config.prompts[prompt_version]
+
+    # Format categories with descriptions
+    categories_text = "\n".join(
+        f"- {cat}: {CATEGORY_DESCRIPTIONS.get(cat, cat)}"
+        for cat in prompt_config.categories
+    )
+
+    # Format the template
+    body_preview = body[:500] if body else "(empty)"
+    formatted = prompt_config.template.format(
+        categories=categories_text,
+        from_addr=from_addr,
+        subject=subject,
+        body_preview=body_preview,
+    )
+
+    return formatted, prompt_config.model
 
 
 def validate_rules(config: RulesConfig) -> list[str]:

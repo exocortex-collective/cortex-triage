@@ -110,6 +110,45 @@ class Action(BaseModel):
     star: bool | None = None
 
 
+class ClassificationPrompt(BaseModel):
+    """A versioned classification prompt template."""
+
+    template: str
+    categories: list[str]
+    model: str = "qwen2.5:7b"
+
+
+# Default classification prompt template
+DEFAULT_CLASSIFICATION_PROMPT = ClassificationPrompt(
+    template="""You are categorizing emails for a personal Gmail inbox.
+
+Categories:
+{categories}
+
+Email:
+From: {from_addr}
+Subject: {subject}
+Body preview: {body_preview}
+
+Respond with JSON only:
+{{"category": "...", "confidence": 0.0-1.0, "reasoning": "brief explanation"}}""",
+    categories=[
+        "automated_noise",
+        "human_request",
+        "action_item",
+        "wrong_email",
+        "subscription",
+        "school",
+    ],
+    model="qwen2.5:7b",
+)
+
+
+def _default_prompts() -> dict[str, ClassificationPrompt]:
+    """Return default prompts dict."""
+    return {"v1": DEFAULT_CLASSIFICATION_PROMPT}
+
+
 class LLMConfig(BaseModel):
     """Configuration for LLM classification chain."""
 
@@ -155,6 +194,7 @@ class RulesConfig(BaseModel):
     version: int = 1
     label_prefix: str = "Cortex"
     intents: dict[str, IntentConfig] = Field(default_factory=dict)
+    prompts: dict[str, ClassificationPrompt] = Field(default_factory=_default_prompts)
     chains: dict[str, list[Rule]] = Field(default_factory=dict)
 
 

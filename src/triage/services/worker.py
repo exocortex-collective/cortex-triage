@@ -88,33 +88,16 @@ class OllamaClient:
             logger.error(f"Ollama intent check failed unexpectedly: {e}")
             return False
 
-    def classify(
-        self, from_addr: str, subject: str, body: str, model: str, prompt_version: str
-    ) -> tuple[str, float, str]:
+    def classify(self, prompt: str, model: str) -> tuple[str, float, str]:
         """Classify an email using LLM.
+
+        Args:
+            prompt: Fully formatted classification prompt.
+            model: Model name to use.
 
         Returns:
             Tuple of (category, confidence, reasoning).
         """
-        # TODO: Load prompts from versioned config
-        prompt = f"""You are categorizing emails for a personal Gmail inbox.
-
-Categories:
-- automated_noise: GitHub notifications, service alerts, social media, marketing
-- human_request: Personal emails requiring response (friends, family, colleagues)
-- action_item: Has deadline (invoices, permission slips, renewals, bills)
-- wrong_email: Misdirected mail
-- subscription: Newsletters, marketing, recurring service emails
-- school: Kids' school communications
-
-Email:
-From: {from_addr}
-Subject: {subject}
-Body preview: {body[:500] if body else '(empty)'}
-
-Respond with JSON only:
-{{"category": "...", "confidence": 0.0-1.0, "reasoning": "brief explanation"}}"""
-
         try:
             response = self.client.post(
                 f"{self.base_url}/api/generate",

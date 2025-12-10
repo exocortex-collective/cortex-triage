@@ -418,7 +418,7 @@ class MockLLMClient:
         self.intent_responses = intent_responses or {}
         self.classify_response = classify_response or ("unknown", 0.5, "default")
         self.intent_calls: list[tuple[str, str, str]] = []
-        self.classify_calls: list[tuple[str, str, str, str, str]] = []
+        self.classify_calls: list[tuple[str, str]] = []
 
     def check_intent(self, subject: str, prompt: str, model: str) -> bool:
         self.intent_calls.append((subject, prompt, model))
@@ -428,10 +428,8 @@ class MockLLMClient:
                 return value
         return False
 
-    def classify(
-        self, from_addr: str, subject: str, body: str, model: str, prompt_version: str
-    ) -> tuple[str, float, str]:
-        self.classify_calls.append((from_addr, subject, body, model, prompt_version))
+    def classify(self, prompt: str, model: str) -> tuple[str, float, str]:
+        self.classify_calls.append((prompt, model))
         return self.classify_response
 
 

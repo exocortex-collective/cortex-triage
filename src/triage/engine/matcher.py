@@ -6,6 +6,7 @@ from typing import Protocol
 
 import structlog
 
+from triage.engine.rules import format_classification_prompt
 from triage.models.rules import (
     Action,
     Email,
@@ -33,17 +34,12 @@ class LLMClient(Protocol):
         """
         ...
 
-    def classify(
-        self, from_addr: str, subject: str, body: str, model: str, prompt_version: str
-    ) -> tuple[str, float, str]:
+    def classify(self, prompt: str, model: str) -> tuple[str, float, str]:
         """Classify an email.
 
         Args:
-            from_addr: Sender address.
-            subject: Email subject.
-            body: Email body.
+            prompt: Fully formatted classification prompt.
             model: Model name to use.
-            prompt_version: Prompt version to use.
 
         Returns:
             Tuple of (category, confidence, reasoning).
@@ -302,13 +298,19 @@ def evaluate_chain(
                 )
                 continue
 
-            category, confidence, reasoning = llm_client.classify(
-                from_addr=email.from_addr,
-                subject=email.subject,
-                body=email.body or "",
-                model=rule.llm.model,
-                prompt_version=rule.llm.prompt_version,
+            # Format prompt from config
+            prompt, model = format_classification_prompt(
+                config,
+                rule.llm.prompt_version,
+                email.from_addr,
+                email.subject,
+                email.body or "",
             )
+            # Override model if specified in rule
+            if rule.llm.model:
+                model = rule.llm.model
+
+            category, confidence, reasoning = llm_client.classify(prompt, model)
 
             if category in rule.routes:
                 action = _apply_label_prefix(rule.routes[category], config.label_prefix)
