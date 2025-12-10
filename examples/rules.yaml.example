@@ -1,6 +1,11 @@
 # Triage Rules Configuration
 # Copy this file to your config location and customize for your use case.
 # Set RULES_PATH environment variable to point to your rules file.
+#
+# Matching rules:
+# - All fields in a match block are ANDed together
+# - Within a field, lists are ORed (any value matches)
+# - Use any_of/all_of for complex compound conditions
 version: 1
 label_prefix: "Cortex"
 
@@ -13,20 +18,51 @@ chains:
         to: "you@example.com"
       jump: self_note
 
-    # GitHub noise - archive silently
+    # GitHub/GitLab bugs and issues get starred
+    # Example: list of globs (OR) combined with subject keywords (AND)
     - match:
-        from_glob: "*@github.com"
+        from_glob: ["*@github.com", "*@gitlab.com"]
+        subject_contains: ["bug", "issue", "error", "failed"]
       action:
-        label: "Automated/GitHub"
+        label: "DevOps/Issues"
+        star: true
+
+    # Other GitHub/GitLab noise - archive silently
+    - match:
+        from_glob: ["*@github.com", "*@gitlab.com"]
+      action:
+        label: "Automated/DevOps"
         archive: true
         mark_read: true
 
-    # Known noise domains
+    # Newsletter domains - using list of globs
     - match:
-        from_glob: "*@linkedin.com"
+        from_glob:
+          - "*@mailchimp.com"
+          - "*@sendgrid.net"
+          - "*@mail.beehiiv.com"
+          - "*@substack.com"
+      action:
+        label: "Commercial/Newsletter"
+        archive: true
+
+    # Social media noise
+    - match:
+        from_glob: ["*@linkedin.com", "*@twitter.com", "*@facebookmail.com"]
       action:
         label: "Automated/Social"
         archive: true
+
+    # Example: any_of for mixing different condition types
+    # Match emails that are either from specific addresses OR match a pattern
+    - match:
+        any_of:
+          - from_addr: "important@partner.com"
+          - from_glob: "*@vip-client.com"
+          - subject_contains: "URGENT"
+      action:
+        label: "Priority"
+        star: true
 
     # Fallback: LLM classification
     - match: {}
