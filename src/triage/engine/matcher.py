@@ -148,8 +148,9 @@ def matches_condition(
     if to_globs:
         normalized_globs = [_normalize(g) for g in to_globs]
         if not any(
-            any(fnmatch.fnmatch(email_to, g) for g in normalized_globs)
+            fnmatch.fnmatch(email_to, g)
             for email_to in to_addrs_norm
+            for g in normalized_globs
         ):
             return False
 
@@ -164,9 +165,7 @@ def matches_condition(
     to_contains = _to_list(condition.to_contains)
     if to_contains:
         norm_contains = [_normalize(n) for n in to_contains]
-        if not any(
-            any(n in email_to for n in norm_contains) for email_to in to_addrs_norm
-        ):
+        if not any(n in email_to for email_to in to_addrs_norm for n in norm_contains):
             return False
 
     subject_contains = _to_list(condition.subject_contains)
