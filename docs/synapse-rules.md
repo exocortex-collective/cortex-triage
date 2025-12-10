@@ -141,13 +141,43 @@ Actions define what happens when a rule matches:
 
 ```yaml
 action:
-  label: "Category/Subcategory"  # Apply Gmail label
+  label: "Category/Subcategory"  # Apply Gmail label (auto-prefixed)
+  add_label: "Work/Projects"     # Apply raw label (no prefix)
+  remove_label: "INBOX"          # Remove raw label (no prefix)
   archive: true                   # Remove from inbox
   mark_read: true                 # Mark as read
   star: true                      # Star the email
 ```
 
-All action fields are optional. Labels are prefixed with `label_prefix` (default: `Cortex`), so `label: "GitHub"` becomes `Cortex/GitHub`.
+All action fields are optional.
+
+### Label Types
+
+| Field | Prefix Applied | Use Case |
+|-------|----------------|----------|
+| `label` | Yes (`Cortex/`) | Cortex-managed categorization |
+| `add_label` | No | Apply any Gmail label as-is |
+| `remove_label` | No | Remove any Gmail label |
+
+The `label` field is prefixed with `label_prefix` (default: `Cortex`), so `label: "GitHub"` becomes `Cortex/GitHub`.
+
+The `add_label` and `remove_label` fields apply/remove labels exactly as specified, useful for interacting with existing Gmail labels or organizational labels outside the Cortex hierarchy.
+
+```yaml
+# Example: Archive to a custom folder and remove from inbox
+action:
+  add_label: "Archive/2024"
+  remove_label: "INBOX"
+  archive: true
+```
+
+Both `add_label` and `remove_label` accept a single string or a list:
+
+```yaml
+action:
+  add_label: ["Work", "Priority"]
+  remove_label: ["Pending", "Review"]
+```
 
 ## Chains and Jumps
 
@@ -202,6 +232,60 @@ For emails that don't match simple rules, use LLM classification:
 ```
 
 The LLM returns a category, which is mapped to an action via `routes`.
+
+### Classification Prompts
+
+Prompts are versioned and configurable. The built-in `v1` prompt categorizes emails into:
+- `automated_noise` - GitHub notifications, service alerts, marketing
+- `human_request` - Personal emails requiring response
+- `action_item` - Has deadline (invoices, bills, renewals)
+- `wrong_email` - Misdirected mail
+- `subscription` - Newsletters, recurring service emails
+- `school` - Kids' school communications
+
+You can override or add prompts in your rules file:
+
+```yaml
+version: 1
+label_prefix: "Cortex"
+
+prompts:
+  v1:
+    # Override categories for the default prompt
+    categories:
+      - automated_noise
+      - human_request
+      - urgent
+      - newsletter
+
+  v2:
+    # Define a completely custom prompt
+    template: |
+      Classify this email for a busy professional.
+      Categories: {categories}
+      From: {from_addr}
+      Subject: {subject}
+      Body: {body_preview}
+      Respond with JSON, for example: {{"category": "priority", "confidence": 0.9}}
+    categories:
+      - priority
+      - delegate
+      - archive
+    model: "llama3.2:3b"
+
+chains:
+  main:
+    - llm:
+        prompt_version: "v2"  # Use custom prompt
+      routes:
+        priority:
+          label: "Priority"
+          star: true
+        delegate:
+          label: "Delegate"
+        archive:
+          archive: true
+```
 
 ## Intent Matching
 

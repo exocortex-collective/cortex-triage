@@ -24,7 +24,7 @@ def sample_email() -> Email:
         id=1,
         gmail_id="abc123",
         from_addr="sender@example.com",
-        to_addr="recipient@example.com",
+        to_addrs=["recipient@example.com"],
         subject="Test Subject",
         body="This is the email body",
         has_attachment=False,
@@ -125,7 +125,7 @@ class TestMatchesCondition:
             id=1,
             gmail_id="abc123",
             from_addr="sender@example.com",
-            to_addr="recipient@example.com",
+            to_addrs=["recipient@example.com"],
             subject="Test",
             body=None,
         )
@@ -330,7 +330,7 @@ class TestSelfNoteChain:
             id=1,
             gmail_id="abc123",
             from_addr="me@example.com",
-            to_addr="me@example.com",
+            to_addrs=["me@example.com"],
             subject="Some note to myself",
         )
         config = RulesConfig(
@@ -339,7 +339,7 @@ class TestSelfNoteChain:
                     Rule(
                         match=MatchCondition(
                             from_addr="me@example.com",
-                            to_addr="me@example.com",
+                            to_addrs=["me@example.com"],
                         ),
                         jump="self_note",
                     ),
@@ -373,7 +373,7 @@ class TestSelfNoteChain:
             id=1,
             gmail_id="abc123",
             from_addr="me@example.com",
-            to_addr="me@example.com",
+            to_addrs=["me@example.com"],
             subject="archive this article",
         )
         config = RulesConfig(
@@ -382,7 +382,7 @@ class TestSelfNoteChain:
                     Rule(
                         match=MatchCondition(
                             from_addr="me@example.com",
-                            to_addr="me@example.com",
+                            to_addrs=["me@example.com"],
                         ),
                         jump="self_note",
                     ),
@@ -418,7 +418,7 @@ class MockLLMClient:
         self.intent_responses = intent_responses or {}
         self.classify_response = classify_response or ("unknown", 0.5, "default")
         self.intent_calls: list[tuple[str, str, str]] = []
-        self.classify_calls: list[tuple[str, str, str, str, str]] = []
+        self.classify_calls: list[tuple[str, str]] = []
 
     def check_intent(self, subject: str, prompt: str, model: str) -> bool:
         self.intent_calls.append((subject, prompt, model))
@@ -428,10 +428,8 @@ class MockLLMClient:
                 return value
         return False
 
-    def classify(
-        self, from_addr: str, subject: str, body: str, model: str, prompt_version: str
-    ) -> tuple[str, float, str]:
-        self.classify_calls.append((from_addr, subject, body, model, prompt_version))
+    def classify(self, prompt: str, model: str) -> tuple[str, float, str]:
+        self.classify_calls.append((prompt, model))
         return self.classify_response
 
 
@@ -444,7 +442,7 @@ class TestLLMMatching:
             id=1,
             gmail_id="abc123",
             from_addr="me@example.com",
-            to_addr="me@example.com",
+            to_addrs=["me@example.com"],
             subject="archive this article",
         )
         condition = MatchCondition(subject_intent="archive_request")
@@ -468,7 +466,7 @@ class TestLLMMatching:
             id=1,
             gmail_id="abc123",
             from_addr="me@example.com",
-            to_addr="me@example.com",
+            to_addrs=["me@example.com"],
             subject="random email subject",
         )
         condition = MatchCondition(subject_intent="archive_request")
@@ -490,7 +488,7 @@ class TestLLMMatching:
             id=1,
             gmail_id="abc123",
             from_addr="me@example.com",
-            to_addr="me@example.com",
+            to_addrs=["me@example.com"],
             subject="save this for later",
         )
         condition = MatchCondition(
@@ -512,7 +510,7 @@ class TestLLMMatching:
             id=1,
             gmail_id="abc123",
             from_addr="me@example.com",
-            to_addr="me@example.com",
+            to_addrs=["me@example.com"],
             subject="archive this",
         )
         condition = MatchCondition(subject_intent="archive_request")
@@ -528,7 +526,7 @@ class TestLLMMatching:
             id=1,
             gmail_id="abc123",
             from_addr="me@example.com",
-            to_addr="me@example.com",
+            to_addrs=["me@example.com"],
             subject="archive this",
         )
         condition = MatchCondition(subject_intent="nonexistent_intent")
@@ -548,7 +546,7 @@ class TestLLMClassification:
             id=1,
             gmail_id="abc123",
             from_addr="sender@example.com",
-            to_addr="recipient@example.com",
+            to_addrs=["recipient@example.com"],
             subject="Please respond to this",
             body="Important message",
         )
@@ -585,7 +583,7 @@ class TestLLMClassification:
             id=1,
             gmail_id="abc123",
             from_addr="sender@example.com",
-            to_addr="recipient@example.com",
+            to_addrs=["recipient@example.com"],
             subject="Test",
         )
         config = RulesConfig(
@@ -620,7 +618,7 @@ class TestLLMClassification:
             id=1,
             gmail_id="abc123",
             from_addr="sender@example.com",
-            to_addr="recipient@example.com",
+            to_addrs=["recipient@example.com"],
             subject="Test",
         )
         config = RulesConfig(
@@ -656,7 +654,7 @@ class TestListFields:
             id=1,
             gmail_id="abc123",
             from_addr="newsletter@foo.com",
-            to_addr="me@example.com",
+            to_addrs=["me@example.com"],
             subject="Weekly digest",
         )
         condition = MatchCondition(
@@ -671,7 +669,7 @@ class TestListFields:
             id=1,
             gmail_id="abc123",
             from_addr="random@other.com",
-            to_addr="me@example.com",
+            to_addrs=["me@example.com"],
             subject="Hello",
         )
         condition = MatchCondition(from_addr=["newsletter@foo.com", "deals@bar.com"])
@@ -684,7 +682,7 @@ class TestListFields:
             id=1,
             gmail_id="abc123",
             from_addr="news@mailchimp.com",
-            to_addr="me@example.com",
+            to_addrs=["me@example.com"],
             subject="Campaign update",
         )
         condition = MatchCondition(
@@ -699,7 +697,7 @@ class TestListFields:
             id=1,
             gmail_id="abc123",
             from_addr="sender@example.com",
-            to_addr="work@mycompany.com",
+            to_addrs=["work@mycompany.com"],
             subject="Meeting",
         )
         condition = MatchCondition(to_addr=["personal@gmail.com", "work@mycompany.com"])
@@ -712,7 +710,7 @@ class TestListFields:
             id=1,
             gmail_id="abc123",
             from_addr="alerts@github.com",
-            to_addr="me@example.com",
+            to_addrs=["me@example.com"],
             subject="[Bug] Application crashes on startup",
         )
         condition = MatchCondition(
@@ -727,7 +725,7 @@ class TestListFields:
             id=1,
             gmail_id="abc123",
             from_addr="alerts@github.com",
-            to_addr="me@example.com",
+            to_addrs=["me@example.com"],
             subject="[Bug] Crash in module X",
         )
         # Must be from github AND subject contains bug
@@ -743,7 +741,7 @@ class TestListFields:
             id=2,
             gmail_id="def456",
             from_addr="alerts@bitbucket.com",
-            to_addr="me@example.com",
+            to_addrs=["me@example.com"],
             subject="[Bug] Another issue",
         )
         assert matches_condition(condition, email2) is False
@@ -758,7 +756,7 @@ class TestCompoundConditions:
             id=1,
             gmail_id="abc123",
             from_addr="news@mailchimp.com",
-            to_addr="me@example.com",
+            to_addrs=["me@example.com"],
             subject="Newsletter",
         )
         condition = MatchCondition(
@@ -777,7 +775,7 @@ class TestCompoundConditions:
             id=1,
             gmail_id="abc123",
             from_addr="campaign@sendgrid.net",
-            to_addr="me@example.com",
+            to_addrs=["me@example.com"],
             subject="Promo",
         )
         condition = MatchCondition(
@@ -796,7 +794,7 @@ class TestCompoundConditions:
             id=1,
             gmail_id="abc123",
             from_addr="friend@personal.com",
-            to_addr="me@example.com",
+            to_addrs=["me@example.com"],
             subject="Hello",
         )
         condition = MatchCondition(
@@ -814,7 +812,7 @@ class TestCompoundConditions:
             id=1,
             gmail_id="abc123",
             from_addr="alerts@github.com",
-            to_addr="me@example.com",
+            to_addrs=["me@example.com"],
             subject="[Bug] Critical issue in production",
         )
         condition = MatchCondition(
@@ -833,7 +831,7 @@ class TestCompoundConditions:
             id=1,
             gmail_id="abc123",
             from_addr="alerts@github.com",
-            to_addr="me@example.com",
+            to_addrs=["me@example.com"],
             subject="[Bug] Minor issue",
         )
         condition = MatchCondition(
@@ -852,7 +850,7 @@ class TestCompoundConditions:
             id=1,
             gmail_id="abc123",
             from_addr="alerts@github.com",
-            to_addr="me@example.com",
+            to_addrs=["me@example.com"],
             subject="[Bug] Issue in repo",
         )
         # Must be from github AND (subject contains bug OR issue)
@@ -871,7 +869,7 @@ class TestCompoundConditions:
             id=2,
             gmail_id="def456",
             from_addr="alerts@gitlab.com",
-            to_addr="me@example.com",
+            to_addrs=["me@example.com"],
             subject="[Bug] Issue",
         )
         assert matches_condition(condition, email2) is False
@@ -882,7 +880,7 @@ class TestCompoundConditions:
             id=1,
             gmail_id="abc123",
             from_addr="alerts@github.com",
-            to_addr="dev@mycompany.com",
+            to_addrs=["dev@mycompany.com"],
             subject="[Bug] Critical failure",
         )
         # (from github OR gitlab) AND (subject has bug AND critical)
@@ -904,7 +902,7 @@ class TestCompoundConditions:
             id=2,
             gmail_id="def456",
             from_addr="alerts@github.com",
-            to_addr="dev@mycompany.com",
+            to_addrs=["dev@mycompany.com"],
             subject="[Bug] Minor issue",
         )
         assert matches_condition(condition, email2) is False

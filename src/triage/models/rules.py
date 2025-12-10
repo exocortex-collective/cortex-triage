@@ -102,12 +102,64 @@ class Action(BaseModel):
 
     Triage handles inbox management only. Workflow dispatch happens via the
     actions service which watches for Cortex/* label events.
+
+    Labels:
+    - label: Gets prefixed with label_prefix (e.g., "Todo" -> "Cortex/Todo")
+    - add_label: Applied as-is, no prefix (e.g., "Work/Projects")
+    - remove_label: Removed as-is, no prefix
     """
 
-    label: str | None = None
+    label: str | None = None  # Auto-prefixed with label_prefix
+    add_label: str | list[str] | None = None  # Raw label(s), no prefix
+    remove_label: str | list[str] | None = None  # Raw label(s) to remove
     archive: bool | None = None
     mark_read: bool | None = None
     star: bool | None = None
+
+
+class ClassificationPrompt(BaseModel):
+    """A versioned classification prompt template."""
+
+    template: str
+    categories: list[str]
+    model: str = "qwen2.5:7b"
+
+
+# Built-in classification prompts as raw dicts (single source of truth)
+# Used by both _default_prompts() and load_rules() for merging
+BUILTIN_PROMPTS_DATA: dict[str, dict[str, Any]] = {
+    "v1": {
+        "template": """You are categorizing emails for a personal Gmail inbox.
+
+Categories:
+{categories}
+
+Email:
+From: {from_addr}
+Subject: {subject}
+Body preview: {body_preview}
+
+Respond with JSON only, for example:
+{{"category": "human_request", "confidence": 0.85, "reasoning": "..."}}""",
+        "categories": [
+            "automated_noise",
+            "human_request",
+            "action_item",
+            "wrong_email",
+            "subscription",
+            "school",
+        ],
+        "model": "qwen2.5:7b",
+    },
+}
+
+
+def _default_prompts() -> dict[str, ClassificationPrompt]:
+    """Return default prompts dict."""
+    return {
+        version: ClassificationPrompt.model_validate(data)
+        for version, data in BUILTIN_PROMPTS_DATA.items()
+    }
 
 
 class LLMConfig(BaseModel):
@@ -155,6 +207,7 @@ class RulesConfig(BaseModel):
     version: int = 1
     label_prefix: str = "Cortex"
     intents: dict[str, IntentConfig] = Field(default_factory=dict)
+    prompts: dict[str, ClassificationPrompt] = Field(default_factory=_default_prompts)
     chains: dict[str, list[Rule]] = Field(default_factory=dict)
 
 
@@ -164,7 +217,7 @@ class Email(BaseModel):
     id: int
     gmail_id: str
     from_addr: str
-    to_addr: str
+    to_addrs: list[str]  # All recipient addresses
     subject: str
     body: str | None = None
     has_attachment: bool = False
