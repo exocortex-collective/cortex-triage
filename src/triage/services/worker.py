@@ -15,6 +15,7 @@ from typing import Any
 
 import httpx
 import psycopg2
+from googleapiclient.errors import HttpError
 from psycopg2.extras import Json
 from psycopg2.pool import SimpleConnectionPool
 
@@ -75,8 +76,16 @@ class OllamaClient:
             result = response.json()
             answer: str = result.get("response", "").strip().lower()
             return answer == "yes"
+        except httpx.RequestError as e:
+            logger.error(f"Ollama intent check network error: {e}")
+            return False
+        except httpx.HTTPStatusError as e:
+            logger.error(
+                f"Ollama intent check HTTP error {e.response.status_code}: {e}"
+            )
+            return False
         except Exception as e:
-            logger.error(f"Ollama intent check failed: {e}")
+            logger.error(f"Ollama intent check failed unexpectedly: {e}")
             return False
 
     def classify(
@@ -120,9 +129,19 @@ Respond with JSON only:
             result = response.json()
             text = result.get("response", "{}")
             data = json.loads(text)
+
+            # Safe float conversion for confidence
+            try:
+                confidence = float(data.get("confidence", 0.5))
+            except (ValueError, TypeError):
+                logger.warning(
+                    f"Invalid confidence value from LLM: {data.get('confidence')}"
+                )
+                confidence = 0.5
+
             return (
                 data.get("category", "unknown"),
-                float(data.get("confidence", 0.5)),
+                confidence,
                 data.get("reasoning", ""),
             )
         except httpx.RequestError as e:
@@ -191,6 +210,12 @@ class GmailClient:
 
             logger.debug(f"Applied label {label_name} to {gmail_id}")
             return True
+        except HttpError as e:
+            logger.error(
+                f"Gmail API error applying label {label_name} to {gmail_id}: "
+                f"HTTP {e.resp.status} - {e.reason}"
+            )
+            return False
         except Exception as e:
             logger.error(f"Failed to apply label {label_name} to {gmail_id}: {e}")
             return False
@@ -206,6 +231,11 @@ class GmailClient:
             ).execute()
             logger.debug(f"Archived {gmail_id}")
             return True
+        except HttpError as e:
+            logger.error(
+                f"Gmail API error archiving {gmail_id}: HTTP {e.resp.status} - {e.reason}"
+            )
+            return False
         except Exception as e:
             logger.error(f"Failed to archive {gmail_id}: {e}")
             return False
@@ -221,6 +251,12 @@ class GmailClient:
             ).execute()
             logger.debug(f"Marked read {gmail_id}")
             return True
+        except HttpError as e:
+            logger.error(
+                f"Gmail API error marking read {gmail_id}: "
+                f"HTTP {e.resp.status} - {e.reason}"
+            )
+            return False
         except Exception as e:
             logger.error(f"Failed to mark read {gmail_id}: {e}")
             return False
@@ -236,6 +272,11 @@ class GmailClient:
             ).execute()
             logger.debug(f"Starred {gmail_id}")
             return True
+        except HttpError as e:
+            logger.error(
+                f"Gmail API error starring {gmail_id}: HTTP {e.resp.status} - {e.reason}"
+            )
+            return False
         except Exception as e:
             logger.error(f"Failed to star {gmail_id}: {e}")
             return False
@@ -269,6 +310,12 @@ class GmailClient:
             # Add to cache
             self._label_cache[label_name] = created_id
             return created_id
+        except HttpError as e:
+            logger.error(
+                f"Gmail API error creating label {label_name}: "
+                f"HTTP {e.resp.status} - {e.reason}"
+            )
+            return None
         except Exception as e:
             logger.error(f"Failed to get/create label {label_name}: {e}")
             return None
@@ -397,14 +444,14 @@ class TriageWorker:
             )
             row = cur.fetchone()
             if row:
-                # to_addrs is an array, use first one
-                to_addr = row[3][0] if row[3] else ""
+                # to_addrs is an array from the DB
+                to_addrs = row[3] if row[3] else []
                 has_attachment: bool = row[6] if row[6] is not None else False
                 return Email(
                     id=row[0],
                     gmail_id=row[1],
                     from_addr=row[2] or "",
-                    to_addr=to_addr,
+                    to_addrs=to_addrs,
                     subject=row[4] or "",
                     body=row[5],
                     has_attachment=has_attachment,

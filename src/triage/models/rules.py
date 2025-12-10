@@ -164,7 +164,7 @@ class Email(BaseModel):
     id: int
     gmail_id: str
     from_addr: str
-    to_addr: str
+    to_addrs: list[str]  # All recipient addresses
     subject: str
     body: str | None = None
     has_attachment: bool = False
