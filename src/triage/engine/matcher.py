@@ -133,44 +133,45 @@ def matches_condition(
     if from_addrs and not any(from_addr_norm == _normalize(a) for a in from_addrs):
         return False
 
-    # Exact to match (any condition addr matches any email recipient)
+    # Exact to match - use set intersection for O(N+M) instead of O(N*M)
     cond_to_addrs = _to_list(condition.to_addr)
-    if cond_to_addrs and not any(
-        email_to == _normalize(cond_to)
-        for email_to in to_addrs_norm
-        for cond_to in cond_to_addrs
-    ):
-        return False
+    if cond_to_addrs:
+        cond_addrs_set = {_normalize(addr) for addr in cond_to_addrs}
+        if not set(to_addrs_norm).intersection(cond_addrs_set):
+            return False
 
-    # Glob patterns (any in list)
+    # Glob patterns (any in list) - pre-normalize globs
     from_globs = _to_list(condition.from_glob)
-    if from_globs and not any(
-        fnmatch.fnmatch(from_addr_norm, _normalize(g)) for g in from_globs
-    ):
-        return False
+    if from_globs:
+        normalized_globs = [_normalize(g) for g in from_globs]
+        if not any(fnmatch.fnmatch(from_addr_norm, g) for g in normalized_globs):
+            return False
 
-    # To glob (any pattern matches any recipient)
+    # To glob (any pattern matches any recipient) - pre-normalize globs
     to_globs = _to_list(condition.to_glob)
-    if to_globs and not any(
-        fnmatch.fnmatch(email_to, _normalize(g))
-        for email_to in to_addrs_norm
-        for g in to_globs
-    ):
-        return False
+    if to_globs:
+        normalized_globs = [_normalize(g) for g in to_globs]
+        if not any(
+            any(fnmatch.fnmatch(email_to, g) for g in normalized_globs)
+            for email_to in to_addrs_norm
+        ):
+            return False
 
-    # Contains (any needle in list)
+    # Contains (any needle in list) - pre-normalize needles
     from_contains = _to_list(condition.from_contains)
-    if from_contains and not any(
-        _normalize(n) in from_addr_norm for n in from_contains
-    ):
-        return False
+    if from_contains:
+        norm_contains = [_normalize(n) for n in from_contains]
+        if not any(n in from_addr_norm for n in norm_contains):
+            return False
 
-    # To contains (any needle in any recipient)
+    # To contains (any needle in any recipient) - pre-normalize needles
     to_contains = _to_list(condition.to_contains)
-    if to_contains and not any(
-        _normalize(n) in email_to for email_to in to_addrs_norm for n in to_contains
-    ):
-        return False
+    if to_contains:
+        norm_contains = [_normalize(n) for n in to_contains]
+        if not any(
+            any(n in email_to for n in norm_contains) for email_to in to_addrs_norm
+        ):
+            return False
 
     subject_contains = _to_list(condition.subject_contains)
     if subject_contains and not any(
