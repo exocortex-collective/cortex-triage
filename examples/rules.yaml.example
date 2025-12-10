@@ -1,0 +1,111 @@
+# Triage Rules Configuration
+# Copy this file to your config location and customize for your use case.
+# Set RULES_PATH environment variable to point to your rules file.
+#
+# Matching rules:
+# - All fields in a match block are ANDed together
+# - Within a field, lists are ORed (any value matches)
+# - Use any_of/all_of for complex compound conditions
+version: 1
+label_prefix: "Cortex"
+
+chains:
+  main:
+    # Self-to-self emails get special handling
+    # Replace with your own email address
+    - match:
+        from: "you@example.com"
+        to: "you@example.com"
+      jump: self_note
+
+    # GitHub/GitLab bugs and issues get starred
+    # Example: list of globs (OR) combined with subject keywords (AND)
+    - match:
+        from_glob: ["*@github.com", "*@gitlab.com"]
+        subject_contains: ["bug", "issue", "error", "failed"]
+      action:
+        label: "DevOps/Issues"
+        star: true
+
+    # Other GitHub/GitLab noise - archive silently
+    - match:
+        from_glob: ["*@github.com", "*@gitlab.com"]
+      action:
+        label: "Automated/DevOps"
+        archive: true
+        mark_read: true
+
+    # Newsletter domains - using list of globs
+    - match:
+        from_glob:
+          - "*@mailchimp.com"
+          - "*@sendgrid.net"
+          - "*@mail.beehiiv.com"
+          - "*@substack.com"
+      action:
+        label: "Commercial/Newsletter"
+        archive: true
+
+    # Social media noise
+    - match:
+        from_glob: ["*@linkedin.com", "*@twitter.com", "*@facebookmail.com"]
+      action:
+        label: "Automated/Social"
+        archive: true
+
+    # Example: any_of for mixing different condition types
+    # Match emails that are either from specific addresses OR match a pattern
+    - match:
+        any_of:
+          - from_addr: "important@partner.com"
+          - from_glob: "*@vip-client.com"
+          - subject_contains: "URGENT"
+      action:
+        label: "Priority"
+        star: true
+
+    # Fallback: LLM classification
+    - match: {}
+      jump: llm_classify
+
+  self_note:
+    # Archive workflow for URLs - label triggers actions service
+    - match:
+        subject_intent: "archive_request"
+      action:
+        label: "Archiver"
+
+    # Todo items - label triggers actions service → n8n webhook
+    - match:
+        subject_intent: "todo_request"
+      action:
+        label: "Todo"
+
+    # Unmatched self-notes
+    - match: {}
+      action:
+        label: "Self-Note"
+
+  llm_classify:
+    # LLM classification with routes
+    - llm:
+        model: "qwen2.5:7b"
+        prompt_version: "v1"
+      routes:
+        human_request:
+          label: "Human/NeedsResponse"
+          star: true
+        action_item:
+          label: "Action/Required"
+          star: true
+        wrong_email:
+          label: "WrongEmail"
+          archive: true
+        subscription:
+          label: "Commercial/Subscription"
+        school:
+          label: "School"
+        automated_noise:
+          label: "Automated"
+          archive: true
+          mark_read: true
