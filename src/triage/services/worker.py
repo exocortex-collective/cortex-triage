@@ -233,7 +233,8 @@ class GmailClient:
             return True
         except HttpError as e:
             logger.error(
-                f"Gmail API error archiving {gmail_id}: HTTP {e.resp.status} - {e.reason}"
+                f"Gmail API error archiving {gmail_id}: "
+                f"HTTP {e.resp.status} - {e.reason}"
             )
             return False
         except Exception as e:
@@ -274,7 +275,8 @@ class GmailClient:
             return True
         except HttpError as e:
             logger.error(
-                f"Gmail API error starring {gmail_id}: HTTP {e.resp.status} - {e.reason}"
+                f"Gmail API error starring {gmail_id}: "
+                f"HTTP {e.resp.status} - {e.reason}"
             )
             return False
         except Exception as e:
