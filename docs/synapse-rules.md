@@ -266,7 +266,7 @@ prompts:
       From: {from_addr}
       Subject: {subject}
       Body: {body_preview}
-      Respond with JSON: {{"category": "...", "confidence": 0.0-1.0}}
+      Respond with JSON, for example: {{"category": "priority", "confidence": 0.9}}
     categories:
       - priority
       - delegate

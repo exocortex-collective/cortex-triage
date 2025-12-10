@@ -139,8 +139,8 @@ From: {from_addr}
 Subject: {subject}
 Body preview: {body_preview}
 
-Respond with JSON only:
-{{"category": "...", "confidence": 0.0-1.0, "reasoning": "brief explanation"}}""",
+Respond with JSON only, for example:
+{{"category": "human_request", "confidence": 0.85, "reasoning": "..."}}""",
         "categories": [
             "automated_noise",
             "human_request",

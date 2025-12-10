@@ -340,6 +340,17 @@ class TriageWorker:
         self.running = True
         self._pool: SimpleConnectionPool | None = None
 
+    def stop(self) -> None:
+        """Signal the worker to stop."""
+        self.running = False
+
+    def close(self) -> None:
+        """Close resources like the database connection pool."""
+        if self._pool:
+            self._pool.closeall()
+            self._pool = None
+            logger.info("Database connection pool closed")
+
     def _get_pool(self) -> SimpleConnectionPool:
         """Get or create connection pool."""
         if self._pool is None:
@@ -484,6 +495,14 @@ class TriageWorker:
             logger.warning(f"Failed to fetch body from API for {gmail_id}: {e}")
         return None
 
+    def _labels_to_list(self, labels: str | list[str] | None) -> list[str]:
+        """Convert a string or list of strings to a list."""
+        if not labels:
+            return []
+        if isinstance(labels, str):
+            return [labels]
+        return labels
+
     def _execute_action(self, action: Action, gmail_id: str) -> bool:
         """Execute an action on an email. Returns True if all actions succeeded."""
         success = True
@@ -493,26 +512,14 @@ class TriageWorker:
             success = False
 
         # Raw labels to add (no prefix)
-        if action.add_label:
-            labels = (
-                [action.add_label]
-                if isinstance(action.add_label, str)
-                else action.add_label
-            )
-            for label in labels:
-                if not self.gmail.apply_label(gmail_id, label):
-                    success = False
+        for label in self._labels_to_list(action.add_label):
+            if not self.gmail.apply_label(gmail_id, label):
+                success = False
 
         # Raw labels to remove (no prefix)
-        if action.remove_label:
-            labels = (
-                [action.remove_label]
-                if isinstance(action.remove_label, str)
-                else action.remove_label
-            )
-            for label in labels:
-                if not self.gmail.remove_label(gmail_id, label):
-                    success = False
+        for label in self._labels_to_list(action.remove_label):
+            if not self.gmail.remove_label(gmail_id, label):
+                success = False
 
         if action.archive and not self.gmail.archive(gmail_id):
             success = False
@@ -706,10 +713,6 @@ class TriageWorker:
         )
         return total_processed, total_failed
 
-    def stop(self) -> None:
-        """Signal the worker to stop."""
-        self.running = False
-
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Triage worker service")
@@ -780,11 +783,14 @@ def main() -> None:
     signal.signal(signal.SIGTERM, signal_handler)
     signal.signal(signal.SIGINT, signal_handler)
 
-    if args.once:
-        processed, failed = worker.run_once()
-        sys.exit(0 if failed == 0 else 1)
-    else:
-        worker.run()
+    try:
+        if args.once:
+            processed, failed = worker.run_once()
+            sys.exit(0 if failed == 0 else 1)
+        else:
+            worker.run()
+    finally:
+        worker.close()
 
 
 if __name__ == "__main__":
