@@ -102,12 +102,18 @@ def validate_rules(config: RulesConfig) -> list[str]:
 
             # Validate regex patterns
             if rule.match.subject_regex:
-                try:
-                    re.compile(rule.match.subject_regex)
-                except re.error as e:
-                    errors.append(
-                        f"Chain '{chain_name}' rule {i}: "
-                        f"invalid subject_regex '{rule.match.subject_regex}': {e}"
-                    )
+                patterns = (
+                    [rule.match.subject_regex]
+                    if isinstance(rule.match.subject_regex, str)
+                    else rule.match.subject_regex
+                )
+                for pattern in patterns:
+                    try:
+                        re.compile(pattern)
+                    except re.error as e:
+                        errors.append(
+                            f"Chain '{chain_name}' rule {i}: "
+                            f"invalid subject_regex '{pattern}': {e}"
+                        )
 
     return errors

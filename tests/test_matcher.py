@@ -645,3 +645,280 @@ class TestLLMClassification:
         assert result.matched
         assert result.action is not None
         assert result.action.label == "Cortex/Fallback"
+
+
+class TestListFields:
+    """Tests for list-based field matching (OR within field)."""
+
+    def test_from_addr_list_matches_any(self) -> None:
+        """Test that from_addr list matches any address."""
+        email = Email(
+            id=1,
+            gmail_id="abc123",
+            from_addr="newsletter@foo.com",
+            to_addr="me@example.com",
+            subject="Weekly digest",
+        )
+        condition = MatchCondition(
+            from_addr=["newsletter@foo.com", "deals@bar.com", "promo@baz.com"]
+        )
+
+        assert matches_condition(condition, email) is True
+
+    def test_from_addr_list_no_match(self) -> None:
+        """Test that from_addr list fails when no address matches."""
+        email = Email(
+            id=1,
+            gmail_id="abc123",
+            from_addr="random@other.com",
+            to_addr="me@example.com",
+            subject="Hello",
+        )
+        condition = MatchCondition(from_addr=["newsletter@foo.com", "deals@bar.com"])
+
+        assert matches_condition(condition, email) is False
+
+    def test_from_glob_list_matches_any(self) -> None:
+        """Test that from_glob list matches any pattern."""
+        email = Email(
+            id=1,
+            gmail_id="abc123",
+            from_addr="news@mailchimp.com",
+            to_addr="me@example.com",
+            subject="Campaign update",
+        )
+        condition = MatchCondition(
+            from_glob=["*@mailchimp.com", "*@sendgrid.net", "*@constantcontact.com"]
+        )
+
+        assert matches_condition(condition, email) is True
+
+    def test_to_addr_list(self) -> None:
+        """Test to_addr with list of addresses."""
+        email = Email(
+            id=1,
+            gmail_id="abc123",
+            from_addr="sender@example.com",
+            to_addr="work@mycompany.com",
+            subject="Meeting",
+        )
+        condition = MatchCondition(to_addr=["personal@gmail.com", "work@mycompany.com"])
+
+        assert matches_condition(condition, email) is True
+
+    def test_subject_regex_list_matches_any(self) -> None:
+        """Test that subject_regex list matches any pattern."""
+        email = Email(
+            id=1,
+            gmail_id="abc123",
+            from_addr="alerts@github.com",
+            to_addr="me@example.com",
+            subject="[Bug] Application crashes on startup",
+        )
+        condition = MatchCondition(
+            subject_regex=[r"\[Bug\]", r"\[Critical\]", r"\[Urgent\]"]
+        )
+
+        assert matches_condition(condition, email) is True
+
+    def test_list_with_other_conditions_and(self) -> None:
+        """Test list field combined with other conditions (AND)."""
+        email = Email(
+            id=1,
+            gmail_id="abc123",
+            from_addr="alerts@github.com",
+            to_addr="me@example.com",
+            subject="[Bug] Crash in module X",
+        )
+        # Must be from github AND subject contains bug
+        condition = MatchCondition(
+            from_glob=["*@github.com", "*@gitlab.com"],
+            subject_contains="bug",
+        )
+
+        assert matches_condition(condition, email) is True
+
+        # Different domain - fails the from_glob
+        email2 = Email(
+            id=2,
+            gmail_id="def456",
+            from_addr="alerts@bitbucket.com",
+            to_addr="me@example.com",
+            subject="[Bug] Another issue",
+        )
+        assert matches_condition(condition, email2) is False
+
+
+class TestCompoundConditions:
+    """Tests for any_of and all_of compound conditions."""
+
+    def test_any_of_matches_first(self) -> None:
+        """Test any_of matches when first condition matches."""
+        email = Email(
+            id=1,
+            gmail_id="abc123",
+            from_addr="news@mailchimp.com",
+            to_addr="me@example.com",
+            subject="Newsletter",
+        )
+        condition = MatchCondition(
+            any_of=[
+                MatchCondition(from_glob="*@mailchimp.com"),
+                MatchCondition(from_glob="*@sendgrid.net"),
+                MatchCondition(from_addr="newsletter@example.com"),
+            ]
+        )
+
+        assert matches_condition(condition, email) is True
+
+    def test_any_of_matches_middle(self) -> None:
+        """Test any_of matches when middle condition matches."""
+        email = Email(
+            id=1,
+            gmail_id="abc123",
+            from_addr="campaign@sendgrid.net",
+            to_addr="me@example.com",
+            subject="Promo",
+        )
+        condition = MatchCondition(
+            any_of=[
+                MatchCondition(from_glob="*@mailchimp.com"),
+                MatchCondition(from_glob="*@sendgrid.net"),
+                MatchCondition(from_addr="newsletter@example.com"),
+            ]
+        )
+
+        assert matches_condition(condition, email) is True
+
+    def test_any_of_no_match(self) -> None:
+        """Test any_of fails when no condition matches."""
+        email = Email(
+            id=1,
+            gmail_id="abc123",
+            from_addr="friend@personal.com",
+            to_addr="me@example.com",
+            subject="Hello",
+        )
+        condition = MatchCondition(
+            any_of=[
+                MatchCondition(from_glob="*@mailchimp.com"),
+                MatchCondition(from_glob="*@sendgrid.net"),
+            ]
+        )
+
+        assert matches_condition(condition, email) is False
+
+    def test_all_of_all_match(self) -> None:
+        """Test all_of succeeds when all conditions match."""
+        email = Email(
+            id=1,
+            gmail_id="abc123",
+            from_addr="alerts@github.com",
+            to_addr="me@example.com",
+            subject="[Bug] Critical issue in production",
+        )
+        condition = MatchCondition(
+            all_of=[
+                MatchCondition(from_glob="*@github.com"),
+                MatchCondition(subject_contains="bug"),
+                MatchCondition(subject_contains="critical"),
+            ]
+        )
+
+        assert matches_condition(condition, email) is True
+
+    def test_all_of_one_fails(self) -> None:
+        """Test all_of fails when one condition doesn't match."""
+        email = Email(
+            id=1,
+            gmail_id="abc123",
+            from_addr="alerts@github.com",
+            to_addr="me@example.com",
+            subject="[Bug] Minor issue",
+        )
+        condition = MatchCondition(
+            all_of=[
+                MatchCondition(from_glob="*@github.com"),
+                MatchCondition(subject_contains="bug"),
+                MatchCondition(subject_contains="critical"),  # Not in subject
+            ]
+        )
+
+        assert matches_condition(condition, email) is False
+
+    def test_any_of_with_other_conditions(self) -> None:
+        """Test any_of combined with other field conditions (AND)."""
+        email = Email(
+            id=1,
+            gmail_id="abc123",
+            from_addr="alerts@github.com",
+            to_addr="me@example.com",
+            subject="[Bug] Issue in repo",
+        )
+        # Must be from github AND (subject contains bug OR issue)
+        condition = MatchCondition(
+            from_glob="*@github.com",
+            any_of=[
+                MatchCondition(subject_contains="bug"),
+                MatchCondition(subject_contains="error"),
+            ],
+        )
+
+        assert matches_condition(condition, email) is True
+
+        # Wrong domain - fails the from_glob, even though any_of would match
+        email2 = Email(
+            id=2,
+            gmail_id="def456",
+            from_addr="alerts@gitlab.com",
+            to_addr="me@example.com",
+            subject="[Bug] Issue",
+        )
+        assert matches_condition(condition, email2) is False
+
+    def test_nested_compound_conditions(self) -> None:
+        """Test nested any_of/all_of conditions."""
+        email = Email(
+            id=1,
+            gmail_id="abc123",
+            from_addr="alerts@github.com",
+            to_addr="dev@mycompany.com",
+            subject="[Bug] Critical failure",
+        )
+        # (from github OR gitlab) AND (subject has bug AND critical)
+        condition = MatchCondition(
+            any_of=[
+                MatchCondition(from_glob="*@github.com"),
+                MatchCondition(from_glob="*@gitlab.com"),
+            ],
+            all_of=[
+                MatchCondition(subject_contains="bug"),
+                MatchCondition(subject_contains="critical"),
+            ],
+        )
+
+        assert matches_condition(condition, email) is True
+
+        # From github but missing "critical"
+        email2 = Email(
+            id=2,
+            gmail_id="def456",
+            from_addr="alerts@github.com",
+            to_addr="dev@mycompany.com",
+            subject="[Bug] Minor issue",
+        )
+        assert matches_condition(condition, email2) is False
+
+    def test_empty_any_of_validation(self) -> None:
+        """Test that empty any_of raises validation error."""
+        import pytest
+
+        with pytest.raises(ValueError, match="any_of must contain at least one"):
+            MatchCondition(any_of=[])
+
+    def test_empty_all_of_validation(self) -> None:
+        """Test that empty all_of raises validation error."""
+        import pytest
+
+        with pytest.raises(ValueError, match="all_of must contain at least one"):
+            MatchCondition(all_of=[])

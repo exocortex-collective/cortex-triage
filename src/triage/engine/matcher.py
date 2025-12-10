@@ -71,10 +71,8 @@ def _match_contains(needles: list[str] | str | None, haystack: str) -> bool:
     return any(_normalize(needle) in haystack_lower for needle in needles)
 
 
-def _match_regex(pattern: str | None, value: str) -> bool:
+def _match_regex(pattern: str, value: str) -> bool:
     """Match a regex pattern against a value."""
-    if pattern is None:
-        return False
     try:
         return bool(re.search(pattern, value, re.IGNORECASE))
     except re.error:
@@ -84,6 +82,15 @@ def _match_regex(pattern: str | None, value: str) -> bool:
             exc_info=True,
         )
         return False
+
+
+def _to_list(value: list[str] | str | None) -> list[str]:
+    """Convert a single string or list to a list."""
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [value]
+    return value
 
 
 def _apply_label_prefix(action: Action, prefix: str) -> Action:
@@ -110,6 +117,7 @@ def matches_condition(
     Returns:
         True if all specified conditions match, False otherwise.
         Empty condition (no fields set) matches everything.
+        Within each field, lists are OR (any value matches).
     """
     # Pre-normalize email fields for efficiency
     from_addr_norm = _normalize(email.from_addr)
@@ -117,71 +125,60 @@ def matches_condition(
     subject_norm = _normalize(email.subject)
     body_norm = _normalize(email.body) if email.body else None
 
-    # Check each condition type - all specified must match
+    # Check each condition type - all specified must match (AND)
+    # Within each field, lists are OR (any value matches)
 
-    # Exact from match
-    if condition.from_addr is not None and from_addr_norm != _normalize(
-        condition.from_addr
+    # Exact from match (any in list)
+    from_addrs = _to_list(condition.from_addr)
+    if from_addrs and not any(from_addr_norm == _normalize(a) for a in from_addrs):
+        return False
+
+    # Exact to match (any in list)
+    to_addrs = _to_list(condition.to_addr)
+    if to_addrs and not any(to_addr_norm == _normalize(a) for a in to_addrs):
+        return False
+
+    # Glob patterns (any in list)
+    from_globs = _to_list(condition.from_glob)
+    if from_globs and not any(
+        fnmatch.fnmatch(from_addr_norm, _normalize(g)) for g in from_globs
     ):
         return False
 
-    # Exact to match
-    if condition.to_addr is not None and to_addr_norm != _normalize(condition.to_addr):
-        return False
-
-    # Glob patterns
-    if condition.from_glob is not None and not fnmatch.fnmatch(
-        from_addr_norm, _normalize(condition.from_glob)
+    to_globs = _to_list(condition.to_glob)
+    if to_globs and not any(
+        fnmatch.fnmatch(to_addr_norm, _normalize(g)) for g in to_globs
     ):
         return False
 
-    if condition.to_glob is not None and not fnmatch.fnmatch(
-        to_addr_norm, _normalize(condition.to_glob)
+    # Contains (any needle in list)
+    from_contains = _to_list(condition.from_contains)
+    if from_contains and not any(
+        _normalize(n) in from_addr_norm for n in from_contains
     ):
         return False
 
-    # Contains
-    if condition.from_contains is not None:
-        needles = (
-            [condition.from_contains]
-            if isinstance(condition.from_contains, str)
-            else condition.from_contains
-        )
-        if not any(_normalize(n) in from_addr_norm for n in needles):
-            return False
+    to_contains = _to_list(condition.to_contains)
+    if to_contains and not any(_normalize(n) in to_addr_norm for n in to_contains):
+        return False
 
-    if condition.to_contains is not None:
-        needles = (
-            [condition.to_contains]
-            if isinstance(condition.to_contains, str)
-            else condition.to_contains
-        )
-        if not any(_normalize(n) in to_addr_norm for n in needles):
-            return False
+    subject_contains = _to_list(condition.subject_contains)
+    if subject_contains and not any(
+        _normalize(n) in subject_norm for n in subject_contains
+    ):
+        return False
 
-    if condition.subject_contains is not None:
-        needles = (
-            [condition.subject_contains]
-            if isinstance(condition.subject_contains, str)
-            else condition.subject_contains
-        )
-        if not any(_normalize(n) in subject_norm for n in needles):
-            return False
-
-    if condition.body_contains is not None:
+    body_contains = _to_list(condition.body_contains)
+    if body_contains:
         if body_norm is None:
             return False
-        needles = (
-            [condition.body_contains]
-            if isinstance(condition.body_contains, str)
-            else condition.body_contains
-        )
-        if not any(_normalize(n) in body_norm for n in needles):
+        if not any(_normalize(n) in body_norm for n in body_contains):
             return False
 
-    # Regex
-    if condition.subject_regex is not None and not _match_regex(
-        condition.subject_regex, email.subject
+    # Regex (any pattern in list)
+    subject_regexes = _to_list(condition.subject_regex)
+    if subject_regexes and not any(
+        _match_regex(pattern, email.subject) for pattern in subject_regexes
     ):
         return False
 
@@ -213,6 +210,20 @@ def matches_condition(
 
         if not llm_client.check_intent(email.subject, prompt, model):
             return False
+
+    # Compound conditions
+    # any_of: at least one sub-condition must match (OR)
+    if condition.any_of is not None and not any(
+        matches_condition(sub, email, llm_client, intents) for sub in condition.any_of
+    ):
+        return False
+
+    # all_of: all sub-conditions must match (AND)
+    if condition.all_of is not None:
+        return all(
+            matches_condition(sub, email, llm_client, intents)
+            for sub in condition.all_of
+        )
 
     return True
 
