@@ -12,7 +12,6 @@ class IntentConfig(BaseModel):
 
     prompt: str
     model: str = "qwen2.5:0.5b"
-    threshold: float = 0.8
 
 
 class MatchCondition(BaseModel):

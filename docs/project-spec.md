@@ -180,12 +180,11 @@ self_note:
     action:
       workflow: archiver
 
-  # Or explicit: override model/threshold
+  # Or explicit: override model
   - match:
       subject_intent:
         intent: "archive_request"
         model: "qwen2.5:1.5b"  # override default model
-        threshold: 0.9         # override default threshold
     action:
       workflow: archiver
 
@@ -214,7 +213,6 @@ intents:
       Subject: "{subject}"
       Answer only: yes or no
     model: "qwen2.5:0.5b"
-    threshold: 0.8
 
   todo_request:
     prompt: |
@@ -222,7 +220,6 @@ intents:
       Subject: "{subject}"
       Answer only: yes or no
     model: "qwen2.5:0.5b"
-    threshold: 0.8
 
   question:
     prompt: |
@@ -230,7 +227,6 @@ intents:
       Subject: "{subject}"
       Answer only: yes or no
     model: "qwen2.5:0.5b"
-    threshold: 0.8
 ```
 
 **Override default prompts in rules.yaml:**

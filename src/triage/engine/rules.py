@@ -15,21 +15,18 @@ archive, or bookmark something for later?
 Subject: "{subject}"
 Answer only: yes or no""",
         "model": "qwen2.5:0.5b",
-        "threshold": 0.8,
     },
     "todo_request": {
         "prompt": """Does this email subject indicate a task, reminder, or todo item?
 Subject: "{subject}"
 Answer only: yes or no""",
         "model": "qwen2.5:0.5b",
-        "threshold": 0.8,
     },
     "question": {
         "prompt": """Does this email subject contain a question requiring a response?
 Subject: "{subject}"
 Answer only: yes or no""",
         "model": "qwen2.5:0.5b",
-        "threshold": 0.8,
     },
 }
 

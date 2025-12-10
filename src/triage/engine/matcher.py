@@ -24,8 +24,8 @@ class LLMClient(Protocol):
         """Check if subject matches an intent.
 
         Args:
-            subject: Email subject to check.
-            prompt: Prompt template with {subject} placeholder.
+            subject: Email subject being checked (for logging/context).
+            prompt: The fully formatted prompt string to send to the LLM.
             model: Model name to use.
 
         Returns:
