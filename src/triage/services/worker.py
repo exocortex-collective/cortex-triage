@@ -533,9 +533,7 @@ class TriageWorker:
                         f"rule={result.rule_index}, action={result.action}"
                     )
                 else:
-                    logger.warning(
-                        f"Action failed for {gmail_id}: {result.action}"
-                    )
+                    logger.warning(f"Action failed for {gmail_id}: {result.action}")
             else:
                 logger.info(f"No match for {gmail_id}")
 
