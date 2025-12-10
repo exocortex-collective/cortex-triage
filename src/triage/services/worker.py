@@ -115,13 +115,19 @@ class OllamaClient:
             text = result.get("response", "{}")
             data = json.loads(text)
 
+            # Validate response is a dict
+            if not isinstance(data, dict):
+                logger.error(f"Ollama returned non-dict JSON: {text}")
+                return ("unknown", 0.0, "invalid JSON format")
+
             # Safe float conversion for confidence
+            raw_confidence = data.get("confidence")
             try:
-                confidence = float(data.get("confidence", 0.5))
-            except (ValueError, TypeError):
-                logger.warning(
-                    f"Invalid confidence value from LLM: {data.get('confidence')}"
+                confidence = (
+                    float(raw_confidence) if raw_confidence is not None else 0.5
                 )
+            except (ValueError, TypeError):
+                logger.warning(f"Invalid confidence value from LLM: {raw_confidence}")
                 confidence = 0.5
 
             return (
@@ -299,6 +305,16 @@ class GmailClient:
             self._label_cache[label_name] = created_id
             return created_id
         except HttpError as e:
+            # Handle race condition: another worker created the label first
+            if e.resp.status == 409:
+                logger.info(
+                    f"Label '{label_name}' already exists (race condition), "
+                    "refreshing cache"
+                )
+                self._label_cache.clear()
+                self._ensure_label_cache()
+                return self._label_cache.get(label_name)
+
             logger.error(
                 f"Gmail API error creating label {label_name}: "
                 f"HTTP {e.resp.status} - {e.reason}"
@@ -454,10 +470,16 @@ class TriageWorker:
                 params={"gmail_id": gmail_id},
                 timeout=10.0,
             )
-            if response.status_code == 200:
-                data = response.json()
-                body: str | None = data.get("body_text") or data.get("body_html")
-                return body
+            response.raise_for_status()
+            data = response.json()
+            body: str | None = data.get("body_text") or data.get("body_html")
+            return body
+        except httpx.RequestError as e:
+            logger.warning(f"DuckDB API network error for {gmail_id}: {e}")
+        except httpx.HTTPStatusError as e:
+            logger.warning(
+                f"DuckDB API error for {gmail_id}: " f"HTTP {e.response.status_code}"
+            )
         except Exception as e:
             logger.warning(f"Failed to fetch body from API for {gmail_id}: {e}")
         return None
