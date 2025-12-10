@@ -8,12 +8,15 @@ import os
 import signal
 import sys
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any
 
 import httpx
 import psycopg2
 from psycopg2.extras import Json
+from psycopg2.pool import SimpleConnectionPool
 
 from triage.engine.matcher import evaluate
 from triage.engine.rules import load_rules, validate_rules
@@ -284,100 +287,112 @@ class TriageWorker:
         self.ollama = ollama
         self.gmail = gmail
         self.running = True
-        self._pg_conn: psycopg2.extensions.connection | None = None
+        self._pool: SimpleConnectionPool | None = None
 
-    def _get_pg_conn(self) -> psycopg2.extensions.connection:
-        if self._pg_conn is None or self._pg_conn.closed:
-            self._pg_conn = psycopg2.connect(
+    def _get_pool(self) -> SimpleConnectionPool:
+        """Get or create connection pool."""
+        if self._pool is None:
+            self._pool = SimpleConnectionPool(
+                minconn=1,
+                maxconn=5,
                 host=self.config.postgres_host,
                 port=self.config.postgres_port,
                 dbname=self.config.postgres_db,
                 user=self.config.postgres_user,
                 password=self.config.postgres_password,
             )
-        return self._pg_conn
+        return self._pool
+
+    @contextmanager
+    def _get_conn(self) -> Iterator[psycopg2.extensions.connection]:
+        """Get a connection from the pool, automatically returned when done."""
+        conn = self._get_pool().getconn()
+        try:
+            yield conn
+        finally:
+            self._get_pool().putconn(conn)
 
     def _ensure_schema(self) -> None:
         """Ensure classifications table exists."""
-        conn = self._get_pg_conn()
-        with conn.cursor() as cur:
+        with self._get_conn() as conn, conn.cursor() as cur:
             cur.execute(
                 """
-                CREATE TABLE IF NOT EXISTS classifications (
-                    id BIGSERIAL PRIMARY KEY,
-                    email_id BIGINT NOT NULL,
-                    gmail_id TEXT NOT NULL,
+                    CREATE TABLE IF NOT EXISTS classifications (
+                        id BIGSERIAL PRIMARY KEY,
+                        email_id BIGINT NOT NULL,
+                        gmail_id TEXT NOT NULL,
 
-                    -- Rule matching
-                    matched_chain TEXT,
-                    matched_rule_index INT,
-                    rules_version TEXT,
+                        -- Rule matching
+                        matched_chain TEXT,
+                        matched_rule_index INT,
+                        rules_version TEXT,
 
-                    -- LLM (if used)
-                    llm_category TEXT,
-                    llm_confidence REAL,
-                    llm_reasoning TEXT,
+                        -- LLM (if used)
+                        llm_category TEXT,
+                        llm_confidence REAL,
+                        llm_reasoning TEXT,
 
-                    -- Action taken
-                    action_taken JSONB,
-                    action_executed BOOLEAN DEFAULT FALSE,
+                        -- Action taken
+                        action_taken JSONB,
+                        action_executed BOOLEAN DEFAULT FALSE,
 
-                    classified_at TIMESTAMPTZ DEFAULT NOW()
-                );
+                        classified_at TIMESTAMPTZ DEFAULT NOW()
+                    );
 
-                CREATE INDEX IF NOT EXISTS idx_classifications_email
-                ON classifications(email_id);
+                    CREATE INDEX IF NOT EXISTS idx_classifications_email
+                    ON classifications(email_id);
 
-                CREATE INDEX IF NOT EXISTS idx_classifications_gmail
-                ON classifications(gmail_id);
+                    CREATE INDEX IF NOT EXISTS idx_classifications_gmail
+                    ON classifications(gmail_id);
 
-                CREATE INDEX IF NOT EXISTS idx_classifications_chain
-                ON classifications(matched_chain);
+                    CREATE INDEX IF NOT EXISTS idx_classifications_chain
+                    ON classifications(matched_chain);
 
-                CREATE INDEX IF NOT EXISTS idx_classifications_date
-                ON classifications(classified_at DESC);
-            """
+                    CREATE INDEX IF NOT EXISTS idx_classifications_date
+                    ON classifications(classified_at DESC);
+                """
             )
             conn.commit()
         logger.info("classifications schema ensured")
 
     def _claim_jobs(self, batch_size: int) -> list[dict[str, Any]]:
         """Claim a batch of pending triage jobs."""
-        conn = self._get_pg_conn()
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                UPDATE queue
-                SET status = 'processing', claimed_at = NOW()
-                WHERE id IN (
-                    SELECT id FROM queue
-                    WHERE queue_name = 'triage' AND status = 'pending'
-                    ORDER BY created_at
-                    LIMIT %s
-                    FOR UPDATE SKIP LOCKED
+        with self._get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE queue
+                    SET status = 'processing', claimed_at = NOW()
+                    WHERE id IN (
+                        SELECT id FROM queue
+                        WHERE queue_name = 'triage' AND status = 'pending'
+                        ORDER BY created_at
+                        LIMIT %s
+                        FOR UPDATE SKIP LOCKED
+                    )
+                    RETURNING id, payload
+                """,
+                    (batch_size,),
                 )
-                RETURNING id, payload
-            """,
-                (batch_size,),
-            )
-            jobs = [{"id": row[0], "payload": row[1]} for row in cur.fetchall()]
-            conn.commit()
-        return jobs
+                jobs = [{"id": row[0], "payload": row[1]} for row in cur.fetchall()]
+                conn.commit()
+            return jobs
 
     def _get_email_data(self, gmail_id: str) -> Email | None:
         """Fetch email data from emails_parsed and check for attachments."""
-        conn = self._get_pg_conn()
-        with conn.cursor() as cur:
+        with self._get_conn() as conn, conn.cursor() as cur:
             # Get parsed email data and check if attachments exist
             cur.execute(
                 """
-                SELECT
-                    ep.id, ep.gmail_id, ep.from_addr, ep.to_addrs,
-                    ep.subject, ep.body_text,
-                    EXISTS(SELECT 1 FROM attachments a WHERE a.gmail_id = ep.gmail_id)
-                FROM emails_parsed ep
-                WHERE ep.gmail_id = %s
-            """,
+                    SELECT
+                        ep.id, ep.gmail_id, ep.from_addr, ep.to_addrs,
+                        ep.subject, ep.body_text,
+                        EXISTS(
+                            SELECT 1 FROM attachments a WHERE a.gmail_id = ep.gmail_id
+                        )
+                    FROM emails_parsed ep
+                    WHERE ep.gmail_id = %s
+                """,
                 (gmail_id,),
             )
             row = cur.fetchone()
@@ -437,16 +452,15 @@ class TriageWorker:
         action_executed: bool,
     ) -> None:
         """Store classification result."""
-        conn = self._get_pg_conn()
-        with conn.cursor() as cur:
+        with self._get_conn() as conn, conn.cursor() as cur:
             cur.execute(
                 """
-                INSERT INTO classifications (
-                    email_id, gmail_id, matched_chain, matched_rule_index,
-                    rules_version, llm_category, llm_confidence, llm_reasoning,
-                    action_taken, action_executed
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-            """,
+                    INSERT INTO classifications (
+                        email_id, gmail_id, matched_chain, matched_rule_index,
+                        rules_version, llm_category, llm_confidence, llm_reasoning,
+                        action_taken, action_executed
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """,
                 (
                     email.id,
                     email.gmail_id,
@@ -464,30 +478,28 @@ class TriageWorker:
 
     def _complete_job(self, job_id: int) -> None:
         """Mark job as completed."""
-        conn = self._get_pg_conn()
-        with conn.cursor() as cur:
+        with self._get_conn() as conn, conn.cursor() as cur:
             cur.execute(
                 """
-                UPDATE queue
-                SET status = 'completed', completed_at = NOW()
-                WHERE id = %s
-            """,
+                    UPDATE queue
+                    SET status = 'completed', completed_at = NOW()
+                    WHERE id = %s
+                """,
                 (job_id,),
             )
             conn.commit()
 
     def _fail_job(self, job_id: int, error: str) -> None:
         """Mark job as failed."""
-        conn = self._get_pg_conn()
-        with conn.cursor() as cur:
+        with self._get_conn() as conn, conn.cursor() as cur:
             cur.execute(
                 """
-                UPDATE queue
-                SET status = 'failed',
-                    last_error = %s,
-                    attempts = attempts + 1
-                WHERE id = %s
-            """,
+                    UPDATE queue
+                    SET status = 'failed',
+                        last_error = %s,
+                        attempts = attempts + 1
+                    WHERE id = %s
+                """,
                 (error[:1000], job_id),
             )
             conn.commit()
