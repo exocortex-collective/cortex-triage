@@ -125,7 +125,8 @@ def _is_mostly_links(body: str | None, threshold: float = 0.5) -> bool:
     if not urls:
         return False
 
-    url_length = sum(len(url) for url in urls)
+    # Strip trailing punctuation that's unlikely to be part of URLs
+    url_length = sum(len(url.rstrip(".,;:)")) for url in urls)
 
     # Check if URLs make up more than threshold of content
     return (url_length / content_length) >= threshold
