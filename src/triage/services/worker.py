@@ -830,11 +830,6 @@ class TriageWorker:
             # Evaluate rules
             result = evaluate(self.rules, email, self.ollama)
 
-            # Log decision trace
-            if result.trace:
-                trace_str = "\n".join(result.trace)
-                logger.debug(f"Decision trace for {gmail_id}:\n{trace_str}")
-
             # Execute action if matched
             action_executed = False
             if result.matched and result.action:
@@ -854,7 +849,7 @@ class TriageWorker:
                 # Log trace at info level for debugging
                 if result.trace:
                     trace_str = "\n".join(result.trace)
-                    logger.info(f"Decision trace:\n{trace_str}")
+                    logger.info(f"Decision trace for {gmail_id}:\n{trace_str}")
 
             # Store classification
             self._store_classification(email, result, action_executed)
