@@ -354,9 +354,9 @@ def matches_condition(
 
         category_name, expected_value = condition.email_category.split("/", 1)
 
-        if not category_name:
+        if not category_name or not expected_value:
             log.warning(
-                "Invalid email_category format, category name is empty",
+                "Invalid email_category format, name or value is empty",
                 email_category=condition.email_category,
             )
             return False

@@ -30,6 +30,14 @@ class EmailCategoryConfig(BaseModel):
     model: str = "qwen2.5:0.5b"
     categories: list[str]
 
+    @field_validator("categories")
+    @classmethod
+    def categories_not_empty(cls, v: list[str]) -> list[str]:
+        """Ensure categories list is not empty."""
+        if not v:
+            raise ValueError("categories list must not be empty")
+        return v
+
 
 class MatchCondition(BaseModel):
     """Conditions for matching an email.
