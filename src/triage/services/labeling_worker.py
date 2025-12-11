@@ -401,11 +401,12 @@ class LabelingWorker:
                 continue
 
             remove_label_ids = self._resolve_labels(list(remove_labels), create=False)
-            # remove_label_ids won't be None (create=False skips missing)
+            # remove_label_ids is always a list when create=False (skips missing)
+            assert remove_label_ids is not None  # for type checker
 
             # Execute batch modify
             success = self.gmail.batch_modify(
-                gmail_ids, add_label_ids, remove_label_ids or []
+                gmail_ids, add_label_ids, remove_label_ids
             )
 
             if success:
