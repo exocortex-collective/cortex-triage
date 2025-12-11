@@ -22,7 +22,7 @@ class LLMClient(Protocol):
     """Protocol for LLM client used in intent matching."""
 
     def check_intent(self, subject: str, prompt: str, model: str) -> bool:
-        """Check if subject matches an intent.
+        """Check if subject matches an intent (subject only).
 
         Args:
             subject: Email subject being checked (for logging/context).
@@ -31,6 +31,53 @@ class LLMClient(Protocol):
 
         Returns:
             True if the intent matches, False otherwise.
+        """
+        ...
+
+    def check_email_intent(
+        self,
+        from_addr: str,
+        subject: str,
+        body: str | None,
+        prompt: str,
+        model: str,
+    ) -> bool:
+        """Check if full email matches an intent.
+
+        Args:
+            from_addr: Email sender address.
+            subject: Email subject.
+            body: Email body (may be None).
+            prompt: Prompt template with {from_addr}, {subject}, {body_preview}.
+            model: Model name to use.
+
+        Returns:
+            True if the intent matches, False otherwise.
+        """
+        ...
+
+    def categorize_email(
+        self,
+        from_addr: str,
+        subject: str,
+        body: str | None,
+        prompt: str,
+        model: str,
+        categories: list[str],
+    ) -> str | None:
+        """Categorize an email into one of the predefined categories.
+
+        Args:
+            from_addr: Email sender address.
+            subject: Email subject.
+            body: Email body (may be None).
+            prompt: Prompt template with {from_addr}, {subject},
+                {body_preview}, {categories}.
+            model: Model name to use.
+            categories: List of valid category names.
+
+        Returns:
+            The matched category name, or None if no valid category matched.
         """
         ...
 
@@ -145,6 +192,7 @@ def matches_condition(
     email: Email,
     llm_client: LLMClient | None = None,
     intents: dict | None = None,
+    email_categories: dict | None = None,
 ) -> bool:
     """Check if an email matches a condition.
 
@@ -153,6 +201,7 @@ def matches_condition(
         email: The email to match against.
         llm_client: Optional LLM client for intent matching.
         intents: Intent configurations for intent matching.
+        email_categories: Email category configurations for categorization.
 
     Returns:
         True if all specified conditions match, False otherwise.
@@ -267,17 +316,83 @@ def matches_condition(
         if not llm_client.check_intent(email.subject, prompt, model):
             return False
 
+    # Email intent matching (full email context, requires LLM client)
+    if condition.email_intent is not None:
+        if llm_client is None:
+            return False
+
+        intent_config = condition.email_intent
+        if isinstance(intent_config, str):
+            # Reference to named intent
+            if intents is None or intent_config not in intents:
+                return False
+            cfg = intents[intent_config]
+            prompt = cfg["prompt"]
+            model = cfg["model"]
+        else:
+            # Inline intent config (IntentConfig instance)
+            prompt = intent_config.prompt
+            model = intent_config.model
+
+        if not llm_client.check_email_intent(
+            email.from_addr, email.subject, email.body, prompt, model
+        ):
+            return False
+
+    # Email category matching (multi-class classifier, requires LLM client)
+    if condition.email_category is not None:
+        if llm_client is None:
+            return False
+
+        # Parse "category_name/expected_value" format
+        if "/" not in condition.email_category:
+            log.warning(
+                "Invalid email_category format, expected 'category_name/value'",
+                email_category=condition.email_category,
+            )
+            return False
+
+        category_name, expected_value = condition.email_category.split("/", 1)
+
+        if not category_name or not expected_value:
+            log.warning(
+                "Invalid email_category format, name or value is empty",
+                email_category=condition.email_category,
+            )
+            return False
+
+        if email_categories is None or category_name not in email_categories:
+            log.warning(
+                "Email category not found in config",
+                category_name=category_name,
+            )
+            return False
+
+        cfg = email_categories[category_name]
+        actual_category = llm_client.categorize_email(
+            email.from_addr,
+            email.subject,
+            email.body,
+            cfg["prompt"],
+            cfg["model"],
+            cfg["categories"],
+        )
+
+        if actual_category != expected_value:
+            return False
+
     # Compound conditions
     # any_of: at least one sub-condition must match (OR)
     if condition.any_of is not None and not any(
-        matches_condition(sub, email, llm_client, intents) for sub in condition.any_of
+        matches_condition(sub, email, llm_client, intents, email_categories)
+        for sub in condition.any_of
     ):
         return False
 
     # all_of: all sub-conditions must match (AND)
     if condition.all_of is not None:
         return all(
-            matches_condition(sub, email, llm_client, intents)
+            matches_condition(sub, email, llm_client, intents, email_categories)
             for sub in condition.all_of
         )
 
@@ -291,6 +406,7 @@ def evaluate_chain(
     llm_client: LLMClient | None = None,
     _visited: set[str] | None = None,
     _intents: dict | None = None,
+    _email_categories: dict | None = None,
 ) -> EvaluationResult:
     """Evaluate a chain of rules against an email.
 
@@ -301,6 +417,7 @@ def evaluate_chain(
         llm_client: Optional LLM client for intent/classification.
         _visited: Set of visited chains (for cycle detection).
         _intents: Pre-computed intents dict (for efficiency in recursive calls).
+        _email_categories: Pre-computed email_categories dict.
 
     Returns:
         EvaluationResult with match details and action.
@@ -317,12 +434,17 @@ def evaluate_chain(
     if chain is None:
         return EvaluationResult(matched=False)
 
-    # Use pre-computed intents or compute once
+    # Use pre-computed dicts or compute once
     intents = _intents or {k: v.model_dump() for k, v in config.intents.items()}
+    email_categories = _email_categories or {
+        k: v.model_dump() for k, v in config.email_categories.items()
+    }
 
     for i, rule in enumerate(chain):
         # Check if rule matches
-        if not matches_condition(rule.match, email, llm_client, intents):
+        if not matches_condition(
+            rule.match, email, llm_client, intents, email_categories
+        ):
             continue
 
         # Rule matched!
@@ -330,7 +452,13 @@ def evaluate_chain(
         # Handle jump
         if rule.jump:
             result = evaluate_chain(
-                config, rule.jump, email, llm_client, _visited.copy(), intents
+                config,
+                rule.jump,
+                email,
+                llm_client,
+                _visited.copy(),
+                intents,
+                email_categories,
             )
             if result.matched:
                 return result
@@ -404,6 +532,9 @@ def evaluate(
     Returns:
         EvaluationResult with match details and action.
     """
-    # Pre-compute intents once for all chain evaluations
+    # Pre-compute dicts once for all chain evaluations
     intents = {k: v.model_dump() for k, v in config.intents.items()}
-    return evaluate_chain(config, "main", email, llm_client, None, intents)
+    email_categories = {k: v.model_dump() for k, v in config.email_categories.items()}
+    return evaluate_chain(
+        config, "main", email, llm_client, None, intents, email_categories
+    )
