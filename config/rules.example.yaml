@@ -1,0 +1,105 @@
+# Triage Rules Configuration - Example
+# Copy to rules.yaml and customize for your inbox
+version: 2
+label_prefix: "Cortex"
+
+# Intent definitions for LLM-based matching
+# These can override built-in intents or define new ones
+intents:
+  archive_request:
+    prompt: |
+      This is a self-sent email subject. Does the word "archive" or similar
+      words like "save", "bookmark", or "keep" appear in it, suggesting the
+      sender wants to save something?
+      Subject: "{subject}"
+      Answer only: yes or no
+    model: "gemma3n:e4b"
+
+  todo_request:
+    prompt: |
+      This is a self-sent email subject. Does it suggest a task, reminder,
+      todo item, or something to do later? Look for words like "todo", "task",
+      "reminder", "need to", "don't forget", etc.
+      Subject: "{subject}"
+      Answer only: yes or no
+    model: "gemma3n:e4b"
+
+  meme_or_funny:
+    prompt: |
+      Does this email subject suggest the sender is sharing something funny,
+      a meme, a joke, or humorous content? Look for words like "lol", "haha",
+      "funny", "meme", "look at this", or similar casual language.
+      Subject: "{subject}"
+      Answer only: yes or no
+    model: "gemma3n:e4b"
+
+chains:
+  main:
+    # Self-to-self emails get special handling
+    - match:
+        from: "user@example.com"
+        to: "user@example.com"
+      jump: self_note
+
+    # Family member emails with special filtering
+    - match:
+        from: "family@example.com"
+      jump: family
+
+    # Social media notifications
+    - match:
+        from: "reply@ss.email.nextdoor.com"
+      action:
+        label: "Automated/Social/Nextdoor"
+        archive: true
+
+    # Mailing lists
+    - match:
+        from: "mailinglist@example.org"
+      action:
+        label: "MailingList/Example"
+        archive: true
+
+    # Commercial/Retail - archive
+    - match:
+        from_glob: "*@marketing.example.com"
+      action:
+        label: "Commercial/Retail"
+        archive: true
+
+    # Fallback: uncategorized
+    - match: {}
+      action:
+        label: "Uncategorized"
+
+  self_note:
+    # Archive workflow - uses LLM intent matching
+    - match:
+        subject_intent: "archive_request"
+      action:
+        label: "Archiver"
+
+    # Todo items - uses LLM intent matching
+    - match:
+        subject_intent: "todo_request"
+      action:
+        label: "Todo"
+
+    # Unmatched self-notes
+    - match: {}
+      action:
+        label: "Self-Note"
+
+  family:
+    # Memes or link dumps (e.g., Pinterest shares)
+    - match:
+        any_of:
+          - subject_intent: "meme_or_funny"
+          - body_is_mostly_links: true
+      action:
+        label: "Family/Memes"
+
+    # Regular emails from family
+    - match: {}
+      action:
+        label: "Family"

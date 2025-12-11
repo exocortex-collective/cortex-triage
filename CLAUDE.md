@@ -23,13 +23,22 @@ triage/
 │   ├── intents/            # Built-in intent prompts
 │   └── models/             # Data models
 ├── config/
-│   └── rules.yaml          # Rules configuration
+│   ├── rules.example.yaml  # Example rules (checked in)
+│   └── rules.yaml          # Actual rules (NOT checked in - gitignored)
 ├── tests/
 ├── docs/
 │   └── project-spec.md
 ├── pyproject.toml
 └── Dockerfile
 ```
+
+## Configuration
+
+**IMPORTANT**: `config/rules.yaml` is gitignored and NOT checked into this repo. It contains personal email addresses and filtering rules.
+
+- **Example config**: `config/rules.example.yaml` shows the structure with generic examples
+- **Personal config**: Stored at `~/HomeLab/cortex/triage/rules.yaml` and mounted into containers at runtime
+- For local development, copy `rules.example.yaml` to `config/rules.yaml` and customize
 
 ## Architecture
 

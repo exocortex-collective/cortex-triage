@@ -49,3 +49,4 @@ htmlcov/
 # Data
 *.duckdb
 *.db
+config/rules.yaml
