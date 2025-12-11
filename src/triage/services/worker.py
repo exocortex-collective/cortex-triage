@@ -344,6 +344,31 @@ class TriageWorker:
         """Signal the worker to stop."""
         self.running = False
 
+    def reload_rules(self) -> bool:
+        """Reload rules from config file.
+
+        Returns True if reload succeeded, False otherwise.
+        The old rules remain active if reload fails.
+        """
+        try:
+            new_rules = load_rules(self.config.rules_path)
+            errors = validate_rules(new_rules)
+            if errors:
+                for error in errors:
+                    logger.error(f"Rules validation error: {error}")
+                logger.error("Rules reload failed - keeping existing rules")
+                return False
+
+            self.rules = new_rules
+            logger.info(
+                f"Rules reloaded successfully from {self.config.rules_path} "
+                f"(version {new_rules.version})"
+            )
+            return True
+        except Exception as e:
+            logger.error(f"Failed to reload rules: {e}")
+            return False
+
     def close(self) -> None:
         """Close resources like the database connection pool."""
         if self._pool:
@@ -775,13 +800,18 @@ def main() -> None:
 
     worker = TriageWorker(config, rules, ollama, gmail)
 
-    # Handle signals for graceful shutdown
-    def signal_handler(signum: int, frame: Any) -> None:
+    # Handle signals for graceful shutdown and config reload
+    def shutdown_handler(signum: int, frame: Any) -> None:
         logger.info("Received shutdown signal")
         worker.stop()
 
-    signal.signal(signal.SIGTERM, signal_handler)
-    signal.signal(signal.SIGINT, signal_handler)
+    def reload_handler(signum: int, frame: Any) -> None:
+        logger.info("Received SIGHUP - reloading rules")
+        worker.reload_rules()
+
+    signal.signal(signal.SIGTERM, shutdown_handler)
+    signal.signal(signal.SIGINT, shutdown_handler)
+    signal.signal(signal.SIGHUP, reload_handler)
 
     try:
         if args.once:
