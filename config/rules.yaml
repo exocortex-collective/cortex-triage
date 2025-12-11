@@ -95,15 +95,11 @@ chains:
         label: "Self-Note"
 
   aurelia:
-    # Memes - subject implies funny/meme content
+    # Memes or link dumps (likely Pinterest shares)
     - match:
-        subject_intent: "meme_or_funny"
-      action:
-        label: "Aurelia/Memes"
-
-    # Link dumps - body is mostly URLs (likely Pinterest shares)
-    - match:
-        body_is_mostly_links: true
+        any_of:
+          - subject_intent: "meme_or_funny"
+          - body_is_mostly_links: true
       action:
         label: "Aurelia/Memes"
 

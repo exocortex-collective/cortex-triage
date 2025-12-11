@@ -394,7 +394,7 @@ class TriageWorker:
             )
             return True
         except Exception as e:
-            logger.error(f"Failed to reload rules: {e}")
+            logger.error(f"Failed to reload rules: {e}", exc_info=True)
             return False
 
     def close(self) -> None:
