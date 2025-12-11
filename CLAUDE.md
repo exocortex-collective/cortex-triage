@@ -23,13 +23,22 @@ triage/
 │   ├── intents/            # Built-in intent prompts
 │   └── models/             # Data models
 ├── config/
-│   └── rules.yaml          # Rules configuration
+│   ├── rules.example.yaml  # Example rules (checked in)
+│   └── rules.yaml          # Actual rules (NOT checked in - gitignored)
 ├── tests/
 ├── docs/
 │   └── project-spec.md
 ├── pyproject.toml
 └── Dockerfile
 ```
+
+## Configuration
+
+**IMPORTANT**: `config/rules.yaml` is gitignored and NOT checked into this repo. It contains personal email addresses and filtering rules.
+
+- **Example config**: `config/rules.example.yaml` shows the structure with generic examples
+- **Actual config**: Stored in the homelab repo and mounted at runtime
+- Copy `rules.example.yaml` to `rules.yaml` for local development
 
 ## Architecture
 

@@ -19,11 +19,11 @@ RUN useradd --system --shell /bin/false appuser
 COPY src/triage/__init__.py ./src/triage/__init__.py
 RUN uv sync --frozen --no-dev
 
-# Copy application source
+# Copy application source (config is mounted at runtime, not baked in)
 COPY --chown=appuser:appuser src/ ./src/
-COPY --chown=appuser:appuser config/ ./config/
 
 # Config and secrets will be mounted at runtime
+# Config contains personal rules, secrets contain Gmail tokens
 VOLUME /app/config
 VOLUME /app/secrets
 

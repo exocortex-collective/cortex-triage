@@ -1,5 +1,5 @@
-# Triage Rules Configuration
-# Rule chains for Devon's Gmail inbox
+# Triage Rules Configuration - Example
+# Copy to rules.yaml and customize for your inbox
 version: 2
 label_prefix: "Cortex"
 
@@ -37,41 +37,37 @@ chains:
   main:
     # Self-to-self emails get special handling
     - match:
-        from: "devon.jones@gmail.com"
-        to: "devon.jones@gmail.com"
+        from: "user@example.com"
+        to: "user@example.com"
       jump: self_note
 
-    # Aurelia's emails - daughter sending memes/links
+    # Family member emails with special filtering
     - match:
-        from: "aurelia.ada.jones@gmail.com"
-      jump: aurelia
+        from: "family@example.com"
+      jump: family
 
-    # Nextdoor - social/neighborhood
+    # Social media notifications
     - match:
         from: "reply@ss.email.nextdoor.com"
       action:
         label: "Automated/Social/Nextdoor"
         archive: true
 
-    # Mailing lists with sublabels
+    # Mailing lists
     - match:
-        from: "mythtv-users@mythtv.org"
+        from: "mailinglist@example.org"
       action:
-        label: "MailingList/MythTV"
+        label: "MailingList/Example"
         archive: true
 
     # Commercial/Retail - archive
     - match:
-        from:
-          - "chicos@c.chicos.com"
-          - "newsletter@em.teepublic.com"
-          - "noreply@handandstone.com"
-          - "info@mail.levi.com"
+        from_glob: "*@marketing.example.com"
       action:
         label: "Commercial/Retail"
         archive: true
 
-    # Fallback: no action for now (will add more rules later)
+    # Fallback: uncategorized
     - match: {}
       action:
         label: "Uncategorized"
@@ -94,16 +90,16 @@ chains:
       action:
         label: "Self-Note"
 
-  aurelia:
-    # Memes or link dumps (likely Pinterest shares)
+  family:
+    # Memes or link dumps (e.g., Pinterest shares)
     - match:
         any_of:
           - subject_intent: "meme_or_funny"
           - body_is_mostly_links: true
       action:
-        label: "Aurelia/Memes"
+        label: "Family/Memes"
 
-    # Regular emails from Aurelia
+    # Regular emails from family
     - match: {}
       action:
-        label: "Aurelia"
+        label: "Family"
