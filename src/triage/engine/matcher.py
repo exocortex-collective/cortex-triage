@@ -89,6 +89,50 @@ def _to_list(value: list[str] | str | None) -> list[str]:
     return value
 
 
+# URL regex pattern - matches http/https URLs
+_URL_PATTERN = re.compile(
+    r'https?://[^\s<>"\')\]]+',
+    re.IGNORECASE,
+)
+
+
+def _is_mostly_links(body: str | None, threshold: float = 0.5) -> bool:
+    """Check if the body is mostly URLs.
+
+    Args:
+        body: Email body text.
+        threshold: Fraction of non-whitespace content that must be URLs (default 0.5).
+
+    Returns:
+        True if URLs make up more than threshold of the non-whitespace content.
+    """
+    if not body:
+        return False
+
+    # Strip and get non-whitespace content length
+    body_stripped = body.strip()
+    if not body_stripped:
+        return False
+
+    # Calculate content length without creating intermediate string (memory efficient)
+    whitespace_count = sum(1 for _ in re.finditer(r"\s", body_stripped))
+    content_length = len(body_stripped) - whitespace_count
+    if content_length == 0:
+        return False
+
+    # Find all URLs and calculate their total length (without whitespace)
+    urls = _URL_PATTERN.findall(body_stripped)
+    if not urls:
+        return False
+
+    # Strip trailing punctuation that's unlikely to be part of URLs
+    # Note: ) is already excluded by the regex pattern
+    url_length = sum(len(url.rstrip(".,;:")) for url in urls)
+
+    # Check if URLs make up more than threshold of content
+    return (url_length / content_length) >= threshold
+
+
 def _apply_label_prefix(action: Action, prefix: str) -> Action:
     """Apply label prefix to an action if it has a label."""
     if action.label and prefix:
@@ -194,6 +238,12 @@ def matches_condition(
         and email.has_attachment != condition.has_attachment
     ):
         return False
+
+    # Body is mostly links
+    if condition.body_is_mostly_links is not None:
+        is_mostly = _is_mostly_links(email.body)
+        if is_mostly != condition.body_is_mostly_links:
+            return False
 
     # Intent matching (requires LLM client)
     if condition.subject_intent is not None:

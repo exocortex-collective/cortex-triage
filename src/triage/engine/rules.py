@@ -18,6 +18,7 @@ CATEGORY_DESCRIPTIONS = {
 }
 
 # Built-in intents with default prompts
+# These can be overridden or extended by defining intents in rules.yaml
 BUILTIN_INTENTS = {
     "archive_request": {
         "prompt": """Does this email subject indicate the sender wants to save,

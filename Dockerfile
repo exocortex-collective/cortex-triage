@@ -5,30 +5,30 @@ ENV PYTHONUNBUFFERED=1
 
 WORKDIR /app
 
-# Create a non-root user
-RUN addgroup --system app && adduser --system --ingroup app app
-
 # Install uv
 RUN pip install uv
 
-# Copy dependency definitions and install dependencies (layer caching)
-COPY pyproject.toml uv.lock ./
+# Copy dependency definitions first (for layer caching)
+COPY pyproject.toml uv.lock README.md ./
+
+# Create non-root system user (no shell, no home for security)
+RUN useradd --system --shell /bin/false appuser
+
+# Install dependencies (before copying source for better caching)
+# Need src/ stub for uv sync to work with editable install
+COPY src/triage/__init__.py ./src/triage/__init__.py
 RUN uv sync --frozen --no-dev
 
-# Copy README (needed for package metadata)
-COPY README.md ./
+# Copy application source (config is mounted at runtime, not baked in)
+COPY --chown=appuser:appuser src/ ./src/
 
-# Copy application source
-COPY src/ ./src/
-
-# Change ownership of the app directory
-RUN chown -R app:app /app
-
-# Secrets will be mounted at runtime
+# Config and secrets will be mounted at runtime
+# Config contains personal rules, secrets contain Gmail tokens
+VOLUME /app/config
 VOLUME /app/secrets
 
-# Switch to the non-root user
-USER app
+# Switch to non-root user
+USER appuser
 
-# Run the triage worker service (placeholder - update when service is built)
+# Run the triage worker service
 CMD ["uv", "run", "python", "-m", "triage.services.worker"]

@@ -278,17 +278,53 @@ class GmailClient:
     def _get_or_create_label(self, label_name: str) -> str | None:
         """Get label ID, creating the label if it doesn't exist.
 
+        For nested labels (e.g., "Cortex/Aurelia/Memes"), creates parent
+        labels first if they don't exist.
+
         Uses cached labels to avoid API calls on every message.
         """
         try:
             # Ensure cache is populated
             self._ensure_label_cache()
 
-            # Check cache first
+            # Normalize label name: remove leading/trailing/consecutive slashes
+            label_name = "/".join(filter(None, label_name.split("/")))
+            if not label_name:
+                return None
+
+            # Check cache with normalized name
             if label_name in self._label_cache:
                 return self._label_cache[label_name]
 
-            # Not in cache - create new label
+            # For nested labels, ensure parent labels exist first
+            # e.g., "Cortex/Family/Memes" needs "Cortex" and "Cortex/Family"
+            if "/" in label_name:
+                parts = label_name.split("/")
+                for i in range(1, len(parts)):
+                    parent_name = "/".join(parts[:i])
+                    if (
+                        parent_name not in self._label_cache
+                        and self._create_single_label(parent_name) is None
+                    ):
+                        return None
+
+            # Create the actual label
+            return self._create_single_label(label_name)
+
+        except Exception as e:
+            logger.error(f"Failed to get/create label {label_name}: {e}")
+            return None
+
+    def _create_single_label(self, label_name: str) -> str | None:
+        """Create a single label (no hierarchy handling).
+
+        Returns the label ID, or None on failure.
+        """
+        # Check cache first (may have been created as a parent)
+        if label_name in self._label_cache:
+            return self._label_cache[label_name]
+
+        try:
             service = self._get_service()
             label_body = {
                 "name": label_name,
@@ -321,7 +357,7 @@ class GmailClient:
             )
             return None
         except Exception as e:
-            logger.error(f"Failed to get/create label {label_name}: {e}")
+            logger.error(f"Failed to create label {label_name}: {e}")
             return None
 
 
@@ -343,6 +379,31 @@ class TriageWorker:
     def stop(self) -> None:
         """Signal the worker to stop."""
         self.running = False
+
+    def reload_rules(self) -> bool:
+        """Reload rules from config file.
+
+        Returns True if reload succeeded, False otherwise.
+        The old rules remain active if reload fails.
+        """
+        try:
+            new_rules = load_rules(self.config.rules_path)
+            errors = validate_rules(new_rules)
+            if errors:
+                for error in errors:
+                    logger.error(f"Rules validation error: {error}")
+                logger.error("Rules reload failed - keeping existing rules")
+                return False
+
+            self.rules = new_rules
+            logger.info(
+                f"Rules reloaded successfully from {self.config.rules_path} "
+                f"(version {new_rules.version})"
+            )
+            return True
+        except Exception as e:
+            logger.error(f"Failed to reload rules: {e}", exc_info=True)
+            return False
 
     def close(self) -> None:
         """Close resources like the database connection pool."""
@@ -775,13 +836,18 @@ def main() -> None:
 
     worker = TriageWorker(config, rules, ollama, gmail)
 
-    # Handle signals for graceful shutdown
-    def signal_handler(signum: int, frame: Any) -> None:
+    # Handle signals for graceful shutdown and config reload
+    def shutdown_handler(signum: int, frame: Any) -> None:
         logger.info("Received shutdown signal")
         worker.stop()
 
-    signal.signal(signal.SIGTERM, signal_handler)
-    signal.signal(signal.SIGINT, signal_handler)
+    def reload_handler(signum: int, frame: Any) -> None:
+        logger.info("Received SIGHUP - reloading rules")
+        worker.reload_rules()
+
+    signal.signal(signal.SIGTERM, shutdown_handler)
+    signal.signal(signal.SIGINT, shutdown_handler)
+    signal.signal(signal.SIGHUP, reload_handler)
 
     try:
         if args.once:
