@@ -8,10 +8,35 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 
 class IntentConfig(BaseModel):
-    """Configuration for a named intent."""
+    """Configuration for a named intent.
+
+    Intents are boolean classifiers that answer yes/no questions.
+    Used with subject_intent (subject only) or email_intent (full email).
+    """
 
     prompt: str
     model: str = "qwen2.5:0.5b"
+
+
+class EmailCategoryConfig(BaseModel):
+    """Configuration for email category classification.
+
+    Categories are multi-class classifiers that return one of several
+    predefined categories. The prompt should instruct the LLM to return
+    exactly one of the category names.
+    """
+
+    prompt: str
+    model: str = "qwen2.5:0.5b"
+    categories: list[str]
+
+    @field_validator("categories")
+    @classmethod
+    def categories_not_empty(cls, v: list[str]) -> list[str]:
+        """Ensure categories list is not empty."""
+        if not v:
+            raise ValueError("categories list must not be empty")
+        return v
 
 
 class MatchCondition(BaseModel):
@@ -69,8 +94,13 @@ class MatchCondition(BaseModel):
     # Regex (single or list - any match)
     subject_regex: list[str] | str | None = None
 
-    # Intent (LLM-based)
-    subject_intent: str | IntentConfig | None = None
+    # Intent (LLM-based boolean classifiers)
+    subject_intent: str | IntentConfig | None = None  # Subject only
+    email_intent: str | IntentConfig | None = None  # Full email context
+
+    # Category (LLM-based multi-class classifier)
+    # Format: "category_name/expected_value" e.g., "transactional/invoice"
+    email_category: str | None = None
 
     # Other
     has_attachment: bool | None = None
@@ -80,9 +110,9 @@ class MatchCondition(BaseModel):
     any_of: list[MatchCondition] | None = None
     all_of: list[MatchCondition] | None = None
 
-    @field_validator("subject_intent", mode="before")
+    @field_validator("subject_intent", "email_intent", mode="before")
     @classmethod
-    def validate_subject_intent(cls, v: Any) -> Any:
+    def validate_intent(cls, v: Any) -> Any:
         """Parse inline intent dict into an IntentConfig model."""
         if isinstance(v, dict):
             return IntentConfig.model_validate(v)
@@ -208,6 +238,7 @@ class RulesConfig(BaseModel):
     version: int = 1
     label_prefix: str = "Cortex"
     intents: dict[str, IntentConfig] = Field(default_factory=dict)
+    email_categories: dict[str, EmailCategoryConfig] = Field(default_factory=dict)
     prompts: dict[str, ClassificationPrompt] = Field(default_factory=_default_prompts)
     chains: dict[str, list[Rule]] = Field(default_factory=dict)
 

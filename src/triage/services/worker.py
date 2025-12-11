@@ -47,6 +47,10 @@ class Config:
     poll_interval: int = 5  # seconds between queue polls when empty
 
 
+# Max characters of email body to include in LLM prompts
+LLM_BODY_PREVIEW_LENGTH = 1000
+
+
 class OllamaClient:
     """Client for Ollama LLM calls."""
 
@@ -147,6 +151,130 @@ class OllamaClient:
         except Exception as e:
             logger.error(f"Ollama classification failed: {e}")
             return ("unknown", 0.0, str(e))
+
+    def check_email_intent(
+        self,
+        from_addr: str,
+        subject: str,
+        body: str | None,
+        prompt: str,
+        model: str,
+    ) -> bool:
+        """Check if full email matches an intent using LLM.
+
+        Args:
+            from_addr: Email sender address.
+            subject: Email subject.
+            body: Email body (may be None).
+            prompt: Prompt template with {from_addr}, {subject}, {body_preview}.
+            model: Model name to use.
+
+        Returns:
+            True if the intent matches, False otherwise.
+        """
+        # Format the prompt with email content
+        body_preview = (body or "")[:LLM_BODY_PREVIEW_LENGTH]
+        formatted_prompt = prompt.format(
+            from_addr=from_addr,
+            subject=subject,
+            body_preview=body_preview,
+        )
+
+        try:
+            response = self.client.post(
+                f"{self.base_url}/api/generate",
+                json={
+                    "model": model,
+                    "prompt": formatted_prompt,
+                    "stream": False,
+                },
+            )
+            response.raise_for_status()
+            result = response.json()
+            answer: str = result.get("response", "").strip().lower()
+            return answer == "yes"
+        except httpx.RequestError as e:
+            logger.error(f"Ollama email intent check network error: {e}")
+            return False
+        except httpx.HTTPStatusError as e:
+            logger.error(
+                f"Ollama email intent check HTTP error {e.response.status_code}: {e}"
+            )
+            return False
+        except Exception as e:
+            logger.error(f"Ollama email intent check failed unexpectedly: {e}")
+            return False
+
+    def categorize_email(
+        self,
+        from_addr: str,
+        subject: str,
+        body: str | None,
+        prompt: str,
+        model: str,
+        categories: list[str],
+    ) -> str | None:
+        """Categorize an email into one of the predefined categories.
+
+        Args:
+            from_addr: Email sender address.
+            subject: Email subject.
+            body: Email body (may be None).
+            prompt: Prompt template with {from_addr}, {subject},
+                {body_preview}, {categories}.
+            model: Model name to use.
+            categories: List of valid category names.
+
+        Returns:
+            The matched category name, or None if no valid category matched.
+        """
+        # Format the prompt with email content and categories
+        body_preview = (body or "")[:LLM_BODY_PREVIEW_LENGTH]
+        categories_str = ", ".join(categories)
+        formatted_prompt = prompt.format(
+            from_addr=from_addr,
+            subject=subject,
+            body_preview=body_preview,
+            categories=categories_str,
+        )
+
+        try:
+            response = self.client.post(
+                f"{self.base_url}/api/generate",
+                json={
+                    "model": model,
+                    "prompt": formatted_prompt,
+                    "stream": False,
+                },
+            )
+            response.raise_for_status()
+            result = response.json()
+            answer: str = result.get("response", "").strip().lower()
+
+            # Validate the response is one of the allowed categories
+            for cat in categories:
+                if cat.lower() == answer:
+                    return cat  # Return original case
+            # Check if answer contains a category (in case LLM adds extra text)
+            # Sort by length descending to match longer categories first
+            # (e.g., 'presales' before 'sales')
+            for cat in sorted(categories, key=len, reverse=True):
+                if cat.lower() in answer:
+                    return cat
+            logger.warning(
+                f"LLM returned unknown category '{answer}', "
+                f"expected one of {categories}"
+            )
+            return None
+        except httpx.RequestError as e:
+            logger.error(f"Ollama categorize network error: {e}")
+            return None
+        except httpx.HTTPStatusError as e:
+            logger.error(f"Ollama categorize HTTP error {e.response.status_code}: {e}")
+            return None
+        except Exception as e:
+            logger.error(f"Ollama categorize failed unexpectedly: {e}")
+            return None
 
 
 class GmailClient:
@@ -564,34 +692,48 @@ class TriageWorker:
             return [labels]
         return labels
 
+    def _enqueue_labeling(self, action: Action, gmail_id: str) -> bool:
+        """Enqueue labeling action for batch processing.
+
+        Instead of calling Gmail API directly, we enqueue the action
+        for the labeling worker to process in batches.
+        """
+        # Build list of labels to add
+        add_labels: list[str] = []
+        if action.label:
+            add_labels.append(action.label)
+        add_labels.extend(self._labels_to_list(action.add_label))
+
+        # Build list of labels to remove
+        remove_labels: list[str] = self._labels_to_list(action.remove_label)
+
+        payload = {
+            "gmail_id": gmail_id,
+            "add_labels": add_labels,
+            "remove_labels": remove_labels,
+            "archive": action.archive or False,
+            "mark_read": action.mark_read or False,
+            "star": action.star or False,
+        }
+
+        try:
+            with self._get_conn() as conn, conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO queue (queue_name, payload, status)
+                    VALUES ('labeling', %s, 'pending')
+                    """,
+                    (Json(payload),),
+                )
+                conn.commit()
+            return True
+        except Exception as e:
+            logger.error(f"Failed to enqueue labeling for {gmail_id}: {e}")
+            return False
+
     def _execute_action(self, action: Action, gmail_id: str) -> bool:
-        """Execute an action on an email. Returns True if all actions succeeded."""
-        success = True
-
-        # Prefixed label (Cortex/*)
-        if action.label and not self.gmail.apply_label(gmail_id, action.label):
-            success = False
-
-        # Raw labels to add (no prefix)
-        for label in self._labels_to_list(action.add_label):
-            if not self.gmail.apply_label(gmail_id, label):
-                success = False
-
-        # Raw labels to remove (no prefix)
-        for label in self._labels_to_list(action.remove_label):
-            if not self.gmail.remove_label(gmail_id, label):
-                success = False
-
-        if action.archive and not self.gmail.archive(gmail_id):
-            success = False
-
-        if action.mark_read and not self.gmail.mark_read(gmail_id):
-            success = False
-
-        if action.star and not self.gmail.star(gmail_id):
-            success = False
-
-        return success
+        """Execute an action on an email by enqueueing for batch processing."""
+        return self._enqueue_labeling(action, gmail_id)
 
     def _store_classification(
         self,

@@ -414,11 +414,19 @@ class MockLLMClient:
         self,
         intent_responses: dict[str, bool] | None = None,
         classify_response: tuple[str, float, str] | None = None,
+        email_intent_responses: dict[str, bool] | None = None,
+        categorize_response: str | None = None,
     ):
         self.intent_responses = intent_responses or {}
         self.classify_response = classify_response or ("unknown", 0.5, "default")
+        self.email_intent_responses = email_intent_responses or {}
+        self.categorize_response = categorize_response
         self.intent_calls: list[tuple[str, str, str]] = []
         self.classify_calls: list[tuple[str, str]] = []
+        self.email_intent_calls: list[tuple[str, str, str | None, str, str]] = []
+        self.categorize_calls: list[
+            tuple[str, str, str | None, str, str, list[str]]
+        ] = []
 
     def check_intent(self, subject: str, prompt: str, model: str) -> bool:
         self.intent_calls.append((subject, prompt, model))
@@ -427,6 +435,36 @@ class MockLLMClient:
             if key.lower() in subject.lower():
                 return value
         return False
+
+    def check_email_intent(
+        self,
+        from_addr: str,
+        subject: str,
+        body: str | None,
+        prompt: str,
+        model: str,
+    ) -> bool:
+        self.email_intent_calls.append((from_addr, subject, body, prompt, model))
+        # Return based on email content for testing
+        content = f"{from_addr} {subject} {body or ''}"
+        for key, value in self.email_intent_responses.items():
+            if key.lower() in content.lower():
+                return value
+        return False
+
+    def categorize_email(
+        self,
+        from_addr: str,
+        subject: str,
+        body: str | None,
+        prompt: str,
+        model: str,
+        categories: list[str],
+    ) -> str | None:
+        self.categorize_calls.append(
+            (from_addr, subject, body, prompt, model, categories)
+        )
+        return self.categorize_response
 
     def classify(self, prompt: str, model: str) -> tuple[str, float, str]:
         self.classify_calls.append((prompt, model))
@@ -920,3 +958,256 @@ class TestCompoundConditions:
 
         with pytest.raises(ValueError, match="all_of must contain at least one"):
             MatchCondition(all_of=[])
+
+
+class TestEmailIntent:
+    """Tests for email_intent matching (full email context)."""
+
+    def test_email_intent_with_named_intent(self) -> None:
+        """Test email_intent matching with a named intent reference."""
+        email = Email(
+            id=1,
+            gmail_id="abc123",
+            from_addr="noreply@amazon.com",
+            to_addrs=["me@example.com"],
+            subject="Your order has shipped",
+            body="Track your package at...",
+        )
+        condition = MatchCondition(email_intent="transactional")
+        intents = {
+            "transactional": {
+                "prompt": (
+                    "Is this a transactional email? "
+                    "From: {from_addr} Subject: {subject}"
+                ),
+                "model": "test-model",
+            }
+        }
+        llm_client = MockLLMClient(email_intent_responses={"amazon": True})
+
+        result = matches_condition(condition, email, llm_client, intents)
+
+        assert result is True
+        assert len(llm_client.email_intent_calls) == 1
+        assert llm_client.email_intent_calls[0][0] == "noreply@amazon.com"
+
+    def test_email_intent_no_match(self) -> None:
+        """Test email_intent when intent doesn't match."""
+        email = Email(
+            id=1,
+            gmail_id="abc123",
+            from_addr="friend@personal.com",
+            to_addrs=["me@example.com"],
+            subject="Hey, how are you?",
+            body="Just checking in...",
+        )
+        condition = MatchCondition(email_intent="transactional")
+        intents = {
+            "transactional": {
+                "prompt": "Is this transactional?",
+                "model": "test-model",
+            }
+        }
+        llm_client = MockLLMClient(email_intent_responses={"amazon": True})
+
+        result = matches_condition(condition, email, llm_client, intents)
+
+        assert result is False
+
+    def test_email_intent_with_inline_config(self) -> None:
+        """Test email_intent with inline IntentConfig."""
+        email = Email(
+            id=1,
+            gmail_id="abc123",
+            from_addr="billing@stripe.com",
+            to_addrs=["me@example.com"],
+            subject="Invoice for December",
+            body="Amount: $99.00",
+        )
+        condition = MatchCondition(
+            email_intent=IntentConfig(
+                prompt="Is this an invoice?",
+                model="inline-model",
+            )
+        )
+        llm_client = MockLLMClient(email_intent_responses={"stripe": True})
+
+        result = matches_condition(condition, email, llm_client)
+
+        assert result is True
+        assert llm_client.email_intent_calls[0][4] == "inline-model"
+
+    def test_email_intent_without_llm_client(self) -> None:
+        """Test email_intent fails closed when no LLM client provided."""
+        email = Email(
+            id=1,
+            gmail_id="abc123",
+            from_addr="noreply@company.com",
+            to_addrs=["me@example.com"],
+            subject="Receipt",
+        )
+        condition = MatchCondition(email_intent="transactional")
+        intents = {"transactional": {"prompt": "test", "model": "test"}}
+
+        result = matches_condition(condition, email, llm_client=None, intents=intents)
+
+        assert result is False
+
+
+class TestEmailCategory:
+    """Tests for email_category matching (multi-class classifier)."""
+
+    def test_email_category_matches(self) -> None:
+        """Test email_category matching when category matches."""
+        email = Email(
+            id=1,
+            gmail_id="abc123",
+            from_addr="billing@stripe.com",
+            to_addrs=["me@example.com"],
+            subject="Invoice #12345",
+            body="Amount due: $99.00",
+        )
+        condition = MatchCondition(email_category="transactional/invoice")
+        email_categories = {
+            "transactional": {
+                "prompt": "Categorize: {from_addr} {subject} Categories: {categories}",
+                "model": "test-model",
+                "categories": ["invoice", "receipt", "shipping", "other"],
+            }
+        }
+        llm_client = MockLLMClient(categorize_response="invoice")
+
+        result = matches_condition(
+            condition, email, llm_client, intents={}, email_categories=email_categories
+        )
+
+        assert result is True
+        assert len(llm_client.categorize_calls) == 1
+        assert llm_client.categorize_calls[0][5] == [
+            "invoice",
+            "receipt",
+            "shipping",
+            "other",
+        ]
+
+    def test_email_category_no_match(self) -> None:
+        """Test email_category when category doesn't match expected value."""
+        email = Email(
+            id=1,
+            gmail_id="abc123",
+            from_addr="noreply@fedex.com",
+            to_addrs=["me@example.com"],
+            subject="Your package is on the way",
+            body="Track your shipment...",
+        )
+        condition = MatchCondition(email_category="transactional/invoice")
+        email_categories = {
+            "transactional": {
+                "prompt": "Categorize this email",
+                "model": "test-model",
+                "categories": ["invoice", "receipt", "shipping", "other"],
+            }
+        }
+        llm_client = MockLLMClient(categorize_response="shipping")
+
+        result = matches_condition(
+            condition, email, llm_client, intents={}, email_categories=email_categories
+        )
+
+        assert result is False
+
+    def test_email_category_invalid_format(self) -> None:
+        """Test email_category with invalid format (missing /)."""
+        email = Email(
+            id=1,
+            gmail_id="abc123",
+            from_addr="test@example.com",
+            to_addrs=["me@example.com"],
+            subject="Test",
+        )
+        condition = MatchCondition(email_category="invalid_no_slash")
+        llm_client = MockLLMClient()
+
+        result = matches_condition(
+            condition, email, llm_client, intents={}, email_categories={}
+        )
+
+        assert result is False
+
+    def test_email_category_unknown_category_name(self) -> None:
+        """Test email_category with unknown category name."""
+        email = Email(
+            id=1,
+            gmail_id="abc123",
+            from_addr="test@example.com",
+            to_addrs=["me@example.com"],
+            subject="Test",
+        )
+        condition = MatchCondition(email_category="unknown_category/value")
+        email_categories = {
+            "transactional": {
+                "prompt": "test",
+                "model": "test",
+                "categories": ["a", "b"],
+            }
+        }
+        llm_client = MockLLMClient()
+
+        result = matches_condition(
+            condition, email, llm_client, intents={}, email_categories=email_categories
+        )
+
+        assert result is False
+
+    def test_email_category_without_llm_client(self) -> None:
+        """Test email_category fails closed when no LLM client provided."""
+        email = Email(
+            id=1,
+            gmail_id="abc123",
+            from_addr="test@example.com",
+            to_addrs=["me@example.com"],
+            subject="Test",
+        )
+        condition = MatchCondition(email_category="transactional/invoice")
+        email_categories = {
+            "transactional": {
+                "prompt": "test",
+                "model": "test",
+                "categories": ["invoice"],
+            }
+        }
+
+        result = matches_condition(
+            condition,
+            email,
+            llm_client=None,
+            intents={},
+            email_categories=email_categories,
+        )
+
+        assert result is False
+
+    def test_email_category_llm_returns_none(self) -> None:
+        """Test email_category when LLM returns None (invalid category)."""
+        email = Email(
+            id=1,
+            gmail_id="abc123",
+            from_addr="test@example.com",
+            to_addrs=["me@example.com"],
+            subject="Test",
+        )
+        condition = MatchCondition(email_category="transactional/invoice")
+        email_categories = {
+            "transactional": {
+                "prompt": "test",
+                "model": "test",
+                "categories": ["invoice", "receipt"],
+            }
+        }
+        llm_client = MockLLMClient(categorize_response=None)
+
+        result = matches_condition(
+            condition, email, llm_client, intents={}, email_categories=email_categories
+        )
+
+        assert result is False
