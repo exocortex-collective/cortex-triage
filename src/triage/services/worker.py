@@ -287,22 +287,21 @@ class GmailClient:
             # Ensure cache is populated
             self._ensure_label_cache()
 
-            # Normalize trailing slashes and check cache
-            if label_name.endswith("/"):
-                label_name = label_name.rstrip("/")
+            # Normalize label name: remove leading/trailing/consecutive slashes
+            label_name = "/".join(filter(None, label_name.split("/")))
+            if not label_name:
+                return None
+
+            # Check cache with normalized name
             if label_name in self._label_cache:
                 return self._label_cache[label_name]
 
             # For nested labels, ensure parent labels exist first
             # e.g., "Cortex/Family/Memes" needs "Cortex" and "Cortex/Family"
-            # Handle edge cases like consecutive slashes "A//B"
             if "/" in label_name:
-                current_path: list[str] = []
-                for part in label_name.split("/")[:-1]:
-                    if not part:  # Skip empty parts from consecutive/leading slashes
-                        continue
-                    current_path.append(part)
-                    parent_name = "/".join(current_path)
+                parts = label_name.split("/")
+                for i in range(1, len(parts)):
+                    parent_name = "/".join(parts[:i])
                     if (
                         parent_name not in self._label_cache
                         and self._create_single_label(parent_name) is None
