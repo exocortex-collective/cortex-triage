@@ -47,6 +47,10 @@ class Config:
     poll_interval: int = 5  # seconds between queue polls when empty
 
 
+# Max characters of email body to include in LLM prompts
+LLM_BODY_PREVIEW_LENGTH = 1000
+
+
 class OllamaClient:
     """Client for Ollama LLM calls."""
 
@@ -169,7 +173,7 @@ class OllamaClient:
             True if the intent matches, False otherwise.
         """
         # Format the prompt with email content
-        body_preview = (body or "")[:1000]  # Limit body preview
+        body_preview = (body or "")[:LLM_BODY_PREVIEW_LENGTH]
         formatted_prompt = prompt.format(
             from_addr=from_addr,
             subject=subject,
@@ -225,7 +229,7 @@ class OllamaClient:
             The matched category name, or None if no valid category matched.
         """
         # Format the prompt with email content and categories
-        body_preview = (body or "")[:1000]  # Limit body preview
+        body_preview = (body or "")[:LLM_BODY_PREVIEW_LENGTH]
         categories_str = ", ".join(categories)
         formatted_prompt = prompt.format(
             from_addr=from_addr,

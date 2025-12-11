@@ -313,18 +313,27 @@ class LabelingWorker:
             )
             conn.commit()
 
-    def _resolve_labels(self, label_names: list[str], create: bool = True) -> list[str]:
-        """Convert label names to IDs."""
+    def _resolve_labels(
+        self, label_names: list[str], create: bool = True
+    ) -> list[str] | None:
+        """Convert label names to IDs.
+
+        Returns None if any required label creation fails (create=True).
+        For removals (create=False), missing labels are skipped silently.
+        """
         label_ids = []
         for name in label_names:
             if create:
                 label_id = self.gmail.get_label_id(name)
+                if not label_id:
+                    logger.error(f"Failed to create required label: {name}")
+                    return None  # Fail the operation
             else:
                 label_id = self.gmail.get_existing_label_id(name)
-            if label_id:
-                label_ids.append(label_id)
-            else:
-                logger.warning(f"Label not found/created: {name}")
+                if not label_id:
+                    logger.debug(f"Label not found for removal (ok): {name}")
+                    continue
+            label_ids.append(label_id)
         return label_ids
 
     def _build_operation_key(
@@ -380,16 +389,23 @@ class LabelingWorker:
         for key, group_jobs in operation_groups.items():
             add_labels, remove_labels, _, _, _ = key
 
-            # Resolve label names to IDs
-            add_label_ids = self._resolve_labels(list(add_labels), create=True)
-            remove_label_ids = self._resolve_labels(list(remove_labels), create=False)
-
             gmail_ids = [j.gmail_id for j in group_jobs]
             job_ids = [j.job_id for j in group_jobs]
 
+            # Resolve label names to IDs
+            add_label_ids = self._resolve_labels(list(add_labels), create=True)
+            if add_label_ids is None:
+                # Failed to create required labels - fail these jobs
+                self._fail_jobs(job_ids, "Failed to create required label")
+                failed += len(group_jobs)
+                continue
+
+            remove_label_ids = self._resolve_labels(list(remove_labels), create=False)
+            # remove_label_ids won't be None (create=False skips missing)
+
             # Execute batch modify
             success = self.gmail.batch_modify(
-                gmail_ids, add_label_ids, remove_label_ids
+                gmail_ids, add_label_ids, remove_label_ids or []
             )
 
             if success:
