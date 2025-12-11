@@ -842,7 +842,14 @@ class TriageWorker:
                 else:
                     logger.warning(f"Action failed for {gmail_id}: {result.action}")
             else:
-                logger.info(f"No match for {gmail_id}")
+                if not result.matched:
+                    logger.info(f"No match for {gmail_id}")
+                else:
+                    logger.info(f"Matched but no action for {gmail_id}")
+                # Log trace at info level for debugging
+                if result.trace:
+                    trace_str = "\n".join(result.trace)
+                    logger.info(f"Decision trace for {gmail_id}:\n{trace_str}")
 
             # Store classification
             self._store_classification(email, result, action_executed)
