@@ -297,8 +297,11 @@ class GmailClient:
                 parts = label_name.split("/")
                 for i in range(1, len(parts)):
                     parent_name = "/".join(parts[:i])
-                    if parent_name not in self._label_cache:
-                        self._create_single_label(parent_name)
+                    if (
+                        parent_name not in self._label_cache
+                        and self._create_single_label(parent_name) is None
+                    ):
+                        return None
 
             # Create the actual label
             return self._create_single_label(label_name)
