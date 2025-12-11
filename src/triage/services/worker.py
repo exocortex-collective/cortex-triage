@@ -50,6 +50,10 @@ class Config:
 # Max characters of email body to include in LLM prompts
 LLM_BODY_PREVIEW_LENGTH = 1000
 
+# How long a job can be in 'processing' before it's considered stale
+# and reset to 'pending' (visibility timeout)
+VISIBILITY_TIMEOUT_MINUTES = 5
+
 
 class OllamaClient:
     """Client for Ollama LLM calls."""
@@ -622,7 +626,7 @@ class TriageWorker:
                         SET status = 'pending', claimed_at = NULL
                         WHERE queue_name = 'triage'
                           AND status = 'processing'
-                          AND claimed_at < NOW() - INTERVAL '5 minutes'
+                          AND claimed_at < NOW() - INTERVAL '%s minutes'
                     ),
                     claimable AS (
                         SELECT id FROM queue
@@ -636,7 +640,7 @@ class TriageWorker:
                     WHERE id IN (SELECT id FROM claimable)
                     RETURNING id, payload
                     """,
-                    (batch_size,),
+                    (VISIBILITY_TIMEOUT_MINUTES, batch_size),
                 )
                 jobs = [{"id": row[0], "payload": row[1]} for row in cur.fetchall()]
                 conn.commit()
