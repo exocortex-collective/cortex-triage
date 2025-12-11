@@ -126,7 +126,8 @@ def _is_mostly_links(body: str | None, threshold: float = 0.5) -> bool:
         return False
 
     # Strip trailing punctuation that's unlikely to be part of URLs
-    url_length = sum(len(url.rstrip(".,;:)")) for url in urls)
+    # Note: ) is already excluded by the regex pattern
+    url_length = sum(len(url.rstrip(".,;:")) for url in urls)
 
     # Check if URLs make up more than threshold of content
     return (url_length / content_length) >= threshold
