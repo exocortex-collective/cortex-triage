@@ -108,8 +108,18 @@ uv run ruff check .
 ## Deployment
 
 - Docker image: `us-central1-docker.pkg.dev/cortex-gmail/cortex/triage:latest`
-- Stack: `cortex-triage` on Hades (endpoint 11)
+- Stack: `cortex-triage` on Hades (endpoint 11), stack ID 34
 - Depends on: Postgres, Ollama, DuckDB API, postmark queue
+
+### Rules Sync
+
+**IMPORTANT**: Before deploying, always sync the rules file from HomeLab to Hades:
+
+```bash
+scp ~/HomeLab/cortex/triage/rules.yaml devon@10.5.2.21:/home/devon/cortex-config/rules.yaml
+```
+
+This ensures the latest rules are deployed. The rules file is edited locally in HomeLab and mounted into the container at runtime.
 
 ## GitHub Integrations
 
