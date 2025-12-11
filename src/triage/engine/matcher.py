@@ -193,6 +193,7 @@ def matches_condition(
     llm_client: LLMClient | None = None,
     intents: dict | None = None,
     email_categories: dict | None = None,
+    trace: list[str] | None = None,
 ) -> bool:
     """Check if an email matches a condition.
 
@@ -202,6 +203,7 @@ def matches_condition(
         llm_client: Optional LLM client for intent matching.
         intents: Intent configurations for intent matching.
         email_categories: Email category configurations for categorization.
+        trace: Optional list to append decision trace messages to.
 
     Returns:
         True if all specified conditions match, False otherwise.
@@ -214,19 +216,28 @@ def matches_condition(
     subject_norm = _normalize(email.subject)
     body_norm = _normalize(email.body) if email.body else None
 
+    def _trace(msg: str) -> None:
+        if trace is not None:
+            trace.append(msg)
+
     # Check each condition type - all specified must match (AND)
     # Within each field, lists are OR (any value matches)
 
     # Exact from match (any in list)
     from_addrs = _to_list(condition.from_addr)
-    if from_addrs and not any(from_addr_norm == _normalize(a) for a in from_addrs):
-        return False
+    if from_addrs:
+        matched = any(from_addr_norm == _normalize(a) for a in from_addrs)
+        _trace(f"from_addr check: {from_addr_norm} in {from_addrs} = {matched}")
+        if not matched:
+            return False
 
     # Exact to match - use set intersection for O(N+M) instead of O(N*M)
     cond_to_addrs = _to_list(condition.to_addr)
     if cond_to_addrs:
         cond_addrs_set = {_normalize(addr) for addr in cond_to_addrs}
-        if not set(to_addrs_norm).intersection(cond_addrs_set):
+        matched = bool(set(to_addrs_norm).intersection(cond_addrs_set))
+        _trace(f"to_addr check: {to_addrs_norm} intersects {cond_to_addrs} = {matched}")
+        if not matched:
             return False
 
     # Glob patterns (any in list) - pre-normalize globs
@@ -291,6 +302,7 @@ def matches_condition(
     # Body is mostly links
     if condition.body_is_mostly_links is not None:
         is_mostly = _is_mostly_links(email.body)
+        _trace(f"body_is_mostly_links: {is_mostly} == {condition.body_is_mostly_links}")
         if is_mostly != condition.body_is_mostly_links:
             return False
 
@@ -298,12 +310,14 @@ def matches_condition(
     if condition.subject_intent is not None:
         if llm_client is None:
             # Can't evaluate intent without LLM client - fail closed
+            _trace("subject_intent: no LLM client, failing")
             return False
 
         intent_config = condition.subject_intent
         if isinstance(intent_config, str):
             # Reference to named intent
             if intents is None or intent_config not in intents:
+                _trace(f"subject_intent: intent '{intent_config}' not found")
                 return False
             cfg = intents[intent_config]
             prompt = cfg["prompt"]
@@ -313,7 +327,13 @@ def matches_condition(
             prompt = intent_config.prompt
             model = intent_config.model
 
-        if not llm_client.check_intent(email.subject, prompt, model):
+        # Format the prompt with subject
+        formatted_prompt = prompt.format(subject=email.subject)
+        result = llm_client.check_intent(email.subject, formatted_prompt, model)
+        _trace(
+            f"subject_intent '{intent_config}': subject='{email.subject}' -> {result}"
+        )
+        if not result:
             return False
 
     # Email intent matching (full email context, requires LLM client)
@@ -383,18 +403,23 @@ def matches_condition(
 
     # Compound conditions
     # any_of: at least one sub-condition must match (OR)
-    if condition.any_of is not None and not any(
-        matches_condition(sub, email, llm_client, intents, email_categories)
-        for sub in condition.any_of
-    ):
-        return False
+    if condition.any_of is not None:
+        any_matched = any(
+            matches_condition(sub, email, llm_client, intents, email_categories, trace)
+            for sub in condition.any_of
+        )
+        _trace(f"any_of: {any_matched}")
+        if not any_matched:
+            return False
 
     # all_of: all sub-conditions must match (AND)
     if condition.all_of is not None:
-        return all(
-            matches_condition(sub, email, llm_client, intents, email_categories)
+        all_matched = all(
+            matches_condition(sub, email, llm_client, intents, email_categories, trace)
             for sub in condition.all_of
         )
+        _trace(f"all_of: {all_matched}")
+        return all_matched
 
     return True
 
@@ -407,6 +432,7 @@ def evaluate_chain(
     _visited: set[str] | None = None,
     _intents: dict | None = None,
     _email_categories: dict | None = None,
+    _trace: list[str] | None = None,
 ) -> EvaluationResult:
     """Evaluate a chain of rules against an email.
 
@@ -418,21 +444,28 @@ def evaluate_chain(
         _visited: Set of visited chains (for cycle detection).
         _intents: Pre-computed intents dict (for efficiency in recursive calls).
         _email_categories: Pre-computed email_categories dict.
+        _trace: Accumulated decision trace.
 
     Returns:
         EvaluationResult with match details and action.
     """
     if _visited is None:
         _visited = set()
+    if _trace is None:
+        _trace = []
 
     # Cycle detection
     if chain_name in _visited:
-        return EvaluationResult(matched=False)
+        _trace.append(f"chain '{chain_name}': cycle detected, skipping")
+        return EvaluationResult(matched=False, trace=_trace)
     _visited.add(chain_name)
 
     chain = config.chains.get(chain_name)
     if chain is None:
-        return EvaluationResult(matched=False)
+        _trace.append(f"chain '{chain_name}': not found")
+        return EvaluationResult(matched=False, trace=_trace)
+
+    _trace.append(f"chain '{chain_name}': evaluating {len(chain)} rules")
 
     # Use pre-computed dicts or compute once
     intents = _intents or {k: v.model_dump() for k, v in config.intents.items()}
@@ -441,16 +474,22 @@ def evaluate_chain(
     }
 
     for i, rule in enumerate(chain):
+        rule_trace: list[str] = []
         # Check if rule matches
-        if not matches_condition(
-            rule.match, email, llm_client, intents, email_categories
-        ):
+        matched = matches_condition(
+            rule.match, email, llm_client, intents, email_categories, rule_trace
+        )
+        _trace.append(f"  rule[{i}]: {matched}")
+        _trace.extend(f"    {t}" for t in rule_trace)
+
+        if not matched:
             continue
 
         # Rule matched!
 
         # Handle jump
         if rule.jump:
+            _trace.append(f"  rule[{i}]: jumping to chain '{rule.jump}'")
             result = evaluate_chain(
                 config,
                 rule.jump,
@@ -459,10 +498,14 @@ def evaluate_chain(
                 _visited.copy(),
                 intents,
                 email_categories,
+                _trace,
             )
             if result.matched:
                 return result
             # Jump chain didn't match - continue to next rule
+            _trace.append(
+                f"  rule[{i}]: jump chain '{rule.jump}' didn't match, continuing"
+            )
             continue
 
         # Handle LLM classification
@@ -473,6 +516,7 @@ def evaluate_chain(
                     rule_index=i,
                     chain=chain_name,
                 )
+                _trace.append(f"  rule[{i}]: LLM rule but no client, skipping")
                 continue
 
             # Format prompt from config
@@ -488,9 +532,14 @@ def evaluate_chain(
                 model = rule.llm.model
 
             category, confidence, reasoning = llm_client.classify(prompt, model)
+            _trace.append(
+                f"  rule[{i}]: LLM classified as '{category}' "
+                f"(confidence={confidence:.2f})"
+            )
 
             if category in rule.routes:
                 action = _apply_label_prefix(rule.routes[category], config.label_prefix)
+                _trace.append(f"  rule[{i}]: routed to action {action}")
                 return EvaluationResult(
                     matched=True,
                     chain=chain_name,
@@ -499,22 +548,29 @@ def evaluate_chain(
                     llm_category=category,
                     llm_confidence=confidence,
                     llm_reasoning=reasoning,
+                    trace=_trace,
                 )
             # Category not in routes - continue
+            _trace.append(
+                f"  rule[{i}]: category '{category}' not in routes, continuing"
+            )
             continue
 
         # Handle action
         if rule.action:
             action = _apply_label_prefix(rule.action, config.label_prefix)
+            _trace.append(f"  rule[{i}]: matched with action {action}")
             return EvaluationResult(
                 matched=True,
                 chain=chain_name,
                 rule_index=i,
                 action=action,
+                trace=_trace,
             )
 
     # No rules matched
-    return EvaluationResult(matched=False)
+    _trace.append(f"chain '{chain_name}': no rules matched")
+    return EvaluationResult(matched=False, trace=_trace)
 
 
 def evaluate(
