@@ -292,11 +292,15 @@ class GmailClient:
                 return self._label_cache[label_name]
 
             # For nested labels, ensure parent labels exist first
-            # e.g., "Cortex/Aurelia/Memes" needs "Cortex" and "Cortex/Aurelia"
+            # e.g., "Cortex/Family/Memes" needs "Cortex" and "Cortex/Family"
+            # Handle edge cases like consecutive slashes "A//B" or trailing "A/B/"
             if "/" in label_name:
-                parts = label_name.split("/")
-                for i in range(1, len(parts)):
-                    parent_name = "/".join(parts[:i])
+                current_path: list[str] = []
+                for part in label_name.split("/")[:-1]:
+                    if not part:  # Skip empty parts from consecutive/leading slashes
+                        continue
+                    current_path.append(part)
+                    parent_name = "/".join(current_path)
                     if (
                         parent_name not in self._label_cache
                         and self._create_single_label(parent_name) is None
