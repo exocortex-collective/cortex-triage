@@ -278,6 +278,9 @@ class GmailClient:
     def _get_or_create_label(self, label_name: str) -> str | None:
         """Get label ID, creating the label if it doesn't exist.
 
+        For nested labels (e.g., "Cortex/Aurelia/Memes"), creates parent
+        labels first if they don't exist.
+
         Uses cached labels to avoid API calls on every message.
         """
         try:
@@ -288,7 +291,32 @@ class GmailClient:
             if label_name in self._label_cache:
                 return self._label_cache[label_name]
 
-            # Not in cache - create new label
+            # For nested labels, ensure parent labels exist first
+            # e.g., "Cortex/Aurelia/Memes" needs "Cortex" and "Cortex/Aurelia"
+            if "/" in label_name:
+                parts = label_name.split("/")
+                for i in range(1, len(parts)):
+                    parent_name = "/".join(parts[:i])
+                    if parent_name not in self._label_cache:
+                        self._create_single_label(parent_name)
+
+            # Create the actual label
+            return self._create_single_label(label_name)
+
+        except Exception as e:
+            logger.error(f"Failed to get/create label {label_name}: {e}")
+            return None
+
+    def _create_single_label(self, label_name: str) -> str | None:
+        """Create a single label (no hierarchy handling).
+
+        Returns the label ID, or None on failure.
+        """
+        # Check cache first (may have been created as a parent)
+        if label_name in self._label_cache:
+            return self._label_cache[label_name]
+
+        try:
             service = self._get_service()
             label_body = {
                 "name": label_name,
@@ -321,7 +349,7 @@ class GmailClient:
             )
             return None
         except Exception as e:
-            logger.error(f"Failed to get/create label {label_name}: {e}")
+            logger.error(f"Failed to create label {label_name}: {e}")
             return None
 
 

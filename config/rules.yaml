@@ -3,6 +3,18 @@
 version: 2
 label_prefix: "Cortex"
 
+# Intent definitions for LLM-based matching
+# These can override built-in intents or define new ones
+intents:
+  meme_or_funny:
+    prompt: |
+      Does this email subject suggest the sender is sharing something funny,
+      a meme, a joke, or humorous content? Look for words like "lol", "haha",
+      "funny", "meme", "look at this", or similar casual language.
+      Subject: "{subject}"
+      Answer only: yes or no
+    model: "qwen2.5:0.5b"
+
 chains:
   main:
     # Self-to-self emails get special handling

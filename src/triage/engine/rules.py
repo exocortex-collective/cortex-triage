@@ -18,6 +18,7 @@ CATEGORY_DESCRIPTIONS = {
 }
 
 # Built-in intents with default prompts
+# These can be overridden or extended by defining intents in rules.yaml
 BUILTIN_INTENTS = {
     "archive_request": {
         "prompt": """Does this email subject indicate the sender wants to save,
@@ -34,14 +35,6 @@ Answer only: yes or no""",
     },
     "question": {
         "prompt": """Does this email subject contain a question requiring a response?
-Subject: "{subject}"
-Answer only: yes or no""",
-        "model": "qwen2.5:0.5b",
-    },
-    "meme_or_funny": {
-        "prompt": """Does this email subject suggest the sender is sharing
-something funny, a meme, a joke, or humorous content? Look for words like
-"lol", "haha", "funny", "meme", "look at this", or similar casual language.
 Subject: "{subject}"
 Answer only: yes or no""",
         "model": "qwen2.5:0.5b",
