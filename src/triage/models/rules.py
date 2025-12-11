@@ -265,3 +265,4 @@ class EvaluationResult(BaseModel):
     llm_category: str | None = None
     llm_confidence: float | None = None
     llm_reasoning: str | None = None
+    trace: list[str] = Field(default_factory=list)  # Decision trace for debugging
