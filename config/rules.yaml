@@ -1,0 +1,83 @@
+# Triage Rules Configuration
+# Rule chains for Devon's Gmail inbox
+version: 2
+label_prefix: "Cortex"
+
+chains:
+  main:
+    # Self-to-self emails get special handling
+    - match:
+        from: "devon.jones@gmail.com"
+        to: "devon.jones@gmail.com"
+      jump: self_note
+
+    # Aurelia's emails - daughter sending memes/links
+    - match:
+        from: "aurelia.ada.jones@gmail.com"
+      jump: aurelia
+
+    # Nextdoor - social/neighborhood
+    - match:
+        from: "reply@ss.email.nextdoor.com"
+      action:
+        label: "Automated/Social/Nextdoor"
+        archive: true
+
+    # Mailing lists with sublabels
+    - match:
+        from: "mythtv-users@mythtv.org"
+      action:
+        label: "MailingList/MythTV"
+        archive: true
+
+    # Commercial/Retail - archive
+    - match:
+        from:
+          - "chicos@c.chicos.com"
+          - "newsletter@em.teepublic.com"
+          - "noreply@handandstone.com"
+          - "info@mail.levi.com"
+      action:
+        label: "Commercial/Retail"
+        archive: true
+
+    # Fallback: no action for now (will add more rules later)
+    - match: {}
+      action:
+        label: "Uncategorized"
+
+  self_note:
+    # Archive workflow for URLs - uses LLM intent matching
+    - match:
+        subject_intent: "archive_request"
+      action:
+        label: "Archiver"
+
+    # Todo items
+    - match:
+        subject_intent: "todo_request"
+      action:
+        label: "Todo"
+
+    # Unmatched self-notes
+    - match: {}
+      action:
+        label: "Self-Note"
+
+  aurelia:
+    # Memes - subject implies funny/meme content
+    - match:
+        subject_intent: "meme_or_funny"
+      action:
+        label: "Aurelia/Memes"
+
+    # Link dumps - body is mostly URLs (likely Pinterest shares)
+    - match:
+        body_is_mostly_links: true
+      action:
+        label: "Aurelia/Memes"
+
+    # Regular emails from Aurelia
+    - match: {}
+      action:
+        label: "Aurelia"

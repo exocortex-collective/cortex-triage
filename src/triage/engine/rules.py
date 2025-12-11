@@ -38,6 +38,14 @@ Subject: "{subject}"
 Answer only: yes or no""",
         "model": "qwen2.5:0.5b",
     },
+    "meme_or_funny": {
+        "prompt": """Does this email subject suggest the sender is sharing
+something funny, a meme, a joke, or humorous content? Look for words like
+"lol", "haha", "funny", "meme", "look at this", or similar casual language.
+Subject: "{subject}"
+Answer only: yes or no""",
+        "model": "qwen2.5:0.5b",
+    },
 }
 
 
