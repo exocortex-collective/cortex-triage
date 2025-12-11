@@ -37,8 +37,8 @@ triage/
 **IMPORTANT**: `config/rules.yaml` is gitignored and NOT checked into this repo. It contains personal email addresses and filtering rules.
 
 - **Example config**: `config/rules.example.yaml` shows the structure with generic examples
-- **Actual config**: Stored in the homelab repo and mounted at runtime
-- Copy `rules.example.yaml` to `rules.yaml` for local development
+- **Personal config**: Stored at `~/HomeLab/cortex/triage/rules.yaml` and mounted into containers at runtime
+- For local development, copy `rules.example.yaml` to `config/rules.yaml` and customize
 
 ## Architecture
 
