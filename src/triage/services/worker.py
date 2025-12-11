@@ -680,22 +680,26 @@ class TriageWorker:
         return None
 
     def _get_body_from_api(self, gmail_id: str) -> str | None:
-        """Fetch body from DuckDB API if not in parsed table."""
+        """Fetch body from DuckDB API if not in parsed table.
+
+        Uses the /mail_text endpoint which returns decoded plain text,
+        rendering HTML to text if no plain text part exists.
+        """
         try:
             response = httpx.get(
-                f"{self.config.duckdb_api_url}/body",
+                f"{self.config.duckdb_api_url}/mail_text",
                 params={"gmail_id": gmail_id},
                 timeout=10.0,
             )
             response.raise_for_status()
             data = response.json()
-            body: str | None = data.get("body_text") or data.get("body_html")
-            return body
+            text: str | None = data.get("text")
+            return text
         except httpx.RequestError as e:
             logger.warning(f"DuckDB API network error for {gmail_id}: {e}")
         except httpx.HTTPStatusError as e:
             logger.warning(
-                f"DuckDB API error for {gmail_id}: " f"HTTP {e.response.status_code}"
+                f"DuckDB API error for {gmail_id}: HTTP {e.response.status_code}"
             )
         except Exception as e:
             logger.warning(f"Failed to fetch body from API for {gmail_id}: {e}")
@@ -709,11 +713,37 @@ class TriageWorker:
             return [labels]
         return labels
 
+    def _get_existing_cortex_labels(self, gmail_id: str) -> list[str]:
+        """Get existing Cortex/* labels from previous classifications.
+
+        When re-triaging an email, we need to remove old Cortex labels
+        before applying new ones. This queries the most recent classification
+        for this email to find which Cortex labels were previously applied.
+        """
+        with self._get_conn() as conn, conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT action_taken->>'label' as label
+                FROM classifications
+                WHERE gmail_id = %s
+                  AND action_taken->>'label' IS NOT NULL
+                  AND action_taken->>'label' LIKE %s
+                ORDER BY classified_at DESC
+                """,
+                (gmail_id, f"{self.rules.label_prefix}/%"),
+            )
+            rows = cur.fetchall()
+            # Return unique labels
+            return list({row[0] for row in rows if row[0]})
+
     def _enqueue_labeling(self, action: Action, gmail_id: str) -> bool:
         """Enqueue labeling action for batch processing.
 
         Instead of calling Gmail API directly, we enqueue the action
         for the labeling worker to process in batches.
+
+        When re-triaging, existing Cortex/* labels are automatically
+        removed to prevent label accumulation.
         """
         # Build list of labels to add
         add_labels: list[str] = []
@@ -721,8 +751,14 @@ class TriageWorker:
             add_labels.append(action.label)
         add_labels.extend(self._labels_to_list(action.add_label))
 
-        # Build list of labels to remove
+        # Build list of labels to remove - start with explicit removals
         remove_labels: list[str] = self._labels_to_list(action.remove_label)
+
+        # Get existing Cortex labels and remove any that aren't being re-added
+        existing_cortex = self._get_existing_cortex_labels(gmail_id)
+        for label in existing_cortex:
+            if label not in add_labels and label not in remove_labels:
+                remove_labels.append(label)
 
         payload = {
             "gmail_id": gmail_id,

@@ -487,6 +487,11 @@ def evaluate_chain(
 
         # Rule matched!
 
+        # Handle return_to_parent - exit this chain and continue in parent
+        if rule.return_to_parent:
+            _trace.append(f"  rule[{i}]: returning to parent chain")
+            return EvaluationResult(matched=False, returned=True, trace=_trace)
+
         # Handle jump
         if rule.jump:
             _trace.append(f"  rule[{i}]: jumping to chain '{rule.jump}'")
@@ -502,6 +507,12 @@ def evaluate_chain(
             )
             if result.matched:
                 return result
+            if result.returned:
+                # Sub-chain returned, continue matching in this chain
+                _trace.append(
+                    f"  rule[{i}]: jump chain '{rule.jump}' returned, continuing"
+                )
+                continue
             # Jump chain didn't match - continue to next rule
             _trace.append(
                 f"  rule[{i}]: jump chain '{rule.jump}' didn't match, continuing"
