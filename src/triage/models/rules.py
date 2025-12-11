@@ -74,6 +74,7 @@ class MatchCondition(BaseModel):
 
     # Other
     has_attachment: bool | None = None
+    body_is_mostly_links: bool | None = None  # True if body is mostly URLs
 
     # Compound conditions
     any_of: list[MatchCondition] | None = None
