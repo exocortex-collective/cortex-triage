@@ -15,7 +15,7 @@ import time
 from collections import defaultdict
 from collections.abc import Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 import psycopg2
@@ -55,16 +55,6 @@ class LabelingJob:
     archive: bool
     mark_read: bool
     star: bool
-
-
-@dataclass
-class BatchOperation:
-    """A batch of gmail_ids that share the same label operation."""
-
-    add_label_ids: list[str] = field(default_factory=list)
-    remove_label_ids: list[str] = field(default_factory=list)
-    gmail_ids: list[str] = field(default_factory=list)
-    job_ids: list[int] = field(default_factory=list)
 
 
 class GmailBatchClient:

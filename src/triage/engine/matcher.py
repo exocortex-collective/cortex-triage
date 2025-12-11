@@ -354,6 +354,13 @@ def matches_condition(
 
         category_name, expected_value = condition.email_category.split("/", 1)
 
+        if not category_name:
+            log.warning(
+                "Invalid email_category format, category name is empty",
+                email_category=condition.email_category,
+            )
+            return False
+
         if email_categories is None or category_name not in email_categories:
             log.warning(
                 "Email category not found in config",

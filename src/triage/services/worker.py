@@ -252,7 +252,9 @@ class OllamaClient:
                 if cat.lower() == answer:
                     return cat  # Return original case
             # Check if answer contains a category (in case LLM adds extra text)
-            for cat in categories:
+            # Sort by length descending to match longer categories first
+            # (e.g., 'presales' before 'sales')
+            for cat in sorted(categories, key=len, reverse=True):
                 if cat.lower() in answer:
                     return cat
             logger.warning(
