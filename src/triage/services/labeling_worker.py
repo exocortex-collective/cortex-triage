@@ -30,6 +30,10 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# How long a job can be in 'processing' before it's considered stale
+# and reset to 'pending' (visibility timeout)
+VISIBILITY_TIMEOUT_MINUTES = 5
+
 
 @dataclass
 class Config:
@@ -245,22 +249,35 @@ class LabelingWorker:
             self._get_pool().putconn(conn)
 
     def _claim_jobs(self, batch_size: int) -> list[LabelingJob]:
-        """Claim a batch of pending labeling jobs."""
+        """Claim a batch of pending labeling jobs.
+
+        Also resets stale jobs that have been processing for too long
+        (visibility timeout), handling crashed/killed workers.
+        """
         with self._get_conn() as conn, conn.cursor() as cur:
+            # Reset stale jobs and claim new ones in a single transaction
             cur.execute(
                 """
-                UPDATE queue
-                SET status = 'processing', claimed_at = NOW()
-                WHERE id IN (
+                WITH reset_stale AS (
+                    UPDATE queue
+                    SET status = 'pending', claimed_at = NULL
+                    WHERE queue_name = 'labeling'
+                      AND status = 'processing'
+                      AND claimed_at < NOW() - (INTERVAL '1 minute' * %s)
+                ),
+                claimable AS (
                     SELECT id FROM queue
                     WHERE queue_name = 'labeling' AND status = 'pending'
                     ORDER BY created_at
                     LIMIT %s
                     FOR UPDATE SKIP LOCKED
                 )
+                UPDATE queue
+                SET status = 'processing', claimed_at = NOW()
+                WHERE id IN (SELECT id FROM claimable)
                 RETURNING id, payload
                 """,
-                (batch_size,),
+                (VISIBILITY_TIMEOUT_MINUTES, batch_size),
             )
             rows = cur.fetchall()
             conn.commit()
