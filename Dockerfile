@@ -17,7 +17,7 @@ RUN useradd --create-home --shell /bin/false appuser
 # Install dependencies (before copying source for better caching)
 # Need src/ stub for uv sync to work with editable install
 COPY src/triage/__init__.py ./src/triage/__init__.py
-RUN uv sync --frozen --no-dev
+RUN uv sync --frozen --no-dev && chown -R appuser:appuser /app/.venv
 
 # Copy application source (config is mounted at runtime, not baked in)
 COPY --chown=appuser:appuser src/ ./src/
