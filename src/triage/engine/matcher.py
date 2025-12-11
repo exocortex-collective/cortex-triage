@@ -114,9 +114,9 @@ def _is_mostly_links(body: str | None, threshold: float = 0.5) -> bool:
     if not body_stripped:
         return False
 
-    # Remove all whitespace to get "content" length
-    content_no_ws = re.sub(r"\s+", "", body_stripped)
-    content_length = len(content_no_ws)
+    # Calculate content length without creating intermediate string (memory efficient)
+    whitespace_count = sum(1 for _ in re.finditer(r"\s", body_stripped))
+    content_length = len(body_stripped) - whitespace_count
     if content_length == 0:
         return False
 
