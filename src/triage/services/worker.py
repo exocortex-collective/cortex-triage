@@ -847,8 +847,11 @@ class TriageWorker:
                 else:
                     logger.warning(f"Action failed for {gmail_id}: {result.action}")
             else:
-                logger.info(f"No match for {gmail_id}")
-                # Log trace at info level when no match for debugging
+                if not result.matched:
+                    logger.info(f"No match for {gmail_id}")
+                else:
+                    logger.info(f"Matched but no action for {gmail_id}")
+                # Log trace at info level for debugging
                 if result.trace:
                     trace_str = "\n".join(result.trace)
                     logger.info(f"Decision trace:\n{trace_str}")
