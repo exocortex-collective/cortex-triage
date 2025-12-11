@@ -245,19 +245,32 @@ class LabelingWorker:
             self._get_pool().putconn(conn)
 
     def _claim_jobs(self, batch_size: int) -> list[LabelingJob]:
-        """Claim a batch of pending labeling jobs."""
+        """Claim a batch of pending labeling jobs.
+
+        Also resets stale jobs that have been processing for too long
+        (visibility timeout), handling crashed/killed workers.
+        """
         with self._get_conn() as conn, conn.cursor() as cur:
+            # Reset stale jobs and claim new ones in a single transaction
             cur.execute(
                 """
-                UPDATE queue
-                SET status = 'processing', claimed_at = NOW()
-                WHERE id IN (
+                WITH reset_stale AS (
+                    UPDATE queue
+                    SET status = 'pending', claimed_at = NULL
+                    WHERE queue_name = 'labeling'
+                      AND status = 'processing'
+                      AND claimed_at < NOW() - INTERVAL '5 minutes'
+                ),
+                claimable AS (
                     SELECT id FROM queue
                     WHERE queue_name = 'labeling' AND status = 'pending'
                     ORDER BY created_at
                     LIMIT %s
                     FOR UPDATE SKIP LOCKED
                 )
+                UPDATE queue
+                SET status = 'processing', claimed_at = NOW()
+                WHERE id IN (SELECT id FROM claimable)
                 RETURNING id, payload
                 """,
                 (batch_size,),
