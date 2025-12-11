@@ -6,6 +6,24 @@ label_prefix: "Cortex"
 # Intent definitions for LLM-based matching
 # These can override built-in intents or define new ones
 intents:
+  archive_request:
+    prompt: |
+      This is a self-sent email subject. Does the word "archive" or similar
+      words like "save", "bookmark", or "keep" appear in it, suggesting the
+      sender wants to save something?
+      Subject: "{subject}"
+      Answer only: yes or no
+    model: "gemma3n:e4b"
+
+  todo_request:
+    prompt: |
+      This is a self-sent email subject. Does it suggest a task, reminder,
+      todo item, or something to do later? Look for words like "todo", "task",
+      "reminder", "need to", "don't forget", etc.
+      Subject: "{subject}"
+      Answer only: yes or no
+    model: "gemma3n:e4b"
+
   meme_or_funny:
     prompt: |
       Does this email subject suggest the sender is sharing something funny,
@@ -13,7 +31,7 @@ intents:
       "funny", "meme", "look at this", or similar casual language.
       Subject: "{subject}"
       Answer only: yes or no
-    model: "qwen2.5:0.5b"
+    model: "gemma3n:e4b"
 
 chains:
   main:
@@ -59,13 +77,13 @@ chains:
         label: "Uncategorized"
 
   self_note:
-    # Archive workflow for URLs - uses LLM intent matching
+    # Archive workflow - uses LLM intent matching
     - match:
         subject_intent: "archive_request"
       action:
         label: "Archiver"
 
-    # Todo items
+    # Todo items - uses LLM intent matching
     - match:
         subject_intent: "todo_request"
       action:
