@@ -11,8 +11,8 @@ RUN pip install uv
 # Copy dependency definitions first (for layer caching)
 COPY pyproject.toml uv.lock README.md ./
 
-# Create non-root system user (no shell, no home for security)
-RUN useradd --system --shell /bin/false appuser
+# Create non-root user with home directory for uv cache
+RUN useradd --create-home --shell /bin/false appuser
 
 # Install dependencies (before copying source for better caching)
 # Need src/ stub for uv sync to work with editable install
