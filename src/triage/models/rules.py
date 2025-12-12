@@ -222,9 +222,15 @@ class Rule(BaseModel):
     @model_validator(mode="after")
     def check_exclusive_outcomes(self) -> Rule:
         """Ensure a rule has exactly one outcome defined."""
+        # Note: return_to_parent only counts as an outcome when True
+        # (False or None = no outcome, True = outcome)
         outcomes_defined = sum(
-            x is not None
-            for x in (self.action, self.jump, self.return_to_parent, self.llm)
+            [
+                self.action is not None,
+                self.jump is not None,
+                self.return_to_parent is True,
+                self.llm is not None,
+            ]
         )
 
         if outcomes_defined == 0:

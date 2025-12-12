@@ -489,7 +489,7 @@ def evaluate_chain(
 
         # Handle return_to_parent - exit this chain and continue in parent
         if rule.return_to_parent:
-            _trace.append(f"  rule[{i}]: returning to parent chain")
+            _trace.append(f"  rule[{i}]: chain '{chain_name}' returning to parent")
             return EvaluationResult(matched=False, returned=True, trace=_trace)
 
         # Handle jump

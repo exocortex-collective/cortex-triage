@@ -759,6 +759,10 @@ class TriageWorker:
             if label not in add_labels and label not in remove_labels:
                 remove_labels.append(label)
 
+        # Defensive check: ensure no label appears in both add and remove lists
+        # (add takes precedence - we don't remove labels we're about to add)
+        remove_labels = [label for label in remove_labels if label not in add_labels]
+
         payload = {
             "gmail_id": gmail_id,
             "add_labels": add_labels,
