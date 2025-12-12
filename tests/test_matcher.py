@@ -1211,3 +1211,255 @@ class TestEmailCategory:
         )
 
         assert result is False
+
+
+class TestReturnToParent:
+    """Tests for return_to_parent rule outcome."""
+
+    def test_return_to_parent_basic(self) -> None:
+        """Test basic return_to_parent exits chain and continues in parent."""
+        email = Email(
+            id=1,
+            gmail_id="abc123",
+            from_addr="project@kickstarter.com",
+            to_addrs=["me@example.com"],
+            subject="Project Update: Cool Thing",
+        )
+        config = RulesConfig(
+            chains={
+                "main": [
+                    # Jump to transactional for all emails
+                    Rule(
+                        match=MatchCondition(),
+                        jump="transactional",
+                    ),
+                    # Fallback if transactional returns
+                    Rule(
+                        match=MatchCondition(),
+                        action=Action(label="Other"),
+                    ),
+                ],
+                "transactional": [
+                    # Kickstarter project updates are not transactional - return
+                    Rule(
+                        match=MatchCondition(from_contains="kickstarter"),
+                        return_to_parent=True,
+                    ),
+                    # Everything else in transactional chain
+                    Rule(
+                        match=MatchCondition(),
+                        action=Action(label="Transactional"),
+                    ),
+                ],
+            }
+        )
+
+        result = evaluate(config, email)
+
+        assert result.matched
+        assert result.action is not None
+        # Should match the "Other" fallback in main chain after return
+        assert result.action.label == "Cortex/Other"
+        assert result.chain == "main"
+
+    def test_return_to_parent_nested_chains(self) -> None:
+        """Test return_to_parent from nested chains (A -> B -> return, A continues)."""
+        email = Email(
+            id=1,
+            gmail_id="abc123",
+            from_addr="special@example.com",
+            to_addrs=["me@example.com"],
+            subject="Special case",
+        )
+        config = RulesConfig(
+            chains={
+                "main": [
+                    Rule(match=MatchCondition(), jump="chain_a"),
+                    Rule(match=MatchCondition(), action=Action(label="MainFallback")),
+                ],
+                "chain_a": [
+                    Rule(match=MatchCondition(), jump="chain_b"),
+                    Rule(match=MatchCondition(), action=Action(label="ChainAFallback")),
+                ],
+                "chain_b": [
+                    # Return immediately
+                    Rule(match=MatchCondition(), return_to_parent=True),
+                ],
+            }
+        )
+
+        result = evaluate(config, email)
+
+        assert result.matched
+        assert result.action is not None
+        # chain_b returns, chain_a continues to fallback
+        assert result.action.label == "Cortex/ChainAFallback"
+        assert result.chain == "chain_a"
+
+    def test_return_to_parent_continues_matching(self) -> None:
+        """Test that return allows parent chain to continue matching."""
+        email = Email(
+            id=1,
+            gmail_id="abc123",
+            from_addr="sender@example.com",
+            to_addrs=["me@example.com"],
+            subject="Test email",
+        )
+        config = RulesConfig(
+            chains={
+                "main": [
+                    Rule(match=MatchCondition(), jump="sub_chain"),
+                    # This should be evaluated after sub_chain returns
+                    Rule(
+                        match=MatchCondition(from_contains="sender"),
+                        action=Action(label="MatchedAfterReturn"),
+                    ),
+                    Rule(match=MatchCondition(), action=Action(label="Fallback")),
+                ],
+                "sub_chain": [
+                    Rule(match=MatchCondition(), return_to_parent=True),
+                ],
+            }
+        )
+
+        result = evaluate(config, email)
+
+        assert result.matched
+        assert result.action is not None
+        # Should match the rule with from_contains="sender" after return
+        assert result.action.label == "Cortex/MatchedAfterReturn"
+
+    def test_return_to_parent_no_subsequent_match(self) -> None:
+        """Test return_to_parent when no subsequent rules match in parent."""
+        email = Email(
+            id=1,
+            gmail_id="abc123",
+            from_addr="unknown@example.com",
+            to_addrs=["me@example.com"],
+            subject="Unknown email",
+        )
+        config = RulesConfig(
+            chains={
+                "main": [
+                    Rule(match=MatchCondition(), jump="sub_chain"),
+                    # This won't match
+                    Rule(
+                        match=MatchCondition(from_contains="specific"),
+                        action=Action(label="Specific"),
+                    ),
+                ],
+                "sub_chain": [
+                    Rule(match=MatchCondition(), return_to_parent=True),
+                ],
+            }
+        )
+
+        result = evaluate(config, email)
+
+        # No rules matched after return
+        assert not result.matched
+        assert result.action is None
+
+    def test_return_to_parent_in_main_chain(self) -> None:
+        """Test return_to_parent in main chain (edge case - no parent)."""
+        email = Email(
+            id=1,
+            gmail_id="abc123",
+            from_addr="test@example.com",
+            to_addrs=["me@example.com"],
+            subject="Test",
+        )
+        config = RulesConfig(
+            chains={
+                "main": [
+                    # return_to_parent in main chain - should behave as no match
+                    Rule(match=MatchCondition(), return_to_parent=True),
+                    Rule(match=MatchCondition(), action=Action(label="Fallback")),
+                ],
+            }
+        )
+
+        result = evaluate(config, email)
+
+        # return_to_parent in main chain means no match (nowhere to return to)
+        assert not result.matched
+        assert result.returned is True
+
+    def test_return_to_parent_trace_includes_chain_name(self) -> None:
+        """Test that return_to_parent trace message includes chain name."""
+        email = Email(
+            id=1,
+            gmail_id="abc123",
+            from_addr="test@example.com",
+            to_addrs=["me@example.com"],
+            subject="Test",
+        )
+        config = RulesConfig(
+            chains={
+                "main": [
+                    Rule(match=MatchCondition(), jump="sub_chain"),
+                ],
+                "sub_chain": [
+                    Rule(match=MatchCondition(), return_to_parent=True),
+                ],
+            }
+        )
+
+        result = evaluate(config, email)
+
+        # Check trace includes chain name
+        trace_str = " ".join(result.trace)
+        assert "sub_chain" in trace_str
+        assert "returning to parent" in trace_str
+
+    def test_return_to_parent_conditional(self) -> None:
+        """Test return_to_parent with conditional match."""
+        # Email that doesn't match return condition
+        email1 = Email(
+            id=1,
+            gmail_id="abc123",
+            from_addr="receipt@store.com",
+            to_addrs=["me@example.com"],
+            subject="Your receipt",
+        )
+        # Email that matches return condition
+        email2 = Email(
+            id=2,
+            gmail_id="def456",
+            from_addr="updates@kickstarter.com",
+            to_addrs=["me@example.com"],
+            subject="Project Update",
+        )
+
+        config = RulesConfig(
+            chains={
+                "main": [
+                    Rule(match=MatchCondition(), jump="transactional"),
+                    Rule(
+                        match=MatchCondition(), action=Action(label="NonTransactional")
+                    ),
+                ],
+                "transactional": [
+                    # Only kickstarter updates return
+                    Rule(
+                        match=MatchCondition(from_contains="kickstarter"),
+                        return_to_parent=True,
+                    ),
+                    Rule(match=MatchCondition(), action=Action(label="Transactional")),
+                ],
+            }
+        )
+
+        # Email1 should stay in transactional chain
+        result1 = evaluate(config, email1)
+        assert result1.matched
+        assert result1.action is not None
+        assert result1.action.label == "Cortex/Transactional"
+        assert result1.chain == "transactional"
+
+        # Email2 should return and match NonTransactional
+        result2 = evaluate(config, email2)
+        assert result2.matched
+        assert result2.action is not None
+        assert result2.action.label == "Cortex/NonTransactional"
+        assert result2.chain == "main"

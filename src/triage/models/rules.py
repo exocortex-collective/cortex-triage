@@ -201,29 +201,47 @@ class LLMConfig(BaseModel):
 
 
 class Rule(BaseModel):
-    """A single rule in a chain."""
+    """A single rule in a chain.
+
+    Outcomes (mutually exclusive):
+    - action: Apply labels/archive/etc
+    - jump: Enter a sub-chain for further evaluation
+    - return_to_parent: Exit this chain and continue matching in parent chain
+    - llm: Use LLM classification with routes
+    """
 
     match: MatchCondition = Field(
         default_factory=lambda: MatchCondition()  # type: ignore[call-arg]
     )
     action: Action | None = None
     jump: str | None = None
+    return_to_parent: bool | None = None  # Exit chain, continue in parent
     llm: LLMConfig | None = None
     routes: dict[str, Action] | None = None
 
     @model_validator(mode="after")
     def check_exclusive_outcomes(self) -> Rule:
         """Ensure a rule has exactly one outcome defined."""
+        # Note: return_to_parent only counts as an outcome when True
+        # (False or None = no outcome, True = outcome)
         outcomes_defined = sum(
-            x is not None for x in (self.action, self.jump, self.llm)
+            [
+                self.action is not None,
+                self.jump is not None,
+                self.return_to_parent is True,
+                self.llm is not None,
+            ]
         )
 
         if outcomes_defined == 0:
-            raise ValueError("Rule must have one of 'action', 'jump', or 'llm'.")
+            raise ValueError(
+                "Rule must have one of 'action', 'jump', 'return_to_parent', or 'llm'."
+            )
 
         if outcomes_defined > 1:
             raise ValueError(
-                "Rule can only have one of 'action', 'jump', or 'llm' defined."
+                "Rule can only have one of 'action', 'jump', "
+                "'return_to_parent', or 'llm' defined."
             )
 
         if self.llm and not self.routes:
@@ -259,6 +277,7 @@ class EvaluationResult(BaseModel):
     """Result of evaluating rules against an email."""
 
     matched: bool = False
+    returned: bool = False  # True if chain returned to parent via return_to_parent
     chain: str | None = None
     rule_index: int | None = None
     action: Action | None = None
