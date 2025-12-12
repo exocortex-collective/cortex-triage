@@ -714,11 +714,11 @@ class TriageWorker:
         return labels
 
     def _get_existing_cortex_labels(self, gmail_id: str) -> list[str]:
-        """Get existing Cortex/* labels from previous classifications.
+        """Get all unique Cortex/* labels from previous classifications.
 
         When re-triaging an email, we need to remove old Cortex labels
-        before applying new ones. This queries the most recent classification
-        for this email to find which Cortex labels were previously applied.
+        before applying new ones. This queries all historical classifications
+        for this email to find all unique Cortex labels that were previously applied.
         """
         with self._get_conn() as conn, conn.cursor() as cur:
             cur.execute(
@@ -728,7 +728,6 @@ class TriageWorker:
                 WHERE gmail_id = %s
                   AND action_taken->>'label' IS NOT NULL
                   AND action_taken->>'label' LIKE %s
-                ORDER BY classified_at DESC
                 """,
                 (gmail_id, f"{self.rules.label_prefix}/%"),
             )
