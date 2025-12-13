@@ -363,7 +363,7 @@ CREATE TABLE classifications (
 
     -- Action taken
     action_taken JSONB,           -- full action ({label, add_label, remove_label, archive, star, mark_read})
-    action_executed BOOLEAN DEFAULT FALSE,  -- set true by triage-worker when action enqueued
+    action_executed BOOLEAN DEFAULT FALSE,  -- set true when action enqueued (does not guarantee final execution)
 
     classified_at TIMESTAMPTZ DEFAULT NOW()
 );
