@@ -42,7 +42,7 @@ Like iptables/nftables:
 ### Rule Evaluation
 
 ```
-1. Load rules from YAML (MVP) or Postgres (multi-user)
+1. Load rules from YAML
 2. Start at "main" chain
 3. For each rule in order:
    a. Evaluate match conditions against email
@@ -284,14 +284,26 @@ Triage handles **inbox management only** - applying labels and organizing email.
 
 ## Services
 
+Triage runs as 2 Docker containers:
+
+| Service | Container | Purpose |
+|---------|-----------|---------|
+| triage-worker | cortex-triage-worker | Rules engine, LLM classification |
+| labeling-worker | cortex-labeling-worker | Gmail label application |
+
 ### triage-worker
 
-Single service that:
-1. Dequeues from `triage` queue
-2. Loads rules (from YAML or Postgres)
-3. Evaluates rules against email
-4. Executes matched action
-5. Records classification for audit
+Dequeues from `triage` queue and:
+1. Loads rules (from YAML)
+2. Evaluates rules against email
+3. If an action is required, enqueues a job for the `labeling-worker`
+4. Records classification in `classifications` table
+
+### labeling-worker
+
+Dequeues jobs from the `labeling` queue and:
+1. Modifies Gmail labels via the API to apply actions (custom labels, archive, mark_read, star)
+2. Marks the job as complete in the queue upon success
 
 **Pseudocode**:
 ```python
@@ -309,7 +321,11 @@ while True:
     result = evaluate_chain(rules, 'main', email)
 
     if result.action:
-        execute_action(result.action, email, item.payload['gmail_id'])
+        # Note: actual payload is more detailed (see worker.py _enqueue_labeling)
+        db.enqueue('labeling', {
+            'gmail_id': item.payload['gmail_id'],
+            'action': result.action
+        })
 
     # Record for audit
     db.insert_classification(
@@ -332,25 +348,22 @@ Stores classification history - every evaluation is a new row, enabling re-evalu
 ```sql
 CREATE TABLE classifications (
     id BIGSERIAL PRIMARY KEY,
-    email_id BIGINT NOT NULL REFERENCES emails_raw(id),
+    email_id BIGINT NOT NULL,     -- Logically references emails_raw(id). No FK to preserve classifications for soft-deleted emails.
     gmail_id TEXT NOT NULL,
 
     -- Rule matching
     matched_chain TEXT,           -- which chain matched (NULL = no match)
     matched_rule_index INT,       -- rule position in chain
-    match_conditions JSONB,       -- conditions that matched
     rules_version TEXT,           -- rules.yaml version that was used
 
     -- LLM (if used)
     llm_category TEXT,            -- category from LLM
     llm_confidence REAL,
     llm_reasoning TEXT,
-    llm_model TEXT,
-    llm_prompt_version TEXT,
 
     -- Action taken
-    action_taken JSONB,           -- full action executed (NULL = no action)
-    action_executed BOOLEAN DEFAULT FALSE,  -- was action actually run?
+    action_taken JSONB,           -- full action ({label, add_label, remove_label, archive, star, mark_read})
+    action_executed BOOLEAN DEFAULT FALSE,  -- set true when action enqueued (does not guarantee final execution)
 
     classified_at TIMESTAMPTZ DEFAULT NOW()
 );
@@ -466,9 +479,12 @@ def handle_label_change(gmail_id: str, new_label: str) -> None:
     )
 ```
 
-### Label Corrections Table
+### Label Corrections Table (Future)
+
+**Note**: This table is not yet implemented. When implemented, it will track user corrections for training/feedback.
 
 ```sql
+-- Future: track user corrections to classifications
 CREATE TABLE label_corrections (
     id BIGSERIAL PRIMARY KEY,
     gmail_id TEXT NOT NULL,
@@ -477,12 +493,9 @@ CREATE TABLE label_corrections (
     corrected_label TEXT NOT NULL,
     corrected_at TIMESTAMPTZ DEFAULT NOW()
 );
-
-CREATE INDEX idx_corrections_gmail ON label_corrections(gmail_id);
-CREATE INDEX idx_corrections_date ON label_corrections(corrected_at DESC);
 ```
 
-**Uses for corrections:**
+**Planned uses for corrections:**
 - Review misclassifications to improve rules
 - Training data for LLM fine-tuning
 - Metrics: correction rate by category
@@ -748,6 +761,20 @@ services:
     volumes:
       - ./secrets:/app/secrets:ro
       - ./config:/app/config:ro
+
+  labeling-worker:
+    image: us-central1-docker.pkg.dev/cortex-gmail/cortex/triage:latest
+    container_name: cortex-labeling-worker
+    command: ["uv", "run", "python", "-m", "triage.services.labeling_worker"]
+    restart: unless-stopped
+    environment:
+      - POSTGRES_HOST=${POSTGRES_HOST}
+      - POSTGRES_DB=${POSTGRES_DB:-cortex}
+      - POSTGRES_USER=${POSTGRES_USER:-cortex}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - GMAIL_TOKEN_PATH=/app/secrets/gmail-token.json
+    volumes:
+      - ./secrets:/app/secrets:ro
 ```
 
 Environment variables are configured in Portainer stack settings.
