@@ -296,14 +296,13 @@ Triage runs as 2 Docker containers:
 Dequeues from `triage` queue and:
 1. Loads rules (from YAML)
 2. Evaluates rules against email
-3. Records classification in `classifications` table
-4. If an action is required, enqueues a job for the `labeling-worker`
+3. If an action is required, enqueues a job for the `labeling-worker`
+4. Records classification in `classifications` table
 
 ### labeling-worker
 
 Dequeues jobs from the `labeling` queue and:
-1. Applies Gmail labels via Gmail API
-2. Executes archive/mark_read/star actions
+1. Modifies Gmail labels via the API to apply actions (custom labels, archive, mark_read, star)
 
 **Pseudocode**:
 ```python
