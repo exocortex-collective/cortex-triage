@@ -285,6 +285,80 @@ def matches_condition(
         if not any(_normalize(n) in body_norm for n in body_contains):
             return False
 
+    # Header matching (glob patterns) - all specified headers must match
+    if condition.header:
+        for header_name, pattern in condition.header.items():
+            header_value = email.headers.get(header_name.lower(), "")
+            # Missing header (empty value) never matches
+            if not header_value or not _match_glob(pattern, header_value):
+                _trace(f"header[{header_name}]: '{header_value}' !~ '{pattern}'")
+                return False
+
+    # Header contains (substring) - all specified headers must contain substring
+    if condition.header_contains:
+        for header_name, substring in condition.header_contains.items():
+            header_value = email.headers.get(header_name.lower(), "")
+            # Empty substring would match everything - treat as no match
+            if not substring or _normalize(substring) not in _normalize(header_value):
+                _trace(f"header_contains[{header_name}]: no match")
+                return False
+
+    # List-ID aliases (shortcuts for header matching on List-ID)
+    list_id_value = email.headers.get("list-id", "")
+
+    list_ids = _to_list(condition.list_id)
+    if list_ids:
+        if not list_id_value:
+            return False
+        list_id_norm = _normalize(list_id_value)
+        if not any(list_id_norm == _normalize(lid) for lid in list_ids):
+            return False
+
+    list_id_globs = _to_list(condition.list_id_glob)
+    if list_id_globs:
+        if not list_id_value:
+            return False
+        list_id_norm = _normalize(list_id_value)
+        if not any(fnmatch.fnmatch(list_id_norm, _normalize(g)) for g in list_id_globs):
+            return False
+
+    list_id_contains = _to_list(condition.list_id_contains)
+    if list_id_contains:
+        if not list_id_value:
+            return False
+        list_id_norm = _normalize(list_id_value)
+        if not any(_normalize(s) in list_id_norm for s in list_id_contains):
+            return False
+
+    # Reply-To aliases (shortcuts for header matching on Reply-To)
+    reply_to_value = email.headers.get("reply-to", "")
+
+    reply_tos = _to_list(condition.reply_to)
+    if reply_tos:
+        if not reply_to_value:
+            return False
+        reply_to_norm = _normalize(reply_to_value)
+        if not any(reply_to_norm == _normalize(rt) for rt in reply_tos):
+            return False
+
+    reply_to_globs = _to_list(condition.reply_to_glob)
+    if reply_to_globs:
+        if not reply_to_value:
+            return False
+        reply_to_norm = _normalize(reply_to_value)
+        if not any(
+            fnmatch.fnmatch(reply_to_norm, _normalize(g)) for g in reply_to_globs
+        ):
+            return False
+
+    reply_to_contains = _to_list(condition.reply_to_contains)
+    if reply_to_contains:
+        if not reply_to_value:
+            return False
+        reply_to_norm = _normalize(reply_to_value)
+        if not any(_normalize(s) in reply_to_norm for s in reply_to_contains):
+            return False
+
     # Regex (any pattern in list)
     subject_regexes = _to_list(condition.subject_regex)
     if subject_regexes and not any(
