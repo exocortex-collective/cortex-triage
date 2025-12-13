@@ -321,6 +321,7 @@ while True:
     result = evaluate_chain(rules, 'main', email)
 
     if result.action:
+        # Note: actual payload is more detailed (see worker.py _enqueue_labeling)
         db.enqueue('labeling', {
             'gmail_id': item.payload['gmail_id'],
             'action': result.action
@@ -760,6 +761,20 @@ services:
     volumes:
       - ./secrets:/app/secrets:ro
       - ./config:/app/config:ro
+
+  labeling-worker:
+    image: us-central1-docker.pkg.dev/cortex-gmail/cortex/triage:latest
+    container_name: cortex-labeling-worker
+    command: ["uv", "run", "python", "-m", "triage.services.labeling_worker"]
+    restart: unless-stopped
+    environment:
+      - POSTGRES_HOST=${POSTGRES_HOST}
+      - POSTGRES_DB=${POSTGRES_DB:-cortex}
+      - POSTGRES_USER=${POSTGRES_USER:-cortex}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - GMAIL_TOKEN_PATH=/app/secrets/gmail-token.json
+    volumes:
+      - ./secrets:/app/secrets:ro
 ```
 
 Environment variables are configured in Portainer stack settings.
