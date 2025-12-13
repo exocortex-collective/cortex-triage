@@ -42,7 +42,7 @@ Like iptables/nftables:
 ### Rule Evaluation
 
 ```
-1. Load rules from YAML (MVP) or Postgres (multi-user)
+1. Load rules from YAML
 2. Start at "main" chain
 3. For each rule in order:
    a. Evaluate match conditions against email
