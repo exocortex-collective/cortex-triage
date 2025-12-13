@@ -303,6 +303,7 @@ Dequeues from `triage` queue and:
 
 Dequeues jobs from the `labeling` queue and:
 1. Modifies Gmail labels via the API to apply actions (custom labels, archive, mark_read, star)
+2. Marks the job as complete in the queue upon success
 
 **Pseudocode**:
 ```python
@@ -346,7 +347,7 @@ Stores classification history - every evaluation is a new row, enabling re-evalu
 ```sql
 CREATE TABLE classifications (
     id BIGSERIAL PRIMARY KEY,
-    email_id BIGINT NOT NULL,     -- references emails_raw(id), soft-deleted emails preserved
+    email_id BIGINT NOT NULL,     -- Logically references emails_raw(id). No FK to preserve classifications for soft-deleted emails.
     gmail_id TEXT NOT NULL,
 
     -- Rule matching
