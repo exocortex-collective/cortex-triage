@@ -1524,6 +1524,21 @@ class TestHeaderMatching:
         condition = MatchCondition(header_contains={"List-ID": "hackathon"})
         assert not matches_condition(condition, email)
 
+    def test_header_contains_empty_substring_no_match(self) -> None:
+        """Test that empty substring doesn't match everything."""
+        email = Email(
+            id=1,
+            gmail_id="abc123",
+            from_addr="test@example.com",
+            to_addrs=["me@example.com"],
+            subject="Test",
+            headers={"list-id": "<test.googlegroups.com>"},
+        )
+
+        # Empty substring should not match (would be a misconfigured rule)
+        condition = MatchCondition(header_contains={"List-ID": ""})
+        assert not matches_condition(condition, email)
+
     def test_header_missing_returns_false(self) -> None:
         """Test that missing header returns False."""
         email = Email(

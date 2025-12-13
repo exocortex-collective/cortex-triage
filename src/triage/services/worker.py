@@ -673,7 +673,7 @@ class TriageWorker:
 
                 # Convert headers from JSONB array to dict (lowercase keys)
                 # Format: [{"name": "List-ID", "value": "<foo.bar>"}, ...]
-                # Per RFC 2822, duplicate headers are concatenated with comma
+                # Duplicate headers (rare, mainly Received) are concatenated with comma
                 headers_dict: dict[str, str] = {}
                 raw_headers = row[7]
                 if raw_headers:
