@@ -284,14 +284,27 @@ Triage handles **inbox management only** - applying labels and organizing email.
 
 ## Services
 
+Triage runs as 2 Docker containers:
+
+| Service | Container | Purpose |
+|---------|-----------|---------|
+| triage-worker | cortex-triage-worker | Rules engine, LLM classification |
+| labeling-worker | cortex-labeling-worker | Gmail label application |
+
 ### triage-worker
 
-Single service that:
-1. Dequeues from `triage` queue
-2. Loads rules (from YAML or Postgres)
-3. Evaluates rules against email
-4. Executes matched action
-5. Records classification for audit
+Dequeues from `triage` queue and:
+1. Loads rules (from YAML)
+2. Evaluates rules against email
+3. Records classification in `classifications` table
+4. If action includes label, sets `action_executed=false` for labeling-worker
+
+### labeling-worker
+
+Dequeues from completed classifications and:
+1. Applies Gmail labels via Gmail API
+2. Executes archive/mark_read/star actions
+3. Sets `action_executed=true` when complete
 
 **Pseudocode**:
 ```python
@@ -332,25 +345,22 @@ Stores classification history - every evaluation is a new row, enabling re-evalu
 ```sql
 CREATE TABLE classifications (
     id BIGSERIAL PRIMARY KEY,
-    email_id BIGINT NOT NULL REFERENCES emails_raw(id),
+    email_id BIGINT NOT NULL,     -- references emails_raw(id)
     gmail_id TEXT NOT NULL,
 
     -- Rule matching
     matched_chain TEXT,           -- which chain matched (NULL = no match)
     matched_rule_index INT,       -- rule position in chain
-    match_conditions JSONB,       -- conditions that matched
     rules_version TEXT,           -- rules.yaml version that was used
 
     -- LLM (if used)
     llm_category TEXT,            -- category from LLM
     llm_confidence REAL,
     llm_reasoning TEXT,
-    llm_model TEXT,
-    llm_prompt_version TEXT,
 
     -- Action taken
-    action_taken JSONB,           -- full action executed (NULL = no action)
-    action_executed BOOLEAN DEFAULT FALSE,  -- was action actually run?
+    action_taken JSONB,           -- full action ({label, archive, star, mark_read})
+    action_executed BOOLEAN DEFAULT FALSE,  -- set true by labeling-worker
 
     classified_at TIMESTAMPTZ DEFAULT NOW()
 );
@@ -359,8 +369,9 @@ CREATE INDEX idx_classifications_email ON classifications(email_id);
 CREATE INDEX idx_classifications_gmail ON classifications(gmail_id);
 CREATE INDEX idx_classifications_chain ON classifications(matched_chain);
 CREATE INDEX idx_classifications_date ON classifications(classified_at DESC);
-CREATE INDEX idx_classifications_rules_version ON classifications(rules_version);
 ```
+
+**Note**: The `action_executed` flag is used by the labeling-worker to find classifications that need Gmail actions applied.
 
 ### Re-evaluation Support
 
@@ -466,9 +477,12 @@ def handle_label_change(gmail_id: str, new_label: str) -> None:
     )
 ```
 
-### Label Corrections Table
+### Label Corrections Table (Future)
+
+**Note**: This table is not yet implemented. When implemented, it will track user corrections for training/feedback.
 
 ```sql
+-- Future: track user corrections to classifications
 CREATE TABLE label_corrections (
     id BIGSERIAL PRIMARY KEY,
     gmail_id TEXT NOT NULL,
@@ -477,12 +491,9 @@ CREATE TABLE label_corrections (
     corrected_label TEXT NOT NULL,
     corrected_at TIMESTAMPTZ DEFAULT NOW()
 );
-
-CREATE INDEX idx_corrections_gmail ON label_corrections(gmail_id);
-CREATE INDEX idx_corrections_date ON label_corrections(corrected_at DESC);
 ```
 
-**Uses for corrections:**
+**Planned uses for corrections:**
 - Review misclassifications to improve rules
 - Training data for LLM fine-tuning
 - Metrics: correction rate by category
