@@ -298,7 +298,8 @@ def matches_condition(
     if condition.header_contains:
         for header_name, substring in condition.header_contains.items():
             header_value = email.headers.get(header_name.lower(), "")
-            if _normalize(substring) not in _normalize(header_value):
+            # Empty substring would match everything - treat as no match
+            if not substring or _normalize(substring) not in _normalize(header_value):
                 _trace(f"header_contains[{header_name}]: no match")
                 return False
 

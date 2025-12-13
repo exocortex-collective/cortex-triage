@@ -673,6 +673,7 @@ class TriageWorker:
 
                 # Convert headers from JSONB array to dict (lowercase keys)
                 # Format: [{"name": "List-ID", "value": "<foo.bar>"}, ...]
+                # Per RFC 2822, duplicate headers are concatenated with comma
                 headers_dict: dict[str, str] = {}
                 raw_headers = row[7]
                 if raw_headers:
@@ -680,8 +681,12 @@ class TriageWorker:
                         name = h.get("name", "")
                         value = h.get("value", "")
                         if name:
-                            # Store with lowercase key for case-insensitive lookup
-                            headers_dict[name.lower()] = value
+                            lower_name = name.lower()
+                            if lower_name in headers_dict:
+                                # Concatenate values for duplicate headers
+                                headers_dict[lower_name] += f", {value}"
+                            else:
+                                headers_dict[lower_name] = value
 
                 return Email(
                     id=row[0],
