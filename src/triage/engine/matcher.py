@@ -285,6 +285,23 @@ def matches_condition(
         if not any(_normalize(n) in body_norm for n in body_contains):
             return False
 
+    # Header matching (glob patterns) - all specified headers must match
+    if condition.header:
+        for header_name, pattern in condition.header.items():
+            header_value = email.headers.get(header_name.lower(), "")
+            # Missing header (empty value) never matches
+            if not header_value or not _match_glob(pattern, header_value):
+                _trace(f"header[{header_name}]: '{header_value}' !~ '{pattern}'")
+                return False
+
+    # Header contains (substring) - all specified headers must contain substring
+    if condition.header_contains:
+        for header_name, substring in condition.header_contains.items():
+            header_value = email.headers.get(header_name.lower(), "")
+            if _normalize(substring) not in _normalize(header_value):
+                _trace(f"header_contains[{header_name}]: no match")
+                return False
+
     # Regex (any pattern in list)
     subject_regexes = _to_list(condition.subject_regex)
     if subject_regexes and not any(

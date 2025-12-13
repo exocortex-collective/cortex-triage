@@ -102,6 +102,13 @@ class MatchCondition(BaseModel):
     # Format: "category_name/expected_value" e.g., "transactional/invoice"
     email_category: str | None = None
 
+    # Header matching (from emails_raw.headers)
+    # Format: {"Header-Name": "pattern"} - all specified headers must match
+    # Header names are case-insensitive. Values support glob patterns.
+    # Example: header: {"List-ID": "*googlegroups*", "Reply-To": "*@noreply*"}
+    header: dict[str, str] | None = None  # Glob pattern match
+    header_contains: dict[str, str] | None = None  # Substring match
+
     # Other
     has_attachment: bool | None = None
     body_is_mostly_links: bool | None = None  # True if body is mostly URLs
@@ -271,6 +278,7 @@ class Email(BaseModel):
     subject: str
     body: str | None = None
     has_attachment: bool = False
+    headers: dict[str, str] = Field(default_factory=dict)  # Raw headers from emails_raw
 
 
 class EvaluationResult(BaseModel):

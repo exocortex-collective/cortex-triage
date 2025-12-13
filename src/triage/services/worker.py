@@ -647,9 +647,9 @@ class TriageWorker:
             return jobs
 
     def _get_email_data(self, gmail_id: str) -> Email | None:
-        """Fetch email data from emails_parsed and check for attachments."""
+        """Fetch email data from emails_parsed and headers from emails_raw."""
         with self._get_conn() as conn, conn.cursor() as cur:
-            # Get parsed email data and check if attachments exist
+            # Get parsed email data, raw headers, and check if attachments exist
             cur.execute(
                 """
                     SELECT
@@ -657,8 +657,10 @@ class TriageWorker:
                         ep.subject, ep.body_text,
                         EXISTS(
                             SELECT 1 FROM attachments a WHERE a.gmail_id = ep.gmail_id
-                        )
+                        ),
+                        er.headers
                     FROM emails_parsed ep
+                    LEFT JOIN emails_raw er ON ep.gmail_id = er.gmail_id
                     WHERE ep.gmail_id = %s
                 """,
                 (gmail_id,),
@@ -668,6 +670,19 @@ class TriageWorker:
                 # to_addrs is an array from the DB
                 to_addrs = row[3] if row[3] else []
                 has_attachment: bool = row[6] if row[6] is not None else False
+
+                # Convert headers from JSONB array to dict (lowercase keys)
+                # Format: [{"name": "List-ID", "value": "<foo.bar>"}, ...]
+                headers_dict: dict[str, str] = {}
+                raw_headers = row[7]
+                if raw_headers:
+                    for h in raw_headers:
+                        name = h.get("name", "")
+                        value = h.get("value", "")
+                        if name:
+                            # Store with lowercase key for case-insensitive lookup
+                            headers_dict[name.lower()] = value
+
                 return Email(
                     id=row[0],
                     gmail_id=row[1],
@@ -676,6 +691,7 @@ class TriageWorker:
                     subject=row[4] or "",
                     body=row[5],
                     has_attachment=has_attachment,
+                    headers=headers_dict,
                 )
         return None
 
