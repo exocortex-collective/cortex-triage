@@ -297,14 +297,13 @@ Dequeues from `triage` queue and:
 1. Loads rules (from YAML)
 2. Evaluates rules against email
 3. Records classification in `classifications` table
-4. If action includes label, sets `action_executed=false` for labeling-worker
+4. If an action is required, enqueues a job for the `labeling-worker`
 
 ### labeling-worker
 
-Dequeues from completed classifications and:
+Dequeues jobs from the `labeling` queue and:
 1. Applies Gmail labels via Gmail API
 2. Executes archive/mark_read/star actions
-3. Sets `action_executed=true` when complete
 
 **Pseudocode**:
 ```python
@@ -360,7 +359,7 @@ CREATE TABLE classifications (
 
     -- Action taken
     action_taken JSONB,           -- full action ({label, archive, star, mark_read})
-    action_executed BOOLEAN DEFAULT FALSE,  -- set true by labeling-worker
+    action_executed BOOLEAN DEFAULT FALSE,  -- set true by triage-worker when action enqueued
 
     classified_at TIMESTAMPTZ DEFAULT NOW()
 );
@@ -370,8 +369,6 @@ CREATE INDEX idx_classifications_gmail ON classifications(gmail_id);
 CREATE INDEX idx_classifications_chain ON classifications(matched_chain);
 CREATE INDEX idx_classifications_date ON classifications(classified_at DESC);
 ```
-
-**Note**: The `action_executed` flag is used by the labeling-worker to find classifications that need Gmail actions applied.
 
 ### Re-evaluation Support
 
