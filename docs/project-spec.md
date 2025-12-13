@@ -362,7 +362,7 @@ CREATE TABLE classifications (
     llm_reasoning TEXT,
 
     -- Action taken
-    action_taken JSONB,           -- full action ({label, archive, star, mark_read})
+    action_taken JSONB,           -- full action ({label, add_label, remove_label, archive, star, mark_read, webhook})
     action_executed BOOLEAN DEFAULT FALSE,  -- set true by triage-worker when action enqueued
 
     classified_at TIMESTAMPTZ DEFAULT NOW()
