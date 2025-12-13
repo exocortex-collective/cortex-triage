@@ -157,6 +157,14 @@ chains:
 | `subject_intent` | LLM intent classification (see below) | `"archive_request"` |
 | `has_attachment` | Email has attachments | `true` |
 | `body_contains` | Substring in body (fetched from DuckDB API) | `["unsubscribe"]` |
+| `header` | Glob match on any RFC822 header | `{List-ID: "*googlegroups*"}` |
+| `header_contains` | Substring match on any header | `{Reply-To: "noreply"}` |
+| `list_id` | Exact match on List-ID header | `"<list.example.com>"` |
+| `list_id_glob` | Glob pattern on List-ID | `"*googlegroups*"` |
+| `list_id_contains` | Substring in List-ID | `"nycresistor"` |
+| `reply_to` | Exact match on Reply-To header | `"noreply@example.com"` |
+| `reply_to_glob` | Glob pattern on Reply-To | `"*noreply*"` |
+| `reply_to_contains` | Substring in Reply-To | `"do-not-reply"` |
 | `{}` | Empty = match all (catch-all) | |
 
 ### Intent Matching (subject_intent)
@@ -264,6 +272,69 @@ def match_intent(subject: str, intent_config: dict) -> bool:
 - Only runs when rule is evaluated (after deterministic matches fail)
 - Low volume for self-note chain
 - Local inference, no API cost
+
+### Header Matching
+
+Match on any RFC822 email header using `header` (glob pattern) or `header_contains` (substring). Headers are fetched from `emails_raw.headers` at triage time, so no schema changes are needed to add new header filters.
+
+**Shorthand aliases** for common headers (List-ID and Reply-To):
+```yaml
+chains:
+  main:
+    # Using aliases (recommended for common headers)
+    - match:
+        list_id_glob: "*googlegroups*"
+      action:
+        label: "Lists/Google Groups"
+        archive: true
+
+    # Substring match on List-ID
+    - match:
+        list_id_contains: "nycresistor"
+      action:
+        label: "Lists/NYC Resistor"
+
+    # Reply-To matching
+    - match:
+        reply_to_glob: "*noreply*"
+      action:
+        label: "Automated"
+```
+
+**Generic header matching** (for any header):
+```yaml
+    # Match any header using dict format
+    - match:
+        header:
+          X-Mailer: "*Outlook*"
+      action:
+        label: "From Outlook"
+
+    # Substring match on any header
+    - match:
+        header_contains:
+          Precedence: "bulk"
+      action:
+        label: "Bulk Mail"
+```
+
+**Multiple headers (AND condition):**
+```yaml
+    # All specified headers must match
+    - match:
+        list_id_glob: "*googlegroups*"
+        reply_to_glob: "*noreply*"
+      action:
+        label: "Automated Lists"
+```
+
+**Common headers:**
+- `List-ID` - Mailing list identifier (e.g., `<list.example.com>`)
+- `Reply-To` - Address for replies (often indicates automated/no-reply)
+- `X-Mailer` - Email client that sent the message
+- `X-Spam-Status` - Spam filter status
+- `Precedence` - `bulk`, `list`, `junk` for automated emails
+- `Auto-Submitted` - `auto-generated`, `auto-replied` for automated emails
 
 ### Actions
 
@@ -796,7 +867,7 @@ Phase 2:
 - [ ] digest generation (daily/weekly Obsidian notes)
 - [ ] Web UI for rule management
 - [ ] Postgres rules storage (multi-user)
-- [ ] Queue cleanup job (purge completed items older than N days)
+- [x] Queue cleanup job (partition maintenance via cortex-utils)
 
 ### Gmail Filter Parity Checklist
 
@@ -812,8 +883,8 @@ Synapse should support everything Gmail filters can do, plus more. This checklis
 - [ ] `cc` - CC field matching
 - [ ] `bcc` - BCC field matching (Gmail: `bcc:me`)
 - [ ] `deliveredto` - Delivered-to header (useful for aliases)
-- [ ] `list` - Mailing list header (List-ID)
-- [ ] `replyto` - Reply-To header matching
+- [x] `list` - Mailing list header (List-ID) - via `header: {List-ID: pattern}`
+- [x] `replyto` - Reply-To header matching - via `header: {Reply-To: pattern}`
 
 **Content Matching:**
 - [x] `subject_contains` - Substring in subject
@@ -884,6 +955,48 @@ Synapse should support everything Gmail filters can do, plus more. This checklis
 - [x] LLM classification with routes
 - [x] Regex patterns on any field
 - [x] Built-in intents (archive_request, todo_request, question)
+- [x] Generic `header` matching - glob/substring on any RFC822 header
+
+## Reliability Checklist
+
+### Critical (Data Loss/Correctness)
+
+- [ ] **Gmail API rate limiting** - Add token bucket rate limiter for label operations (250 units/sec quota, label modify = 5 units, safe = ~50/sec)
+- [ ] **429 error handling** - Add exponential backoff when Gmail API returns rate limit errors
+- [ ] **Duplicate classification prevention** - Add idempotency check before inserting classification (prevent duplicates on job retry)
+- [ ] **Failed job retry limits** - Add max_attempts enforcement and auto-expiry for dead letter jobs
+
+### High Priority
+
+- [ ] **Explicit LLM failure handling** - Make LLM errors fail the job (or retry) instead of silent "no match" return
+- [ ] **Label cache race condition** - Fix concurrent label creation attempts when cache is cleared mid-operation
+- [ ] **Partial batch failure handling** - Don't fail entire batch when single email has permission error
+- [ ] **Transaction rollback on exception** - Add explicit rollback in exception handlers (don't rely on implicit behavior)
+- [ ] **Visibility timeout heartbeat** - Extend claimed_at for long-running jobs to prevent premature reclaim
+
+### Medium Priority
+
+- [ ] **Graceful shutdown** - Wait for in-flight jobs before exit, don't leave jobs in "processing" state
+- [ ] **Connection pool sizing** - Review pool size (currently minconn=1, maxconn=5) for expected load
+- [ ] **Regex pattern caching** - Pre-compile regex patterns instead of recompiling on every evaluation
+- [ ] **LLM confidence bounds** - Validate confidence is 0.0-1.0 before storing (reject NaN, infinity)
+- [ ] **Category substring matching** - Fix potential wrong category match when LLM response contains multiple keywords
+
+### Observability
+
+- [ ] **Prometheus metrics** - Add metrics for: `triage_processed_total`, `triage_llm_calls_total`, `triage_llm_latency_seconds`, `triage_gmail_api_errors_total`, `triage_queue_depth`
+- [ ] **Consistent structured logging** - Migrate worker.py from stdlib logging to structlog (matcher.py already uses structlog)
+- [ ] **Discord exception reporting** - Send critical errors (Gmail API failures, LLM timeouts, queue stalls) to Discord webhook
+- [ ] **Classification audit logging** - Log gmail_id, matched_chain, matched_rule, action, latency for each classification
+
+### Operational
+
+- [x] **Queue partitioning** - Migrated to daily partitioned queue table (cortex-utils)
+- [x] **Dead letter table** - Failed jobs preserved in dead_letter table before partition drop
+- [x] **Partition maintenance cron** - Daily job via Ofelia at 2 AM (cortex-utils)
+- [ ] **Dead letter alerting** - Alert when failed jobs exceed threshold
+- [ ] **Label correction tracking** - Implement `label_corrections` table (defined in spec but not implemented)
+- [ ] **Rules version tracking** - Store rules file hash in classifications for reprocessing detection
 
 ## Testing Strategy
 
