@@ -321,7 +321,10 @@ while True:
     result = evaluate_chain(rules, 'main', email)
 
     if result.action:
-        execute_action(result.action, email, item.payload['gmail_id'])
+        db.enqueue('labeling', {
+            'gmail_id': item.payload['gmail_id'],
+            'action': result.action
+        })
 
     # Record for audit
     db.insert_classification(
@@ -344,7 +347,7 @@ Stores classification history - every evaluation is a new row, enabling re-evalu
 ```sql
 CREATE TABLE classifications (
     id BIGSERIAL PRIMARY KEY,
-    email_id BIGINT NOT NULL,     -- references emails_raw(id)
+    email_id BIGINT NOT NULL,     -- references emails_raw(id), soft-deleted emails preserved
     gmail_id TEXT NOT NULL,
 
     -- Rule matching
@@ -368,6 +371,7 @@ CREATE INDEX idx_classifications_email ON classifications(email_id);
 CREATE INDEX idx_classifications_gmail ON classifications(gmail_id);
 CREATE INDEX idx_classifications_chain ON classifications(matched_chain);
 CREATE INDEX idx_classifications_date ON classifications(classified_at DESC);
+CREATE INDEX idx_classifications_rules_version ON classifications(rules_version);
 ```
 
 ### Re-evaluation Support
