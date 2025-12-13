@@ -1563,3 +1563,127 @@ class TestHeaderMatching:
             header={"List-ID": "*googlegroups*", "Reply-To": "*support*"}
         )
         assert not matches_condition(condition, email)
+
+
+class TestHeaderAliases:
+    """Tests for list_id and reply_to shorthand aliases."""
+
+    def test_list_id_glob_match(self) -> None:
+        """Test list_id_glob alias for List-ID header matching."""
+        email = Email(
+            id=1,
+            gmail_id="abc123",
+            from_addr="list@googlegroups.com",
+            to_addrs=["me@example.com"],
+            subject="[nyc-resistor] Meeting",
+            headers={"list-id": "<nycresistor.googlegroups.com>"},
+        )
+
+        condition = MatchCondition(list_id_glob="*googlegroups*")
+        assert matches_condition(condition, email)
+
+        condition = MatchCondition(list_id_glob="*yahoogroups*")
+        assert not matches_condition(condition, email)
+
+    def test_list_id_contains_match(self) -> None:
+        """Test list_id_contains alias."""
+        email = Email(
+            id=1,
+            gmail_id="abc123",
+            from_addr="list@example.com",
+            to_addrs=["me@example.com"],
+            subject="Test",
+            headers={"list-id": "<nycresistor.googlegroups.com>"},
+        )
+
+        condition = MatchCondition(list_id_contains="nycresistor")
+        assert matches_condition(condition, email)
+
+        condition = MatchCondition(list_id_contains="hackathon")
+        assert not matches_condition(condition, email)
+
+    def test_list_id_exact_match(self) -> None:
+        """Test list_id exact match alias."""
+        email = Email(
+            id=1,
+            gmail_id="abc123",
+            from_addr="list@example.com",
+            to_addrs=["me@example.com"],
+            subject="Test",
+            headers={"list-id": "<test.list.com>"},
+        )
+
+        condition = MatchCondition(list_id="<test.list.com>")
+        assert matches_condition(condition, email)
+
+        condition = MatchCondition(list_id="<other.list.com>")
+        assert not matches_condition(condition, email)
+
+    def test_reply_to_glob_match(self) -> None:
+        """Test reply_to_glob alias for Reply-To header matching."""
+        email = Email(
+            id=1,
+            gmail_id="abc123",
+            from_addr="sender@example.com",
+            to_addrs=["me@example.com"],
+            subject="Test",
+            headers={"reply-to": "noreply@example.com"},
+        )
+
+        condition = MatchCondition(reply_to_glob="*noreply*")
+        assert matches_condition(condition, email)
+
+        condition = MatchCondition(reply_to_glob="*support*")
+        assert not matches_condition(condition, email)
+
+    def test_reply_to_contains_match(self) -> None:
+        """Test reply_to_contains alias."""
+        email = Email(
+            id=1,
+            gmail_id="abc123",
+            from_addr="sender@example.com",
+            to_addrs=["me@example.com"],
+            subject="Test",
+            headers={"reply-to": "do-not-reply@company.com"},
+        )
+
+        condition = MatchCondition(reply_to_contains="do-not-reply")
+        assert matches_condition(condition, email)
+
+        condition = MatchCondition(reply_to_contains="support")
+        assert not matches_condition(condition, email)
+
+    def test_alias_missing_header_returns_false(self) -> None:
+        """Test that missing header returns False for aliases."""
+        email = Email(
+            id=1,
+            gmail_id="abc123",
+            from_addr="test@example.com",
+            to_addrs=["me@example.com"],
+            subject="Test",
+            headers={},  # No headers
+        )
+
+        assert not matches_condition(MatchCondition(list_id_glob="*"), email)
+        assert not matches_condition(MatchCondition(reply_to_glob="*"), email)
+
+    def test_alias_list_matches_any(self) -> None:
+        """Test that list values match any (OR within field)."""
+        email = Email(
+            id=1,
+            gmail_id="abc123",
+            from_addr="test@example.com",
+            to_addrs=["me@example.com"],
+            subject="Test",
+            headers={"list-id": "<foo.googlegroups.com>"},
+        )
+
+        # Any pattern in list should match
+        condition = MatchCondition(
+            list_id_glob=["*yahoogroups*", "*googlegroups*", "*listserv*"]
+        )
+        assert matches_condition(condition, email)
+
+        # None match
+        condition = MatchCondition(list_id_glob=["*yahoogroups*", "*listserv*"])
+        assert not matches_condition(condition, email)

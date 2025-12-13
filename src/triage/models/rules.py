@@ -109,6 +109,14 @@ class MatchCondition(BaseModel):
     header: dict[str, str] | None = None  # Glob pattern match
     header_contains: dict[str, str] | None = None  # Substring match
 
+    # Common header aliases (shortcuts for header/header_contains)
+    list_id: list[str] | str | None = None  # Exact List-ID match
+    list_id_glob: list[str] | str | None = None  # Glob pattern on List-ID
+    list_id_contains: list[str] | str | None = None  # Substring in List-ID
+    reply_to: list[str] | str | None = None  # Exact Reply-To match
+    reply_to_glob: list[str] | str | None = None  # Glob pattern on Reply-To
+    reply_to_contains: list[str] | str | None = None  # Substring in Reply-To
+
     # Other
     has_attachment: bool | None = None
     body_is_mostly_links: bool | None = None  # True if body is mostly URLs

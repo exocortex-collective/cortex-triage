@@ -159,6 +159,12 @@ chains:
 | `body_contains` | Substring in body (fetched from DuckDB API) | `["unsubscribe"]` |
 | `header` | Glob match on any RFC822 header | `{List-ID: "*googlegroups*"}` |
 | `header_contains` | Substring match on any header | `{Reply-To: "noreply"}` |
+| `list_id` | Exact match on List-ID header | `"<list.example.com>"` |
+| `list_id_glob` | Glob pattern on List-ID | `"*googlegroups*"` |
+| `list_id_contains` | Substring in List-ID | `"nycresistor"` |
+| `reply_to` | Exact match on Reply-To header | `"noreply@example.com"` |
+| `reply_to_glob` | Glob pattern on Reply-To | `"*noreply*"` |
+| `reply_to_contains` | Substring in Reply-To | `"do-not-reply"` |
 | `{}` | Empty = match all (catch-all) | |
 
 ### Intent Matching (subject_intent)
@@ -271,43 +277,53 @@ def match_intent(subject: str, intent_config: dict) -> bool:
 
 Match on any RFC822 email header using `header` (glob pattern) or `header_contains` (substring). Headers are fetched from `emails_raw.headers` at triage time, so no schema changes are needed to add new header filters.
 
-**Mailing list filtering (List-ID header):**
+**Shorthand aliases** for common headers (List-ID and Reply-To):
 ```yaml
 chains:
   main:
-    # Route all Google Groups to a label
+    # Using aliases (recommended for common headers)
     - match:
-        header:
-          List-ID: "*googlegroups*"
+        list_id_glob: "*googlegroups*"
       action:
         label: "Lists/Google Groups"
         archive: true
 
-    # Specific mailing list
+    # Substring match on List-ID
     - match:
-        header_contains:
-          List-ID: "nycresistor"
+        list_id_contains: "nycresistor"
       action:
         label: "Lists/NYC Resistor"
-```
 
-**Reply-To based filtering:**
-```yaml
-    # Noreply addresses often indicate automated emails
+    # Reply-To matching
     - match:
-        header:
-          Reply-To: "*noreply*"
+        reply_to_glob: "*noreply*"
       action:
         label: "Automated"
+```
+
+**Generic header matching** (for any header):
+```yaml
+    # Match any header using dict format
+    - match:
+        header:
+          X-Mailer: "*Outlook*"
+      action:
+        label: "From Outlook"
+
+    # Substring match on any header
+    - match:
+        header_contains:
+          Precedence: "bulk"
+      action:
+        label: "Bulk Mail"
 ```
 
 **Multiple headers (AND condition):**
 ```yaml
     # All specified headers must match
     - match:
-        header:
-          List-ID: "*googlegroups*"
-          Reply-To: "*noreply*"
+        list_id_glob: "*googlegroups*"
+        reply_to_glob: "*noreply*"
       action:
         label: "Automated Lists"
 ```

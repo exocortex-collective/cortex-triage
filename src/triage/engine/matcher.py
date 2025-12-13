@@ -302,6 +302,62 @@ def matches_condition(
                 _trace(f"header_contains[{header_name}]: no match")
                 return False
 
+    # List-ID aliases (shortcuts for header matching on List-ID)
+    list_id_value = email.headers.get("list-id", "")
+
+    list_ids = _to_list(condition.list_id)
+    if list_ids:
+        if not list_id_value:
+            return False
+        list_id_norm = _normalize(list_id_value)
+        if not any(list_id_norm == _normalize(lid) for lid in list_ids):
+            return False
+
+    list_id_globs = _to_list(condition.list_id_glob)
+    if list_id_globs:
+        if not list_id_value:
+            return False
+        list_id_norm = _normalize(list_id_value)
+        if not any(fnmatch.fnmatch(list_id_norm, _normalize(g)) for g in list_id_globs):
+            return False
+
+    list_id_contains = _to_list(condition.list_id_contains)
+    if list_id_contains:
+        if not list_id_value:
+            return False
+        list_id_norm = _normalize(list_id_value)
+        if not any(_normalize(s) in list_id_norm for s in list_id_contains):
+            return False
+
+    # Reply-To aliases (shortcuts for header matching on Reply-To)
+    reply_to_value = email.headers.get("reply-to", "")
+
+    reply_tos = _to_list(condition.reply_to)
+    if reply_tos:
+        if not reply_to_value:
+            return False
+        reply_to_norm = _normalize(reply_to_value)
+        if not any(reply_to_norm == _normalize(rt) for rt in reply_tos):
+            return False
+
+    reply_to_globs = _to_list(condition.reply_to_glob)
+    if reply_to_globs:
+        if not reply_to_value:
+            return False
+        reply_to_norm = _normalize(reply_to_value)
+        if not any(
+            fnmatch.fnmatch(reply_to_norm, _normalize(g)) for g in reply_to_globs
+        ):
+            return False
+
+    reply_to_contains = _to_list(condition.reply_to_contains)
+    if reply_to_contains:
+        if not reply_to_value:
+            return False
+        reply_to_norm = _normalize(reply_to_value)
+        if not any(_normalize(s) in reply_to_norm for s in reply_to_contains):
+            return False
+
     # Regex (any pattern in list)
     subject_regexes = _to_list(condition.subject_regex)
     if subject_regexes and not any(
