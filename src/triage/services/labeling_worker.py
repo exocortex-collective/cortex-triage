@@ -43,7 +43,8 @@ VISIBILITY_TIMEOUT_MINUTES = 5
 
 # Max retries for rate-limited requests
 MAX_429_RETRIES = 3
-ACQUIRE_TIMEOUT_SECONDS = 60.0
+# Timeout should be longer than MAX_BACKOFF_SECONDS (60s) to avoid race condition
+ACQUIRE_TIMEOUT_SECONDS = 75.0
 
 
 @dataclass
