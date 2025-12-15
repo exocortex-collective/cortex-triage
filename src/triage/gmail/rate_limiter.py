@@ -130,7 +130,7 @@ class RateLimiter:
 
             # Exponential backoff: 1s, 2s, 4s, 8s, ... up to MAX_BACKOFF_SECONDS
             if retry_after is not None:
-                backoff = retry_after
+                backoff = min(retry_after, MAX_BACKOFF_SECONDS)
             else:
                 backoff = min(
                     MAX_BACKOFF_SECONDS, BACKOFF_FACTOR ** (self._consecutive_429s - 1)
