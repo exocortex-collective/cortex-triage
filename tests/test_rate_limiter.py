@@ -1,5 +1,6 @@
 """Tests for Gmail API rate limiter."""
 
+import threading
 import time
 
 import pytest
@@ -138,8 +139,6 @@ class TestRateLimiter:
 
     def test_thread_safety(self):
         """Rate limiter should be thread-safe."""
-        import threading
-
         limiter = RateLimiter(capacity=100, refill_rate=1000)
         acquired_count = 0
         lock = threading.Lock()

@@ -27,6 +27,7 @@ QUOTA_MESSAGES_MODIFY = 5
 # Default bucket settings
 DEFAULT_CAPACITY = 250  # Max tokens (one second of quota)
 DEFAULT_REFILL_RATE = 250  # Tokens per second
+DEFAULT_POLL_INTERVAL = 0.1  # Seconds between checks when waiting for tokens
 
 
 class RateLimiter:
@@ -111,8 +112,8 @@ class RateLimiter:
                 # Sleep for full backoff duration (no need to poll)
                 time.sleep(wait_time)
             else:
-                # Poll every 100ms for token refill
-                time.sleep(min(wait_time, 0.1))
+                # Poll periodically for token refill
+                time.sleep(min(wait_time, DEFAULT_POLL_INTERVAL))
 
     def record_429(self, retry_after: float | None = None) -> None:
         """Record a 429 response and enter backoff.
@@ -166,7 +167,11 @@ _global_lock = Lock()
 def get_rate_limiter() -> RateLimiter:
     """Get the global rate limiter instance."""
     global _global_limiter
+    # Double-checked locking: check without lock first for performance
+    if _global_limiter is not None:
+        return _global_limiter
     with _global_lock:
+        # Check again after acquiring lock (another thread may have initialized)
         if _global_limiter is None:
             _global_limiter = RateLimiter()
             logger.info(
