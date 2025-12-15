@@ -260,9 +260,9 @@ class GmailBatchClient:
 
     def get_existing_label_id(self, label_name: str) -> str | None:
         """Get label ID for an existing label (no creation)."""
-        # Check system labels first (they have fixed IDs)
-        if label_name in self.SYSTEM_LABELS:
-            return label_name
+        # Check system labels first (they have fixed IDs, case-insensitive)
+        if label_name.upper() in self.SYSTEM_LABELS:
+            return label_name.upper()
         self._ensure_label_cache()
         return self._label_cache.get(label_name)
 
