@@ -103,7 +103,8 @@ class GmailBatchClient:
         Raises:
             HttpError: If request fails after retries
         """
-        for attempt in range(MAX_429_RETRIES + 1):
+        total_attempts = MAX_429_RETRIES + 1
+        for attempt in range(total_attempts):
             # Acquire quota tokens (blocks if needed)
             self._rate_limiter.acquire(quota_units)
 
@@ -130,10 +131,9 @@ class GmailBatchClient:
                     self._rate_limiter.record_429(retry_seconds)
 
                     if attempt < MAX_429_RETRIES:
-                        retries = MAX_429_RETRIES + 1
                         logger.warning(
                             f"{operation}: Rate limited "
-                            f"(attempt {attempt + 1}/{retries}), will retry"
+                            f"(attempt {attempt + 1}/{total_attempts}), will retry"
                         )
                         continue
                     else:
