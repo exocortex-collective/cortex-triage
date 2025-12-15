@@ -961,8 +961,8 @@ Synapse should support everything Gmail filters can do, plus more. This checklis
 
 ### Critical (Data Loss/Correctness)
 
-- [ ] **Gmail API rate limiting** - Add token bucket rate limiter for label operations (250 units/sec quota, label modify = 5 units, safe = ~50/sec)
-- [ ] **429 error handling** - Add exponential backoff when Gmail API returns rate limit errors
+- [x] **Gmail API rate limiting** - Token bucket rate limiter for label operations (250 units/sec, integrated into labeling_worker)
+- [x] **429 error handling** - Exponential backoff with Retry-After header support, max 60s backoff
 - [ ] **Duplicate classification prevention** - Add idempotency check before inserting classification (prevent duplicates on job retry)
 - [ ] **Failed job retry limits** - Add max_attempts enforcement and auto-expiry for dead letter jobs
 
@@ -984,7 +984,7 @@ Synapse should support everything Gmail filters can do, plus more. This checklis
 
 ### Observability
 
-- [ ] **Prometheus metrics** - Add metrics for: `triage_processed_total`, `triage_llm_calls_total`, `triage_llm_latency_seconds`, `triage_gmail_api_errors_total`, `triage_queue_depth`
+- [ ] **Prometheus metrics** - Expose `/metrics` with: `triage_processed_total`, `triage_dead_letters_total`, `triage_llm_calls_total`, `triage_llm_latency_seconds`, `triage_queue_depth` (depends on Prometheus stack in CLAUDE.md)
 - [ ] **Consistent structured logging** - Migrate worker.py from stdlib logging to structlog (matcher.py already uses structlog)
 - [x] **Discord exception reporting** - Alerter daemon monitors container logs, sends critical errors to Discord (cortex-utils)
 - [ ] **Classification audit logging** - Log gmail_id, matched_chain, matched_rule, action, latency for each classification
@@ -994,7 +994,6 @@ Synapse should support everything Gmail filters can do, plus more. This checklis
 - [x] **Queue partitioning** - Migrated to daily partitioned queue table (cortex-utils)
 - [x] **Dead letter table** - Failed jobs preserved in dead_letter table before partition drop
 - [x] **Partition maintenance cron** - Daily job via Ofelia at 2 AM (cortex-utils)
-- [ ] **Dead letter alerting** - Alert when failed jobs exceed threshold
 - [ ] **Label correction tracking** - Implement `label_corrections` table (defined in spec but not implemented)
 - [ ] **Rules version tracking** - Store rules file hash in classifications for reprocessing detection
 

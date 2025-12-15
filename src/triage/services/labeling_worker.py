@@ -77,7 +77,7 @@ class GmailBatchClient:
     """Client for batch Gmail API operations."""
 
     # System labels have fixed IDs that don't need to be looked up
-    SYSTEM_LABELS = {
+    SYSTEM_LABELS: dict[str, str] = {
         "INBOX": "INBOX",
         "UNREAD": "UNREAD",
         "STARRED": "STARRED",
@@ -259,8 +259,8 @@ class GmailBatchClient:
     def get_existing_label_id(self, label_name: str) -> str | None:
         """Get label ID for an existing label (no creation)."""
         # Check system labels first (they have fixed IDs)
-        if label_name in self.SYSTEM_LABELS:
-            return self.SYSTEM_LABELS[label_name]
+        if system_label_id := self.SYSTEM_LABELS.get(label_name):
+            return system_label_id
         self._ensure_label_cache()
         return self._label_cache.get(label_name)
 
