@@ -14,6 +14,7 @@ This rate limiter uses a token bucket algorithm with:
 
 import logging
 import time
+from functools import cache
 from threading import Lock
 
 logger = logging.getLogger(__name__)
@@ -165,23 +166,12 @@ class RateLimiter:
             return time.monotonic() < self._backoff_until
 
 
-# Global rate limiter instance (shared across all Gmail clients)
-_global_limiter: RateLimiter | None = None
-_global_lock = Lock()
-
-
+@cache
 def get_rate_limiter() -> RateLimiter:
-    """Get the global rate limiter instance."""
-    global _global_limiter
-    # Double-checked locking: check without lock first for performance
-    if _global_limiter is not None:
-        return _global_limiter
-    with _global_lock:
-        # Check again after acquiring lock (another thread may have initialized)
-        if _global_limiter is None:
-            _global_limiter = RateLimiter()
-            logger.info(
-                f"Initialized Gmail rate limiter: "
-                f"capacity={DEFAULT_CAPACITY}, refill={DEFAULT_REFILL_RATE}/s"
-            )
-        return _global_limiter
+    """Get the global rate limiter instance (cached singleton)."""
+    limiter = RateLimiter()
+    logger.info(
+        f"Initialized Gmail rate limiter: "
+        f"capacity={DEFAULT_CAPACITY}, refill={DEFAULT_REFILL_RATE}/s"
+    )
+    return limiter
