@@ -24,6 +24,13 @@ from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from psycopg2.pool import SimpleConnectionPool
 
+from triage.gmail import (
+    QUOTA_LABELS_CREATE,
+    QUOTA_LABELS_LIST,
+    QUOTA_MESSAGES_BATCH_MODIFY,
+    get_rate_limiter,
+)
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -33,6 +40,9 @@ logger = logging.getLogger(__name__)
 # How long a job can be in 'processing' before it's considered stale
 # and reset to 'pending' (visibility timeout)
 VISIBILITY_TIMEOUT_MINUTES = 5
+
+# Max retries for rate-limited requests
+MAX_429_RETRIES = 3
 
 
 @dataclass
@@ -68,6 +78,7 @@ class GmailBatchClient:
         self.token_path = token_path
         self._service: Any = None
         self._label_cache: dict[str, str] = {}  # name -> id
+        self._rate_limiter = get_rate_limiter()
 
     def _get_service(self) -> Any:
         """Get authenticated Gmail API service."""
@@ -76,13 +87,65 @@ class GmailBatchClient:
             self._service = build("gmail", "v1", credentials=creds)
         return self._service
 
+    def _execute_with_rate_limit(
+        self, request: Any, quota_units: int, operation: str
+    ) -> Any:
+        """Execute a Gmail API request with rate limiting and retry.
+
+        Args:
+            request: The Gmail API request object
+            quota_units: Number of quota units this operation consumes
+            operation: Human-readable operation name for logging
+
+        Returns:
+            The API response
+
+        Raises:
+            HttpError: If request fails after retries
+        """
+        for attempt in range(MAX_429_RETRIES + 1):
+            # Acquire quota tokens (blocks if needed)
+            self._rate_limiter.acquire(quota_units)
+
+            try:
+                result = request.execute()
+                self._rate_limiter.record_success()
+                return result
+
+            except HttpError as e:
+                if e.resp.status == 429:
+                    # Parse Retry-After header if present
+                    retry_after = e.resp.get("Retry-After")
+                    retry_seconds = float(retry_after) if retry_after else None
+
+                    self._rate_limiter.record_429(retry_seconds)
+
+                    if attempt < MAX_429_RETRIES:
+                        retries = MAX_429_RETRIES + 1
+                        logger.warning(
+                            f"{operation}: Rate limited "
+                            f"(attempt {attempt + 1}/{retries}), will retry"
+                        )
+                        continue
+                    else:
+                        logger.error(f"{operation}: Rate limited, max retries exceeded")
+
+                # Re-raise for non-429 errors or after max retries
+                raise
+
+        # Should not reach here, but satisfy type checker
+        raise RuntimeError("Unexpected end of retry loop")
+
     def _ensure_label_cache(self) -> None:
         """Populate label cache if empty."""
         if self._label_cache:
             return
 
         service = self._get_service()
-        results = service.users().labels().list(userId="me").execute()
+        request = service.users().labels().list(userId="me")
+        results = self._execute_with_rate_limit(
+            request, QUOTA_LABELS_LIST, "labels.list"
+        )
         for label in results.get("labels", []):
             self._label_cache[label["name"]] = label["id"]
         logger.debug(f"Cached {len(self._label_cache)} Gmail labels")
@@ -133,8 +196,9 @@ class GmailBatchClient:
                 "labelListVisibility": "labelShow",
                 "messageListVisibility": "show",
             }
-            created = (
-                service.users().labels().create(userId="me", body=label_body).execute()
+            request = service.users().labels().create(userId="me", body=label_body)
+            created = self._execute_with_rate_limit(
+                request, QUOTA_LABELS_CREATE, f"labels.create({label_name})"
             )
             logger.info(f"Created label: {label_name}")
             created_id: str = created["id"]
@@ -187,7 +251,12 @@ class GmailBatchClient:
             if remove_label_ids:
                 body["removeLabelIds"] = remove_label_ids
 
-            service.users().messages().batchModify(userId="me", body=body).execute()
+            request = service.users().messages().batchModify(userId="me", body=body)
+            self._execute_with_rate_limit(
+                request,
+                QUOTA_MESSAGES_BATCH_MODIFY,
+                f"messages.batchModify({len(gmail_ids)} msgs)",
+            )
 
             logger.info(
                 f"Batch modified {len(gmail_ids)} messages: "
