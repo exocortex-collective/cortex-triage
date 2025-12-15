@@ -115,8 +115,17 @@ class GmailBatchClient:
             except HttpError as e:
                 if e.resp.status == 429:
                     # Parse Retry-After header if present
+                    # Can be seconds (integer) or HTTP-date; we only handle seconds
                     retry_after = e.resp.get("Retry-After")
-                    retry_seconds = float(retry_after) if retry_after else None
+                    retry_seconds: float | None = None
+                    if retry_after:
+                        try:
+                            retry_seconds = float(retry_after)
+                        except ValueError:
+                            logger.warning(
+                                f"Could not parse Retry-After header: '{retry_after}'. "
+                                "Falling back to exponential backoff."
+                            )
 
                     self._rate_limiter.record_429(retry_seconds)
 

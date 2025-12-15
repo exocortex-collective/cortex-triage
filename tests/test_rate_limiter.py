@@ -75,20 +75,26 @@ class TestRateLimiter:
         limiter = RateLimiter(capacity=100, refill_rate=100)
 
         # First 429: 1 second backoff
+        start = time.monotonic()
         limiter.record_429()
         assert limiter._consecutive_429s == 1
+        assert limiter._backoff_until == pytest.approx(start + 1.0, abs=0.1)
 
         # Simulate waiting out the first backoff
         limiter._backoff_until = 0
 
         # Second 429: 2 second backoff
+        start = time.monotonic()
         limiter.record_429()
         assert limiter._consecutive_429s == 2
+        assert limiter._backoff_until == pytest.approx(start + 2.0, abs=0.1)
 
         # Third 429: 4 second backoff
         limiter._backoff_until = 0
+        start = time.monotonic()
         limiter.record_429()
         assert limiter._consecutive_429s == 3
+        assert limiter._backoff_until == pytest.approx(start + 4.0, abs=0.1)
 
     def test_record_429_with_retry_after(self):
         """Should use Retry-After header when provided."""
