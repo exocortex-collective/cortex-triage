@@ -43,6 +43,7 @@ VISIBILITY_TIMEOUT_MINUTES = 5
 
 # Max retries for rate-limited requests
 MAX_429_RETRIES = 3
+ACQUIRE_TIMEOUT_SECONDS = 60.0
 
 
 @dataclass
@@ -105,8 +106,13 @@ class GmailBatchClient:
         """
         total_attempts = MAX_429_RETRIES + 1
         for attempt in range(total_attempts):
-            # Acquire quota tokens (blocks if needed)
-            self._rate_limiter.acquire(quota_units)
+            # Acquire quota tokens (blocks up to timeout)
+            if not self._rate_limiter.acquire(
+                quota_units, timeout=ACQUIRE_TIMEOUT_SECONDS
+            ):
+                raise RuntimeError(
+                    f"Timed out waiting for Gmail API quota for operation: {operation}"
+                )
 
             try:
                 # Create a new request object for each attempt
