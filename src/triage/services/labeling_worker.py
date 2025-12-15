@@ -77,16 +77,18 @@ class GmailBatchClient:
     """Client for batch Gmail API operations."""
 
     # System labels have fixed IDs that don't need to be looked up
-    SYSTEM_LABELS: set[str] = {
-        "INBOX",
-        "UNREAD",
-        "STARRED",
-        "SPAM",
-        "TRASH",
-        "IMPORTANT",
-        "SENT",
-        "DRAFT",
-    }
+    SYSTEM_LABELS: frozenset[str] = frozenset(
+        {
+            "INBOX",
+            "UNREAD",
+            "STARRED",
+            "SPAM",
+            "TRASH",
+            "IMPORTANT",
+            "SENT",
+            "DRAFT",
+        }
+    )
 
     def __init__(self, token_path: str):
         self.token_path = token_path
