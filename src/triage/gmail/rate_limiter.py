@@ -29,6 +29,10 @@ DEFAULT_CAPACITY = 250  # Max tokens (one second of quota)
 DEFAULT_REFILL_RATE = 250  # Tokens per second
 DEFAULT_POLL_INTERVAL = 0.1  # Seconds between checks when waiting for tokens
 
+# Backoff settings
+MAX_BACKOFF_SECONDS = 60.0
+BACKOFF_FACTOR = 2.0
+
 
 class RateLimiter:
     """Token bucket rate limiter for Gmail API calls.
@@ -124,11 +128,13 @@ class RateLimiter:
         with self._lock:
             self._consecutive_429s += 1
 
-            # Exponential backoff: 1s, 2s, 4s, 8s, ... up to 60s
+            # Exponential backoff: 1s, 2s, 4s, 8s, ... up to MAX_BACKOFF_SECONDS
             if retry_after is not None:
                 backoff = retry_after
             else:
-                backoff = min(60.0, 2 ** (self._consecutive_429s - 1))
+                backoff = min(
+                    MAX_BACKOFF_SECONDS, BACKOFF_FACTOR ** (self._consecutive_429s - 1)
+                )
 
             self._backoff_until = time.monotonic() + backoff
             self._tokens = 0.0  # Drain bucket
