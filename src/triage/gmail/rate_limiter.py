@@ -83,12 +83,14 @@ class RateLimiter:
         deadline = None if timeout is None else start + timeout
 
         while True:
+            is_in_backoff = False
             with self._lock:
                 # Check backoff first
                 now = time.monotonic()
                 if now < self._backoff_until:
                     wait_time = self._backoff_until - now
                     logger.debug(f"Rate limiter in backoff, waiting {wait_time:.1f}s")
+                    is_in_backoff = True
                 else:
                     self._refill()
 
@@ -105,7 +107,12 @@ class RateLimiter:
                 return False
 
             # Wait outside the lock
-            time.sleep(min(wait_time, 0.1))  # Check at least every 100ms
+            if is_in_backoff:
+                # Sleep for full backoff duration (no need to poll)
+                time.sleep(wait_time)
+            else:
+                # Poll every 100ms for token refill
+                time.sleep(min(wait_time, 0.1))
 
     def record_429(self, retry_after: float | None = None) -> None:
         """Record a 429 response and enter backoff.
