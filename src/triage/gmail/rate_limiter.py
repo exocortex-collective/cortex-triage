@@ -52,7 +52,14 @@ class RateLimiter:
         Args:
             capacity: Maximum tokens in bucket (burst capacity)
             refill_rate: Tokens added per second
+
+        Raises:
+            ValueError: If capacity or refill_rate is not positive
         """
+        if capacity <= 0:
+            raise ValueError("Capacity must be a positive number.")
+        if refill_rate <= 0:
+            raise ValueError("Refill rate must be a positive number.")
         self.capacity = capacity
         self.refill_rate = refill_rate
         self._tokens = float(capacity)
@@ -137,8 +144,10 @@ class RateLimiter:
                     MAX_BACKOFF_SECONDS, BACKOFF_FACTOR ** (self._consecutive_429s - 1)
                 )
 
-            self._backoff_until = time.monotonic() + backoff
+            now = time.monotonic()
+            self._backoff_until = now + backoff
             self._tokens = 0.0  # Drain bucket
+            self._last_refill = now  # Prevent burst after backoff
 
             logger.warning(
                 f"Rate limit hit (429), backing off {backoff:.1f}s "
