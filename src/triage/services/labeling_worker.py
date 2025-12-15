@@ -76,6 +76,18 @@ class LabelingJob:
 class GmailBatchClient:
     """Client for batch Gmail API operations."""
 
+    # System labels have fixed IDs that don't need to be looked up
+    SYSTEM_LABELS = {
+        "INBOX": "INBOX",
+        "UNREAD": "UNREAD",
+        "STARRED": "STARRED",
+        "SPAM": "SPAM",
+        "TRASH": "TRASH",
+        "IMPORTANT": "IMPORTANT",
+        "SENT": "SENT",
+        "DRAFT": "DRAFT",
+    }
+
     def __init__(self, token_path: str):
         self.token_path = token_path
         self._service: Any = None
@@ -246,6 +258,9 @@ class GmailBatchClient:
 
     def get_existing_label_id(self, label_name: str) -> str | None:
         """Get label ID for an existing label (no creation)."""
+        # Check system labels first (they have fixed IDs)
+        if label_name in self.SYSTEM_LABELS:
+            return self.SYSTEM_LABELS[label_name]
         self._ensure_label_cache()
         return self._label_cache.get(label_name)
 
@@ -261,6 +276,14 @@ class GmailBatchClient:
         Returns True on success.
         """
         if not gmail_ids:
+            return True
+
+        # Gmail API requires at least one label operation
+        if not add_label_ids and not remove_label_ids:
+            logger.debug(
+                f"Skipping batch_modify for {len(gmail_ids)} messages: "
+                "no label changes to apply"
+            )
             return True
 
         try:
