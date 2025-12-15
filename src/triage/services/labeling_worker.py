@@ -13,7 +13,7 @@ import signal
 import sys
 import time
 from collections import defaultdict
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any
@@ -88,12 +88,12 @@ class GmailBatchClient:
         return self._service
 
     def _execute_with_rate_limit(
-        self, request: Any, quota_units: int, operation: str
+        self, request_factory: Callable[[], Any], quota_units: int, operation: str
     ) -> Any:
         """Execute a Gmail API request with rate limiting and retry.
 
         Args:
-            request: The Gmail API request object
+            request_factory: A callable that creates a new Gmail API request object
             quota_units: Number of quota units this operation consumes
             operation: Human-readable operation name for logging
 
@@ -109,6 +109,9 @@ class GmailBatchClient:
             self._rate_limiter.acquire(quota_units)
 
             try:
+                # Create a new request object for each attempt
+                # (HttpRequest objects are single-use)
+                request = request_factory()
                 result = request.execute()
                 self._rate_limiter.record_success()
                 return result
@@ -151,9 +154,10 @@ class GmailBatchClient:
             return
 
         service = self._get_service()
-        request = service.users().labels().list(userId="me")
         results = self._execute_with_rate_limit(
-            request, QUOTA_LABELS_LIST, "labels.list"
+            lambda: service.users().labels().list(userId="me"),
+            QUOTA_LABELS_LIST,
+            "labels.list",
         )
         for label in results.get("labels", []):
             self._label_cache[label["name"]] = label["id"]
@@ -205,9 +209,10 @@ class GmailBatchClient:
                 "labelListVisibility": "labelShow",
                 "messageListVisibility": "show",
             }
-            request = service.users().labels().create(userId="me", body=label_body)
             created = self._execute_with_rate_limit(
-                request, QUOTA_LABELS_CREATE, f"labels.create({label_name})"
+                lambda: service.users().labels().create(userId="me", body=label_body),
+                QUOTA_LABELS_CREATE,
+                f"labels.create({label_name})",
             )
             logger.info(f"Created label: {label_name}")
             created_id: str = created["id"]
@@ -260,9 +265,8 @@ class GmailBatchClient:
             if remove_label_ids:
                 body["removeLabelIds"] = remove_label_ids
 
-            request = service.users().messages().batchModify(userId="me", body=body)
             self._execute_with_rate_limit(
-                request,
+                lambda: service.users().messages().batchModify(userId="me", body=body),
                 QUOTA_MESSAGES_BATCH_MODIFY,
                 f"messages.batchModify({len(gmail_ids)} msgs)",
             )
