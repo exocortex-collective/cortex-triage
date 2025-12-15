@@ -860,7 +860,7 @@ Phase 1 (MVP):
 - [x] LLM fallback chain
 - [x] Compound conditions (any_of, all_of)
 - [x] List fields (OR within field)
-- [ ] Gmail API integration for labels
+- [x] Gmail API integration for labels (labeling-worker)
 
 Phase 2:
 - [ ] n8n webhook actions
@@ -986,7 +986,7 @@ Synapse should support everything Gmail filters can do, plus more. This checklis
 
 - [ ] **Prometheus metrics** - Add metrics for: `triage_processed_total`, `triage_llm_calls_total`, `triage_llm_latency_seconds`, `triage_gmail_api_errors_total`, `triage_queue_depth`
 - [ ] **Consistent structured logging** - Migrate worker.py from stdlib logging to structlog (matcher.py already uses structlog)
-- [ ] **Discord exception reporting** - Send critical errors (Gmail API failures, LLM timeouts, queue stalls) to Discord webhook
+- [x] **Discord exception reporting** - Alerter daemon monitors container logs, sends critical errors to Discord (cortex-utils)
 - [ ] **Classification audit logging** - Log gmail_id, matched_chain, matched_rule, action, latency for each classification
 
 ### Operational
