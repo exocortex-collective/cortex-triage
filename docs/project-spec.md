@@ -863,11 +863,9 @@ Phase 1 (MVP):
 - [x] Gmail API integration for labels (labeling-worker)
 
 Phase 2:
-- [ ] n8n webhook actions
-- [ ] digest generation (daily/weekly Obsidian notes)
-- [ ] Web UI for rule management
-- [ ] Postgres rules storage (multi-user)
 - [x] Queue cleanup job (partition maintenance via cortex-utils)
+
+**Remaining features tracked in beads** - `~/go/bin/bd list --json | jq '.[] | select(.description | contains("triage"))'`
 
 ### Gmail Filter Parity Checklist
 
@@ -957,45 +955,17 @@ Synapse should support everything Gmail filters can do, plus more. This checklis
 - [x] Built-in intents (archive_request, todo_request, question)
 - [x] Generic `header` matching - glob/substring on any RFC822 header
 
-## Reliability Checklist
+## Reliability Status
 
-### Critical (Data Loss/Correctness)
+**Completed:**
+- [x] Gmail API rate limiting - Token bucket rate limiter (250 units/sec)
+- [x] 429 error handling - Exponential backoff with Retry-After header support
+- [x] Discord exception reporting - alerter daemon monitors container logs
+- [x] Queue partitioning - daily partitioned queue table (cortex-utils)
+- [x] Dead letter table - failed jobs preserved before partition drop
+- [x] Partition maintenance cron - daily job via Ofelia at 2 AM
 
-- [x] **Gmail API rate limiting** - Token bucket rate limiter for label operations (250 units/sec, integrated into labeling_worker)
-- [x] **429 error handling** - Exponential backoff with Retry-After header support, max 60s backoff
-- [ ] **Duplicate classification prevention** - Add idempotency check before inserting classification (prevent duplicates on job retry)
-- [ ] **Failed job retry limits** - Add max_attempts enforcement and auto-expiry for dead letter jobs
-
-### High Priority
-
-- [ ] **Explicit LLM failure handling** - Make LLM errors fail the job (or retry) instead of silent "no match" return
-- [ ] **Label cache race condition** - Fix concurrent label creation attempts when cache is cleared mid-operation
-- [ ] **Partial batch failure handling** - Don't fail entire batch when single email has permission error
-- [ ] **Transaction rollback on exception** - Add explicit rollback in exception handlers (don't rely on implicit behavior)
-- [ ] **Visibility timeout heartbeat** - Extend claimed_at for long-running jobs to prevent premature reclaim
-
-### Medium Priority
-
-- [ ] **Graceful shutdown** - Wait for in-flight jobs before exit, don't leave jobs in "processing" state
-- [ ] **Connection pool sizing** - Review pool size (currently minconn=1, maxconn=5) for expected load
-- [ ] **Regex pattern caching** - Pre-compile regex patterns instead of recompiling on every evaluation
-- [ ] **LLM confidence bounds** - Validate confidence is 0.0-1.0 before storing (reject NaN, infinity)
-- [ ] **Category substring matching** - Fix potential wrong category match when LLM response contains multiple keywords
-
-### Observability
-
-- [ ] **Prometheus metrics** - Expose `/metrics` with: `triage_processed_total`, `triage_dead_letters_total`, `triage_llm_calls_total`, `triage_llm_latency_seconds`, `triage_queue_depth` (depends on Prometheus stack in CLAUDE.md)
-- [ ] **Consistent structured logging** - Migrate worker.py from stdlib logging to structlog (matcher.py already uses structlog)
-- [x] **Discord exception reporting** - Alerter daemon monitors container logs, sends critical errors to Discord (cortex-utils)
-- [ ] **Classification audit logging** - Log gmail_id, matched_chain, matched_rule, action, latency for each classification
-
-### Operational
-
-- [x] **Queue partitioning** - Migrated to daily partitioned queue table (cortex-utils)
-- [x] **Dead letter table** - Failed jobs preserved in dead_letter table before partition drop
-- [x] **Partition maintenance cron** - Daily job via Ofelia at 2 AM (cortex-utils)
-- [ ] **Label correction tracking** - Implement `label_corrections` table (defined in spec but not implemented)
-- [ ] **Rules version tracking** - Store rules file hash in classifications for reprocessing detection
+**Remaining work tracked in beads** - `~/go/bin/bd list --json | jq '.[] | select(.description | contains("triage"))'`
 
 ## Testing Strategy
 
