@@ -11,6 +11,7 @@ import logging
 import os
 import signal
 import sys
+import threading
 import time
 from collections import defaultdict
 from collections.abc import Callable, Iterator
@@ -94,6 +95,7 @@ class GmailBatchClient:
         self.token_path = token_path
         self._service: Any = None
         self._label_cache: dict[str, str] = {}  # name -> id
+        self._label_cache_lock = threading.Lock()  # Protects cache operations
         self._rate_limiter = get_rate_limiter()
 
     def _get_service(self) -> Any:
@@ -170,19 +172,20 @@ class GmailBatchClient:
         raise RuntimeError("Unexpected end of retry loop")
 
     def _ensure_label_cache(self) -> None:
-        """Populate label cache if empty."""
-        if self._label_cache:
-            return
+        """Populate label cache if empty. Thread-safe."""
+        with self._label_cache_lock:
+            if self._label_cache:
+                return
 
-        service = self._get_service()
-        results = self._execute_with_rate_limit(
-            lambda: service.users().labels().list(userId="me"),
-            QUOTA_LABELS_LIST,
-            "labels.list",
-        )
-        for label in results.get("labels", []):
-            self._label_cache[label["name"]] = label["id"]
-        logger.debug(f"Cached {len(self._label_cache)} Gmail labels")
+            service = self._get_service()
+            results = self._execute_with_rate_limit(
+                lambda: service.users().labels().list(userId="me"),
+                QUOTA_LABELS_LIST,
+                "labels.list",
+            )
+            for label in results.get("labels", []):
+                self._label_cache[label["name"]] = label["id"]
+            logger.debug(f"Cached {len(self._label_cache)} Gmail labels")
 
     def _get_or_create_label(self, label_name: str) -> str | None:
         """Get label ID, creating the label if it doesn't exist.
@@ -219,9 +222,10 @@ class GmailBatchClient:
             return None
 
     def _create_single_label(self, label_name: str) -> str | None:
-        """Create a single label."""
-        if label_name in self._label_cache:
-            return self._label_cache[label_name]
+        """Create a single label. Thread-safe."""
+        with self._label_cache_lock:
+            if label_name in self._label_cache:
+                return self._label_cache[label_name]
 
         try:
             service = self._get_service()
@@ -237,14 +241,18 @@ class GmailBatchClient:
             )
             logger.info(f"Created label: {label_name}")
             created_id: str = created["id"]
-            self._label_cache[label_name] = created_id
-            return created_id
+            with self._label_cache_lock:
+                self._label_cache[label_name] = created_id
+                return created_id
         except HttpError as e:
             if e.resp.status == 409:
                 logger.info(f"Label '{label_name}' already exists, refreshing cache")
-                self._label_cache.clear()
+                with self._label_cache_lock:
+                    self._label_cache.clear()
+                # _ensure_label_cache acquires its own lock
                 self._ensure_label_cache()
-                return self._label_cache.get(label_name)
+                with self._label_cache_lock:
+                    return self._label_cache.get(label_name)
             logger.error(
                 f"Gmail API error creating label {label_name}: "
                 f"HTTP {e.resp.status} - {e.reason}"
