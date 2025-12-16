@@ -809,26 +809,30 @@ class TriageWorker:
         return labels
 
     def _get_existing_cortex_labels(self, gmail_id: str) -> list[str]:
-        """Get all unique Cortex/* labels from previous classifications.
+        """Get current Cortex/* labels from Gmail (via emails_raw).
 
         When re-triaging an email, we need to remove old Cortex labels
-        before applying new ones. This queries all historical classifications
-        for this email to find all unique Cortex labels that were previously applied.
+        before applying new ones. This queries the actual Gmail label state
+        from emails_raw.label_ids joined with gmail_labels to find current
+        Cortex/* labels on the email.
+
+        Note: We query emails_raw (source of truth for Gmail state) rather than
+        classifications (which only records intent). This ensures we see labels
+        that may have been added/removed outside the triage system.
         """
         with self._get_conn() as conn, conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT action_taken->>'label' as label
-                FROM classifications
-                WHERE gmail_id = %s
-                  AND action_taken->>'label' IS NOT NULL
-                  AND action_taken->>'label' LIKE %s
+                SELECT DISTINCT gl.name
+                FROM emails_raw er
+                JOIN gmail_labels gl ON gl.id = ANY(er.label_ids)
+                WHERE er.gmail_id = %s
+                  AND gl.name LIKE %s
                 """,
                 (gmail_id, f"{self.rules.label_prefix}/%"),
             )
             rows = cur.fetchall()
-            # Return unique labels
-            return list({row[0] for row in rows if row[0]})
+            return [row[0] for row in rows]
 
     def _enqueue_labeling(self, action: Action, gmail_id: str) -> bool:
         """Enqueue labeling action for batch processing.
