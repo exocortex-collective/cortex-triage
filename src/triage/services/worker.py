@@ -1015,11 +1015,6 @@ class TriageWorker:
 
             # Mark job complete
             self._complete_job(job["id"])
-
-            # Record metrics
-            PROCESSING_DURATION.labels(queue="triage", operation="process").observe(
-                time.time() - start_time
-            )
             return True
 
         except LLMError as e:
@@ -1027,18 +1022,16 @@ class TriageWorker:
             logger.error(f"LLM error processing {gmail_id}: {e}")
             self._fail_job(job["id"], f"LLM error: {e}")
             ERRORS.labels(service="triage-worker", error_type="llm_error").inc()
-            PROCESSING_DURATION.labels(queue="triage", operation="process").observe(
-                time.time() - start_time
-            )
             return False
         except Exception as e:
             logger.error(f"Failed to process {gmail_id}: {e}")
             self._fail_job(job["id"], str(e))
             ERRORS.labels(service="triage-worker", error_type="job_failed").inc()
+            return False
+        finally:
             PROCESSING_DURATION.labels(queue="triage", operation="process").observe(
                 time.time() - start_time
             )
-            return False
 
     def _process_batch(self) -> tuple[int, int]:
         """Process a single batch of jobs. Returns (processed, failed)."""
@@ -1150,7 +1143,11 @@ def main() -> None:
         sys.exit(1)
 
     # Start metrics server
-    metrics_port = int(os.environ.get("METRICS_PORT", "8000"))
+    try:
+        metrics_port = int(os.environ.get("METRICS_PORT", "8000"))
+    except ValueError:
+        logger.error("Invalid METRICS_PORT, using default 8000")
+        metrics_port = 8000
     start_metrics_server(port=metrics_port)
     logger.info(f"Metrics server started on port {metrics_port}")
 

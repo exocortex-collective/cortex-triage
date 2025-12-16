@@ -596,6 +596,9 @@ class LabelingWorker:
                 ERRORS.labels(
                     service="labeling-worker", error_type="label_create_failed"
                 ).inc()
+                QUEUE_PROCESSED.labels(queue="labeling", status="error").inc(
+                    len(group_jobs)
+                )
                 continue
 
             remove_label_ids = self._resolve_labels(list(remove_labels), create=False)
@@ -728,7 +731,11 @@ def main() -> None:
         sys.exit(1)
 
     # Start metrics server
-    metrics_port = int(os.environ.get("METRICS_PORT", "8001"))
+    try:
+        metrics_port = int(os.environ.get("METRICS_PORT", "8001"))
+    except ValueError:
+        logger.error("Invalid METRICS_PORT, using default 8001")
+        metrics_port = 8001
     start_metrics_server(port=metrics_port)
     logger.info(f"Metrics server started on port {metrics_port}")
 
