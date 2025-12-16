@@ -703,14 +703,14 @@ class TriageWorker:
                         WHERE queue_name = 'triage'
                           AND status = 'pending'
                           AND attempts < %s
-                        ORDER BY created_at
+                        ORDER BY priority DESC, created_at
                         LIMIT %s
                         FOR UPDATE SKIP LOCKED
                     )
                     UPDATE queue
                     SET status = 'processing', claimed_at = NOW()
                     WHERE id IN (SELECT id FROM claimable)
-                    RETURNING id, payload
+                    RETURNING id, payload, priority
                     """,
                     (
                         VISIBILITY_TIMEOUT_MINUTES,
@@ -722,7 +722,10 @@ class TriageWorker:
                         batch_size,
                     ),
                 )
-                jobs = [{"id": row[0], "payload": row[1]} for row in cur.fetchall()]
+                jobs = [
+                    {"id": row[0], "payload": row[1], "priority": row[2]}
+                    for row in cur.fetchall()
+                ]
                 conn.commit()
             return jobs
 
@@ -840,7 +843,9 @@ class TriageWorker:
             rows = cur.fetchall()
             return [row[0] for row in rows]
 
-    def _enqueue_labeling(self, action: Action, gmail_id: str) -> bool:
+    def _enqueue_labeling(
+        self, action: Action, gmail_id: str, priority: int = 0
+    ) -> bool:
         """Enqueue labeling action for batch processing.
 
         Instead of calling Gmail API directly, we enqueue the action
@@ -881,10 +886,10 @@ class TriageWorker:
             with self._get_conn() as conn, conn.cursor() as cur:
                 cur.execute(
                     """
-                    INSERT INTO queue (queue_name, payload, status)
-                    VALUES ('labeling', %s, 'pending')
+                    INSERT INTO queue (queue_name, payload, status, priority)
+                    VALUES ('labeling', %s, 'pending', %s)
                     """,
-                    (Json(payload),),
+                    (Json(payload), priority),
                 )
                 conn.commit()
             return True
@@ -892,9 +897,9 @@ class TriageWorker:
             logger.error(f"Failed to enqueue labeling for {gmail_id}: {e}")
             return False
 
-    def _execute_action(self, action: Action, gmail_id: str) -> bool:
+    def _execute_action(self, action: Action, gmail_id: str, priority: int = 0) -> bool:
         """Execute an action on an email by enqueueing for batch processing."""
-        return self._enqueue_labeling(action, gmail_id)
+        return self._enqueue_labeling(action, gmail_id, priority)
 
     def _store_classification(
         self,
@@ -988,9 +993,12 @@ class TriageWorker:
             result = evaluate(self.rules, email, self.ollama)
 
             # Execute action if matched
+            # Propagate priority so backfill jobs stay deprioritized through pipeline
             action_executed = False
             if result.matched and result.action:
-                action_executed = self._execute_action(result.action, gmail_id)
+                action_executed = self._execute_action(
+                    result.action, gmail_id, priority=job.get("priority", 0)
+                )
                 if action_executed:
                     logger.info(
                         f"Processed {gmail_id}: chain={result.chain}, "
