@@ -5,8 +5,10 @@ ENV PYTHONUNBUFFERED=1
 
 WORKDIR /app
 
-# Install uv
-RUN pip install uv
+# Install git (needed for git dependencies) and uv
+RUN apt-get update && apt-get install -y --no-install-recommends git \
+    && rm -rf /var/lib/apt/lists/* \
+    && pip install uv
 
 # Copy dependency definitions first (for layer caching)
 COPY pyproject.toml uv.lock README.md ./
