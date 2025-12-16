@@ -20,6 +20,12 @@ from dataclasses import dataclass
 from typing import Any
 
 import psycopg2
+from cortex_utils.metrics import (
+    ERRORS,
+    PROCESSING_DURATION,
+    QUEUE_PROCESSED,
+    start_metrics_server,
+)
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
@@ -530,6 +536,7 @@ class LabelingWorker:
         if not jobs:
             return 0, 0
 
+        start_time = time.time()
         logger.info(f"Processing batch of {len(jobs)} labeling jobs")
 
         # Get current Cortex/* labels for all messages in this batch
@@ -573,42 +580,65 @@ class LabelingWorker:
         processed = 0
         failed = 0
 
-        # Process each operation group as a batch
-        for key, group_jobs in operation_groups.items():
-            add_labels, remove_labels, _, _, _ = key
+        try:
+            # Process each operation group as a batch
+            for key, group_jobs in operation_groups.items():
+                add_labels, remove_labels, _, _, _ = key
 
-            gmail_ids = [j.gmail_id for j in group_jobs]
-            job_ids = [j.job_id for j in group_jobs]
+                gmail_ids = [j.gmail_id for j in group_jobs]
+                job_ids = [j.job_id for j in group_jobs]
 
-            # Resolve label names to IDs
-            add_label_ids = self._resolve_labels(list(add_labels), create=True)
-            if add_label_ids is None:
-                # Failed to create required labels - fail these jobs
-                self._fail_jobs(job_ids, "Failed to create required label")
-                failed += len(group_jobs)
-                continue
+                # Resolve label names to IDs
+                add_label_ids = self._resolve_labels(list(add_labels), create=True)
+                if add_label_ids is None:
+                    # Failed to create required labels - fail these jobs
+                    self._fail_jobs(job_ids, "Failed to create required label")
+                    failed += len(group_jobs)
+                    ERRORS.labels(
+                        service="labeling-worker", error_type="label_create_failed"
+                    ).inc()
+                    QUEUE_PROCESSED.labels(queue="labeling", status="error").inc(
+                        len(group_jobs)
+                    )
+                    continue
 
-            remove_label_ids = self._resolve_labels(list(remove_labels), create=False)
-            # remove_label_ids is always a list when create=False (skips missing)
-            assert remove_label_ids is not None  # for type checker
-
-            # Execute batch modify
-            success = self.gmail.batch_modify(
-                gmail_ids, add_label_ids, remove_label_ids
-            )
-
-            if success:
-                self._complete_jobs(job_ids)
-                processed += len(group_jobs)
-                logger.debug(
-                    f"Completed batch: {len(gmail_ids)} messages, "
-                    f"labels +{list(add_labels)} -{list(remove_labels)}"
+                remove_label_ids = self._resolve_labels(
+                    list(remove_labels), create=False
                 )
-            else:
-                self._fail_jobs(job_ids, "Gmail batch modify failed")
-                failed += len(group_jobs)
+                # remove_label_ids is always a list when create=False (skips missing)
+                assert remove_label_ids is not None  # for type checker
 
-        return processed, failed
+                # Execute batch modify
+                success = self.gmail.batch_modify(
+                    gmail_ids, add_label_ids, remove_label_ids
+                )
+
+                if success:
+                    self._complete_jobs(job_ids)
+                    processed += len(group_jobs)
+                    QUEUE_PROCESSED.labels(queue="labeling", status="success").inc(
+                        len(group_jobs)
+                    )
+                    logger.debug(
+                        f"Completed batch: {len(gmail_ids)} messages, "
+                        f"labels +{list(add_labels)} -{list(remove_labels)}"
+                    )
+                else:
+                    self._fail_jobs(job_ids, "Gmail batch modify failed")
+                    failed += len(group_jobs)
+                    QUEUE_PROCESSED.labels(queue="labeling", status="error").inc(
+                        len(group_jobs)
+                    )
+                    ERRORS.labels(
+                        service="labeling-worker", error_type="batch_modify_failed"
+                    ).inc()
+
+            return processed, failed
+        finally:
+            # Always record batch processing duration
+            PROCESSING_DURATION.labels(queue="labeling", operation="batch").observe(
+                time.time() - start_time
+            )
 
     def run(self) -> None:
         """Main processing loop."""
@@ -701,6 +731,15 @@ def main() -> None:
     if missing:
         logger.error(f"Missing required environment variables: {', '.join(missing)}")
         sys.exit(1)
+
+    # Start metrics server
+    try:
+        metrics_port = int(os.environ.get("METRICS_PORT", "8001"))
+    except ValueError:
+        logger.error("Invalid METRICS_PORT, using default 8001")
+        metrics_port = 8001
+    start_metrics_server(port=metrics_port)
+    logger.info(f"Metrics server started on port {metrics_port}")
 
     config = Config(
         postgres_host=os.environ["POSTGRES_HOST"],
