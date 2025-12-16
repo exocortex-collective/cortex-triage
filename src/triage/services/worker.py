@@ -823,7 +823,7 @@ class TriageWorker:
         with self._get_conn() as conn, conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT gl.name
+                SELECT DISTINCT gl.name
                 FROM emails_raw er
                 CROSS JOIN LATERAL unnest(er.label_ids) AS label_id
                 JOIN gmail_labels gl ON gl.id = label_id
