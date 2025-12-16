@@ -20,6 +20,12 @@ from dataclasses import dataclass
 from typing import Any
 
 import psycopg2
+from cortex_utils.metrics import (
+    ERRORS,
+    PROCESSING_DURATION,
+    QUEUE_PROCESSED,
+    start_metrics_server,
+)
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
@@ -525,6 +531,7 @@ class LabelingWorker:
 
     def _process_batch(self) -> tuple[int, int]:
         """Process a batch of jobs. Returns (processed, failed)."""
+        start_time = time.time()
         jobs = self._claim_jobs(self.config.batch_size)
 
         if not jobs:
@@ -586,6 +593,9 @@ class LabelingWorker:
                 # Failed to create required labels - fail these jobs
                 self._fail_jobs(job_ids, "Failed to create required label")
                 failed += len(group_jobs)
+                ERRORS.labels(
+                    service="labeling-worker", error_type="label_create_failed"
+                ).inc()
                 continue
 
             remove_label_ids = self._resolve_labels(list(remove_labels), create=False)
@@ -600,6 +610,8 @@ class LabelingWorker:
             if success:
                 self._complete_jobs(job_ids)
                 processed += len(group_jobs)
+                for _ in group_jobs:
+                    QUEUE_PROCESSED.labels(queue="labeling", status="success").inc()
                 logger.debug(
                     f"Completed batch: {len(gmail_ids)} messages, "
                     f"labels +{list(add_labels)} -{list(remove_labels)}"
@@ -607,6 +619,17 @@ class LabelingWorker:
             else:
                 self._fail_jobs(job_ids, "Gmail batch modify failed")
                 failed += len(group_jobs)
+                for _ in group_jobs:
+                    QUEUE_PROCESSED.labels(queue="labeling", status="error").inc()
+                ERRORS.labels(
+                    service="labeling-worker", error_type="batch_modify_failed"
+                ).inc()
+
+        # Record batch processing duration
+        if processed > 0 or failed > 0:
+            PROCESSING_DURATION.labels(queue="labeling", operation="batch").observe(
+                time.time() - start_time
+            )
 
         return processed, failed
 
@@ -701,6 +724,11 @@ def main() -> None:
     if missing:
         logger.error(f"Missing required environment variables: {', '.join(missing)}")
         sys.exit(1)
+
+    # Start metrics server
+    metrics_port = int(os.environ.get("METRICS_PORT", "8001"))
+    start_metrics_server(port=metrics_port)
+    logger.info(f"Metrics server started on port {metrics_port}")
 
     config = Config(
         postgres_host=os.environ["POSTGRES_HOST"],

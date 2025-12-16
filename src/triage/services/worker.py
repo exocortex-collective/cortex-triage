@@ -16,6 +16,12 @@ from typing import Any
 
 import httpx
 import psycopg2
+from cortex_utils.metrics import (
+    ERRORS,
+    PROCESSING_DURATION,
+    QUEUE_PROCESSED,
+    start_metrics_server,
+)
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
@@ -961,6 +967,7 @@ class TriageWorker:
     def process_job(self, job: dict[str, Any]) -> bool:
         """Process a single triage job. Returns True on success."""
         gmail_id = job["payload"]["gmail_id"]
+        start_time = time.time()
 
         try:
             # Get email data
@@ -968,6 +975,9 @@ class TriageWorker:
             if not email:
                 logger.warning(f"Parsed email not found: {gmail_id}")
                 self._fail_job(job["id"], "Parsed email not found")
+                ERRORS.labels(
+                    service="triage-worker", error_type="email_not_found"
+                ).inc()
                 return False
 
             # Fetch body from API if not in parsed table
@@ -986,6 +996,8 @@ class TriageWorker:
                         f"Processed {gmail_id}: chain={result.chain}, "
                         f"rule={result.rule_index}, action={result.action}"
                     )
+                    # Enqueue labeling job
+                    QUEUE_PROCESSED.labels(queue="labeling", status="enqueued").inc()
                 else:
                     logger.warning(f"Action failed for {gmail_id}: {result.action}")
             else:
@@ -1003,16 +1015,23 @@ class TriageWorker:
 
             # Mark job complete
             self._complete_job(job["id"])
+
+            # Record metrics
+            PROCESSING_DURATION.labels(queue="triage", operation="process").observe(
+                time.time() - start_time
+            )
             return True
 
         except LLMError as e:
             # LLM failures should fail the job and retry (not silently skip)
             logger.error(f"LLM error processing {gmail_id}: {e}")
             self._fail_job(job["id"], f"LLM error: {e}")
+            ERRORS.labels(service="triage-worker", error_type="llm_error").inc()
             return False
         except Exception as e:
             logger.error(f"Failed to process {gmail_id}: {e}")
             self._fail_job(job["id"], str(e))
+            ERRORS.labels(service="triage-worker", error_type="job_failed").inc()
             return False
 
     def _process_batch(self) -> tuple[int, int]:
@@ -1029,8 +1048,10 @@ class TriageWorker:
         for job in jobs:
             if self.process_job(job):
                 processed += 1
+                QUEUE_PROCESSED.labels(queue="triage", status="success").inc()
             else:
                 failed += 1
+                QUEUE_PROCESSED.labels(queue="triage", status="error").inc()
 
         return processed, failed
 
@@ -1121,6 +1142,11 @@ def main() -> None:
     if missing:
         logger.error(f"Missing required environment variables: {', '.join(missing)}")
         sys.exit(1)
+
+    # Start metrics server
+    metrics_port = int(os.environ.get("METRICS_PORT", "8000"))
+    start_metrics_server(port=metrics_port)
+    logger.info(f"Metrics server started on port {metrics_port}")
 
     config = Config(
         postgres_host=os.environ["POSTGRES_HOST"],
