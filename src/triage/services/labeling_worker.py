@@ -531,12 +531,12 @@ class LabelingWorker:
 
     def _process_batch(self) -> tuple[int, int]:
         """Process a batch of jobs. Returns (processed, failed)."""
-        start_time = time.time()
         jobs = self._claim_jobs(self.config.batch_size)
 
         if not jobs:
             return 0, 0
 
+        start_time = time.time()
         logger.info(f"Processing batch of {len(jobs)} labeling jobs")
 
         # Get current Cortex/* labels for all messages in this batch
@@ -580,63 +580,65 @@ class LabelingWorker:
         processed = 0
         failed = 0
 
-        # Process each operation group as a batch
-        for key, group_jobs in operation_groups.items():
-            add_labels, remove_labels, _, _, _ = key
+        try:
+            # Process each operation group as a batch
+            for key, group_jobs in operation_groups.items():
+                add_labels, remove_labels, _, _, _ = key
 
-            gmail_ids = [j.gmail_id for j in group_jobs]
-            job_ids = [j.job_id for j in group_jobs]
+                gmail_ids = [j.gmail_id for j in group_jobs]
+                job_ids = [j.job_id for j in group_jobs]
 
-            # Resolve label names to IDs
-            add_label_ids = self._resolve_labels(list(add_labels), create=True)
-            if add_label_ids is None:
-                # Failed to create required labels - fail these jobs
-                self._fail_jobs(job_ids, "Failed to create required label")
-                failed += len(group_jobs)
-                ERRORS.labels(
-                    service="labeling-worker", error_type="label_create_failed"
-                ).inc()
-                QUEUE_PROCESSED.labels(queue="labeling", status="error").inc(
-                    len(group_jobs)
+                # Resolve label names to IDs
+                add_label_ids = self._resolve_labels(list(add_labels), create=True)
+                if add_label_ids is None:
+                    # Failed to create required labels - fail these jobs
+                    self._fail_jobs(job_ids, "Failed to create required label")
+                    failed += len(group_jobs)
+                    ERRORS.labels(
+                        service="labeling-worker", error_type="label_create_failed"
+                    ).inc()
+                    QUEUE_PROCESSED.labels(queue="labeling", status="error").inc(
+                        len(group_jobs)
+                    )
+                    continue
+
+                remove_label_ids = self._resolve_labels(
+                    list(remove_labels), create=False
                 )
-                continue
+                # remove_label_ids is always a list when create=False (skips missing)
+                assert remove_label_ids is not None  # for type checker
 
-            remove_label_ids = self._resolve_labels(list(remove_labels), create=False)
-            # remove_label_ids is always a list when create=False (skips missing)
-            assert remove_label_ids is not None  # for type checker
-
-            # Execute batch modify
-            success = self.gmail.batch_modify(
-                gmail_ids, add_label_ids, remove_label_ids
-            )
-
-            if success:
-                self._complete_jobs(job_ids)
-                processed += len(group_jobs)
-                QUEUE_PROCESSED.labels(queue="labeling", status="success").inc(
-                    len(group_jobs)
+                # Execute batch modify
+                success = self.gmail.batch_modify(
+                    gmail_ids, add_label_ids, remove_label_ids
                 )
-                logger.debug(
-                    f"Completed batch: {len(gmail_ids)} messages, "
-                    f"labels +{list(add_labels)} -{list(remove_labels)}"
-                )
-            else:
-                self._fail_jobs(job_ids, "Gmail batch modify failed")
-                failed += len(group_jobs)
-                QUEUE_PROCESSED.labels(queue="labeling", status="error").inc(
-                    len(group_jobs)
-                )
-                ERRORS.labels(
-                    service="labeling-worker", error_type="batch_modify_failed"
-                ).inc()
 
-        # Record batch processing duration
-        if processed > 0 or failed > 0:
+                if success:
+                    self._complete_jobs(job_ids)
+                    processed += len(group_jobs)
+                    QUEUE_PROCESSED.labels(queue="labeling", status="success").inc(
+                        len(group_jobs)
+                    )
+                    logger.debug(
+                        f"Completed batch: {len(gmail_ids)} messages, "
+                        f"labels +{list(add_labels)} -{list(remove_labels)}"
+                    )
+                else:
+                    self._fail_jobs(job_ids, "Gmail batch modify failed")
+                    failed += len(group_jobs)
+                    QUEUE_PROCESSED.labels(queue="labeling", status="error").inc(
+                        len(group_jobs)
+                    )
+                    ERRORS.labels(
+                        service="labeling-worker", error_type="batch_modify_failed"
+                    ).inc()
+
+            return processed, failed
+        finally:
+            # Always record batch processing duration
             PROCESSING_DURATION.labels(queue="labeling", operation="batch").observe(
                 time.time() - start_time
             )
-
-        return processed, failed
 
     def run(self) -> None:
         """Main processing loop."""
