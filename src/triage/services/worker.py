@@ -825,8 +825,7 @@ class TriageWorker:
                 """
                 SELECT DISTINCT gl.name
                 FROM emails_raw er
-                CROSS JOIN LATERAL unnest(er.label_ids) AS label_id
-                JOIN gmail_labels gl ON gl.id = label_id
+                JOIN gmail_labels gl ON gl.id = ANY(er.label_ids)
                 WHERE er.gmail_id = %s
                   AND gl.name LIKE %s
                 """,
