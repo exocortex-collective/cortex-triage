@@ -396,7 +396,7 @@ class LabelingWorker:
                 claimable AS (
                     SELECT id FROM queue
                     WHERE queue_name = 'labeling' AND status = 'pending'
-                    ORDER BY created_at
+                    ORDER BY priority DESC, created_at
                     LIMIT %s
                     FOR UPDATE SKIP LOCKED
                 )
