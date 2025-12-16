@@ -672,7 +672,7 @@ class TriageWorker:
                           AND attempts < %s
                     ),
                     expire_dead_letter AS (
-                        -- Mark jobs that exceeded max attempts as failed permanently
+                        -- Mark stale jobs that exceeded max attempts as failed
                         UPDATE queue
                         SET status = 'failed',
                             last_error = COALESCE(last_error, '') ||
@@ -680,6 +680,16 @@ class TriageWorker:
                         WHERE queue_name = 'triage'
                           AND status = 'processing'
                           AND claimed_at < NOW() - (INTERVAL '1 minute' * %s)
+                          AND attempts >= %s
+                    ),
+                    expire_pending_exhausted AS (
+                        -- Immediately fail pending jobs that hit max attempts
+                        UPDATE queue
+                        SET status = 'failed',
+                            last_error = COALESCE(last_error, '') ||
+                                ' [max attempts exceeded]'
+                        WHERE queue_name = 'triage'
+                          AND status = 'pending'
                           AND attempts >= %s
                     ),
                     claimable AS (
@@ -701,7 +711,8 @@ class TriageWorker:
                         MAX_ATTEMPTS,
                         VISIBILITY_TIMEOUT_MINUTES,
                         MAX_ATTEMPTS,
-                        MAX_ATTEMPTS,
+                        MAX_ATTEMPTS,  # expire_pending_exhausted
+                        MAX_ATTEMPTS,  # claimable
                         batch_size,
                     ),
                 )

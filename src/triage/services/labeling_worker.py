@@ -243,7 +243,7 @@ class GmailBatchClient:
             created_id: str = created["id"]
             with self._label_cache_lock:
                 self._label_cache[label_name] = created_id
-            return created_id
+                return created_id
         except HttpError as e:
             if e.resp.status == 409:
                 logger.info(f"Label '{label_name}' already exists, refreshing cache")
