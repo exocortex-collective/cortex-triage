@@ -610,8 +610,9 @@ class LabelingWorker:
             if success:
                 self._complete_jobs(job_ids)
                 processed += len(group_jobs)
-                for _ in group_jobs:
-                    QUEUE_PROCESSED.labels(queue="labeling", status="success").inc()
+                QUEUE_PROCESSED.labels(queue="labeling", status="success").inc(
+                    len(group_jobs)
+                )
                 logger.debug(
                     f"Completed batch: {len(gmail_ids)} messages, "
                     f"labels +{list(add_labels)} -{list(remove_labels)}"
@@ -619,8 +620,9 @@ class LabelingWorker:
             else:
                 self._fail_jobs(job_ids, "Gmail batch modify failed")
                 failed += len(group_jobs)
-                for _ in group_jobs:
-                    QUEUE_PROCESSED.labels(queue="labeling", status="error").inc()
+                QUEUE_PROCESSED.labels(queue="labeling", status="error").inc(
+                    len(group_jobs)
+                )
                 ERRORS.labels(
                     service="labeling-worker", error_type="batch_modify_failed"
                 ).inc()

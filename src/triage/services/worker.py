@@ -1027,11 +1027,17 @@ class TriageWorker:
             logger.error(f"LLM error processing {gmail_id}: {e}")
             self._fail_job(job["id"], f"LLM error: {e}")
             ERRORS.labels(service="triage-worker", error_type="llm_error").inc()
+            PROCESSING_DURATION.labels(queue="triage", operation="process").observe(
+                time.time() - start_time
+            )
             return False
         except Exception as e:
             logger.error(f"Failed to process {gmail_id}: {e}")
             self._fail_job(job["id"], str(e))
             ERRORS.labels(service="triage-worker", error_type="job_failed").inc()
+            PROCESSING_DURATION.labels(queue="triage", operation="process").observe(
+                time.time() - start_time
+            )
             return False
 
     def _process_batch(self) -> tuple[int, int]:
