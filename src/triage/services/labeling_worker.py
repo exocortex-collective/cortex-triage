@@ -452,6 +452,37 @@ class LabelingWorker:
             )
             conn.commit()
 
+    def _get_current_cortex_labels(self, gmail_ids: list[str]) -> dict[str, list[str]]:
+        """Get current Cortex/* labels for a batch of gmail_ids.
+
+        Queries emails_raw joined with gmail_labels to find all Cortex/*
+        labels currently on each message. Used to ensure stale labels are
+        removed when re-triaging.
+
+        Returns a dict mapping gmail_id -> list of Cortex/* label names.
+        """
+        if not gmail_ids:
+            return {}
+
+        with self._get_conn() as conn, conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT er.gmail_id, gl.name
+                FROM emails_raw er
+                CROSS JOIN LATERAL unnest(er.label_ids) AS label_id
+                JOIN gmail_labels gl ON gl.id = label_id
+                WHERE er.gmail_id = ANY(%s)
+                  AND gl.name LIKE 'Cortex/%%'
+                """,
+                (gmail_ids,),
+            )
+            rows = cur.fetchall()
+
+        result: dict[str, list[str]] = defaultdict(list)
+        for gmail_id, label_name in rows:
+            result[gmail_id].append(label_name)
+        return result
+
     def _resolve_labels(
         self, label_names: list[str], create: bool = True
     ) -> list[str] | None:
@@ -500,6 +531,24 @@ class LabelingWorker:
             return 0, 0
 
         logger.info(f"Processing batch of {len(jobs)} labeling jobs")
+
+        # Get current Cortex/* labels for all messages in this batch
+        # This ensures stale labels are removed when re-triaging
+        gmail_ids_in_batch = [j.gmail_id for j in jobs]
+        current_cortex_labels = self._get_current_cortex_labels(gmail_ids_in_batch)
+
+        # Augment each job's remove_labels with current Cortex/* labels not being added
+        for job in jobs:
+            current = set(current_cortex_labels.get(job.gmail_id, []))
+            adding = set(job.add_labels)
+            # Remove Cortex/* labels that aren't being re-added
+            extra_removes = current - adding
+            if extra_removes:
+                job.remove_labels = list(set(job.remove_labels) | extra_removes)
+                logger.debug(
+                    f"gmail_id={job.gmail_id}: adding {len(extra_removes)} "
+                    f"stale Cortex labels to remove list"
+                )
 
         # Group jobs by operation type for batching
         operation_groups: dict[tuple, list[LabelingJob]] = defaultdict(list)
