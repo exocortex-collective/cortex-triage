@@ -7,6 +7,7 @@ import logging
 import os
 import signal
 import sys
+import threading
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -24,6 +25,13 @@ from psycopg2.pool import SimpleConnectionPool
 from triage.engine.matcher import evaluate
 from triage.engine.rules import load_rules, validate_rules
 from triage.models.rules import Action, Email, EvaluationResult, RulesConfig
+
+
+class LLMError(Exception):
+    """Raised when LLM call fails (network, HTTP, or invalid response)."""
+
+    pass
+
 
 logging.basicConfig(
     level=logging.INFO,
@@ -54,6 +62,9 @@ LLM_BODY_PREVIEW_LENGTH = 1000
 # and reset to 'pending' (visibility timeout)
 VISIBILITY_TIMEOUT_MINUTES = 5
 
+# Maximum retry attempts before a job is considered dead letter
+MAX_ATTEMPTS = 3
+
 
 class OllamaClient:
     """Client for Ollama LLM calls."""
@@ -72,6 +83,9 @@ class OllamaClient:
 
         Returns:
             True if the intent matches, False otherwise.
+
+        Raises:
+            LLMError: If the LLM call fails (network, HTTP, or other error).
         """
         try:
             response = self.client.post(
@@ -88,15 +102,15 @@ class OllamaClient:
             return answer == "yes"
         except httpx.RequestError as e:
             logger.error(f"Ollama intent check network error: {e}")
-            return False
+            raise LLMError(f"Ollama network error: {e}") from e
         except httpx.HTTPStatusError as e:
             logger.error(
                 f"Ollama intent check HTTP error {e.response.status_code}: {e}"
             )
-            return False
+            raise LLMError(f"Ollama HTTP {e.response.status_code}") from e
         except Exception as e:
             logger.error(f"Ollama intent check failed unexpectedly: {e}")
-            return False
+            raise LLMError(f"Ollama error: {e}") from e
 
     def classify(self, prompt: str, model: str) -> tuple[str, float, str]:
         """Classify an email using LLM.
@@ -107,6 +121,9 @@ class OllamaClient:
 
         Returns:
             Tuple of (category, confidence, reasoning).
+
+        Raises:
+            LLMError: If the LLM call fails (network, HTTP, or invalid response).
         """
         try:
             response = self.client.post(
@@ -126,7 +143,7 @@ class OllamaClient:
             # Validate response is a dict
             if not isinstance(data, dict):
                 logger.error(f"Ollama returned non-dict JSON: {text}")
-                return ("unknown", 0.0, "invalid JSON format")
+                raise LLMError(f"Ollama returned non-dict JSON: {text}")
 
             # Safe float conversion for confidence
             raw_confidence = data.get("confidence")
@@ -145,16 +162,18 @@ class OllamaClient:
             )
         except httpx.RequestError as e:
             logger.error(f"Ollama network error: {e}")
-            return ("unknown", 0.0, f"network error: {e}")
+            raise LLMError(f"Ollama network error: {e}") from e
         except httpx.HTTPStatusError as e:
             logger.error(f"Ollama HTTP error {e.response.status_code}: {e}")
-            return ("unknown", 0.0, f"HTTP {e.response.status_code}")
+            raise LLMError(f"Ollama HTTP {e.response.status_code}") from e
         except json.JSONDecodeError as e:
             logger.error(f"Ollama returned invalid JSON: {e}")
-            return ("unknown", 0.0, f"invalid JSON: {e}")
+            raise LLMError(f"Ollama invalid JSON: {e}") from e
+        except LLMError:
+            raise  # Re-raise LLMError as-is
         except Exception as e:
             logger.error(f"Ollama classification failed: {e}")
-            return ("unknown", 0.0, str(e))
+            raise LLMError(f"Ollama error: {e}") from e
 
     def check_email_intent(
         self,
@@ -175,6 +194,9 @@ class OllamaClient:
 
         Returns:
             True if the intent matches, False otherwise.
+
+        Raises:
+            LLMError: If the LLM call fails (network, HTTP, or other error).
         """
         # Format the prompt with email content
         body_preview = (body or "")[:LLM_BODY_PREVIEW_LENGTH]
@@ -199,15 +221,15 @@ class OllamaClient:
             return answer == "yes"
         except httpx.RequestError as e:
             logger.error(f"Ollama email intent check network error: {e}")
-            return False
+            raise LLMError(f"Ollama network error: {e}") from e
         except httpx.HTTPStatusError as e:
             logger.error(
                 f"Ollama email intent check HTTP error {e.response.status_code}: {e}"
             )
-            return False
+            raise LLMError(f"Ollama HTTP {e.response.status_code}") from e
         except Exception as e:
             logger.error(f"Ollama email intent check failed unexpectedly: {e}")
-            return False
+            raise LLMError(f"Ollama error: {e}") from e
 
     def categorize_email(
         self,
@@ -231,6 +253,9 @@ class OllamaClient:
 
         Returns:
             The matched category name, or None if no valid category matched.
+
+        Raises:
+            LLMError: If the LLM call fails (network, HTTP, or other error).
         """
         # Format the prompt with email content and categories
         body_preview = (body or "")[:LLM_BODY_PREVIEW_LENGTH]
@@ -269,16 +294,16 @@ class OllamaClient:
                 f"LLM returned unknown category '{answer}', "
                 f"expected one of {categories}"
             )
-            return None
+            return None  # Not an error - LLM responded but no category matched
         except httpx.RequestError as e:
             logger.error(f"Ollama categorize network error: {e}")
-            return None
+            raise LLMError(f"Ollama network error: {e}") from e
         except httpx.HTTPStatusError as e:
             logger.error(f"Ollama categorize HTTP error {e.response.status_code}: {e}")
-            return None
+            raise LLMError(f"Ollama HTTP {e.response.status_code}") from e
         except Exception as e:
             logger.error(f"Ollama categorize failed unexpectedly: {e}")
-            return None
+            raise LLMError(f"Ollama error: {e}") from e
 
 
 class GmailClient:
@@ -288,6 +313,7 @@ class GmailClient:
         self.token_path = token_path
         self._service: Any = None
         self._label_cache: dict[str, str] = {}  # name -> id
+        self._label_cache_lock = threading.Lock()  # Protects cache operations
 
     def _get_service(self) -> Any:
         """Get authenticated Gmail API service."""
@@ -297,15 +323,16 @@ class GmailClient:
         return self._service
 
     def _ensure_label_cache(self) -> None:
-        """Populate label cache if empty."""
-        if self._label_cache:
-            return
+        """Populate label cache if empty. Thread-safe."""
+        with self._label_cache_lock:
+            if self._label_cache:
+                return
 
-        service = self._get_service()
-        results = service.users().labels().list(userId="me").execute()
-        for label in results.get("labels", []):
-            self._label_cache[label["name"]] = label["id"]
-        logger.debug(f"Cached {len(self._label_cache)} Gmail labels")
+            service = self._get_service()
+            results = service.users().labels().list(userId="me").execute()
+            for label in results.get("labels", []):
+                self._label_cache[label["name"]] = label["id"]
+            logger.debug(f"Cached {len(self._label_cache)} Gmail labels")
 
     def apply_label(self, gmail_id: str, label_name: str) -> bool:
         """Apply a label to an email.
@@ -448,13 +475,14 @@ class GmailClient:
             return None
 
     def _create_single_label(self, label_name: str) -> str | None:
-        """Create a single label (no hierarchy handling).
+        """Create a single label (no hierarchy handling). Thread-safe.
 
         Returns the label ID, or None on failure.
         """
         # Check cache first (may have been created as a parent)
-        if label_name in self._label_cache:
-            return self._label_cache[label_name]
+        with self._label_cache_lock:
+            if label_name in self._label_cache:
+                return self._label_cache[label_name]
 
         try:
             service = self._get_service()
@@ -469,8 +497,9 @@ class GmailClient:
             logger.info(f"Created label: {label_name}")
             created_id: str = created["id"]
 
-            # Add to cache
-            self._label_cache[label_name] = created_id
+            # Add to cache (thread-safe)
+            with self._label_cache_lock:
+                self._label_cache[label_name] = created_id
             return created_id
         except HttpError as e:
             # Handle race condition: another worker created the label first
@@ -479,9 +508,13 @@ class GmailClient:
                     f"Label '{label_name}' already exists (race condition), "
                     "refreshing cache"
                 )
-                self._label_cache.clear()
+                # Thread-safe cache refresh
+                with self._label_cache_lock:
+                    self._label_cache.clear()
+                # _ensure_label_cache acquires its own lock
                 self._ensure_label_cache()
-                return self._label_cache.get(label_name)
+                with self._label_cache_lock:
+                    return self._label_cache.get(label_name)
 
             logger.error(
                 f"Gmail API error creating label {label_name}: "
@@ -605,6 +638,12 @@ class TriageWorker:
 
                     CREATE INDEX IF NOT EXISTS idx_classifications_date
                     ON classifications(classified_at DESC);
+
+                    -- Unique constraint for idempotent classification
+                    -- Prevents duplicate classifications for same email + rules version
+                    -- (allows re-evaluation with different rules versions)
+                    CREATE UNIQUE INDEX IF NOT EXISTS idx_classifications_dedup
+                    ON classifications(gmail_id, rules_version);
                 """
             )
             conn.commit()
@@ -615,10 +654,13 @@ class TriageWorker:
 
         Also resets stale jobs that have been processing for too long
         (visibility timeout), handling crashed/killed workers.
+
+        Jobs that have exceeded MAX_ATTEMPTS are left in 'failed' status
+        and not retried (dead letter).
         """
         with self._get_conn() as conn:
             with conn.cursor() as cur:
-                # Reset stale jobs and claim new ones in a single transaction
+                # Reset stale jobs (only if under max attempts) and claim new ones
                 cur.execute(
                     """
                     WITH reset_stale AS (
@@ -627,10 +669,34 @@ class TriageWorker:
                         WHERE queue_name = 'triage'
                           AND status = 'processing'
                           AND claimed_at < NOW() - (INTERVAL '1 minute' * %s)
+                          AND attempts < %s
+                    ),
+                    expire_dead_letter AS (
+                        -- Mark stale jobs that exceeded max attempts as failed
+                        UPDATE queue
+                        SET status = 'failed',
+                            last_error = COALESCE(last_error, '') ||
+                                ' [max attempts exceeded]'
+                        WHERE queue_name = 'triage'
+                          AND status = 'processing'
+                          AND claimed_at < NOW() - (INTERVAL '1 minute' * %s)
+                          AND attempts >= %s
+                    ),
+                    expire_pending_exhausted AS (
+                        -- Immediately fail pending jobs that hit max attempts
+                        UPDATE queue
+                        SET status = 'failed',
+                            last_error = COALESCE(last_error, '') ||
+                                ' [max attempts exceeded]'
+                        WHERE queue_name = 'triage'
+                          AND status = 'pending'
+                          AND attempts >= %s
                     ),
                     claimable AS (
                         SELECT id FROM queue
-                        WHERE queue_name = 'triage' AND status = 'pending'
+                        WHERE queue_name = 'triage'
+                          AND status = 'pending'
+                          AND attempts < %s
                         ORDER BY created_at
                         LIMIT %s
                         FOR UPDATE SKIP LOCKED
@@ -640,7 +706,15 @@ class TriageWorker:
                     WHERE id IN (SELECT id FROM claimable)
                     RETURNING id, payload
                     """,
-                    (VISIBILITY_TIMEOUT_MINUTES, batch_size),
+                    (
+                        VISIBILITY_TIMEOUT_MINUTES,
+                        MAX_ATTEMPTS,
+                        VISIBILITY_TIMEOUT_MINUTES,
+                        MAX_ATTEMPTS,
+                        MAX_ATTEMPTS,  # expire_pending_exhausted
+                        MAX_ATTEMPTS,  # claimable
+                        batch_size,
+                    ),
                 )
                 jobs = [{"id": row[0], "payload": row[1]} for row in cur.fetchall()]
                 conn.commit()
@@ -818,7 +892,7 @@ class TriageWorker:
         result: EvaluationResult,
         action_executed: bool,
     ) -> None:
-        """Store classification result."""
+        """Store classification result (idempotent - updates if exists)."""
         with self._get_conn() as conn, conn.cursor() as cur:
             cur.execute(
                 """
@@ -827,6 +901,15 @@ class TriageWorker:
                         rules_version, llm_category, llm_confidence, llm_reasoning,
                         action_taken, action_executed
                     ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (gmail_id, rules_version) DO UPDATE SET
+                        matched_chain = EXCLUDED.matched_chain,
+                        matched_rule_index = EXCLUDED.matched_rule_index,
+                        llm_category = EXCLUDED.llm_category,
+                        llm_confidence = EXCLUDED.llm_confidence,
+                        llm_reasoning = EXCLUDED.llm_reasoning,
+                        action_taken = EXCLUDED.action_taken,
+                        action_executed = EXCLUDED.action_executed,
+                        classified_at = NOW()
                 """,
                 (
                     email.id,
@@ -887,7 +970,7 @@ class TriageWorker:
             if not email.body:
                 email.body = self._get_body_from_api(gmail_id)
 
-            # Evaluate rules
+            # Evaluate rules (may raise LLMError if Ollama is down)
             result = evaluate(self.rules, email, self.ollama)
 
             # Execute action if matched
@@ -918,6 +1001,11 @@ class TriageWorker:
             self._complete_job(job["id"])
             return True
 
+        except LLMError as e:
+            # LLM failures should fail the job and retry (not silently skip)
+            logger.error(f"LLM error processing {gmail_id}: {e}")
+            self._fail_job(job["id"], f"LLM error: {e}")
+            return False
         except Exception as e:
             logger.error(f"Failed to process {gmail_id}: {e}")
             self._fail_job(job["id"], str(e))
