@@ -366,11 +366,14 @@ class OllamaClient:
             value: str = result.get("response", "").strip()
 
             # Reject obviously invalid responses
-            if not value:
-                return None
-            lower_value = value.lower()
-            if lower_value in ("none", "n/a", "unknown", "null", "undefined", ""):
-                logger.debug(f"LLM extraction returned invalid value: {value}")
+            if not value or value.lower() in {
+                "none",
+                "n/a",
+                "unknown",
+                "null",
+                "undefined",
+            }:
+                logger.debug(f"LLM extraction returned invalid or empty value: {value}")
                 return None
 
             return value

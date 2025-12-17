@@ -53,7 +53,7 @@ class HeaderRegexVariable(BaseModel):
 
     header: str  # Header name (case-insensitive)
     pattern: str  # Regex with capture group
-    group: int = 1  # Which capture group to use (default: first)
+    group: int = Field(1, gt=0)  # Which capture group to use (default: first)
 
 
 class SubjectRegexVariable(BaseModel):
@@ -65,7 +65,7 @@ class SubjectRegexVariable(BaseModel):
     """
 
     pattern: str  # Regex with capture group
-    group: int = 1  # Which capture group to use (default: first)
+    group: int = Field(1, gt=0)  # Which capture group to use (default: first)
 
 
 class LLMVariable(BaseModel):

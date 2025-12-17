@@ -750,10 +750,10 @@ def evaluate_chain(
 
             if category in rule.routes:
                 # Merge standalone variables with LLM-extracted variables
-                # Use .copy() to avoid mutating original context
-                merged_values = var_ctx.values.copy() if var_ctx else {}
-                if llm_var_ctx:
-                    merged_values.update(llm_var_ctx.values)
+                # LLM-extracted variables take precedence in case of collision
+                merged_values = (var_ctx.values if var_ctx else {}) | (
+                    llm_var_ctx.values if llm_var_ctx else {}
+                )
                 merged_ctx = (
                     VariableContext(values=merged_values) if merged_values else None
                 )
