@@ -5,6 +5,7 @@ from pathlib import Path
 
 import yaml
 
+from triage.engine.variables import TEMPLATE_PATTERN
 from triage.models.rules import BUILTIN_PROMPTS_DATA, RulesConfig
 
 # Category descriptions for prompt generation
@@ -164,9 +165,6 @@ def validate_rules(config: RulesConfig) -> list[str]:
     if "main" not in config.chains:
         errors.append("Rules must have a 'main' chain")
 
-    # Regex for matching {{variable}} template placeholders
-    template_var_pattern = re.compile(r"\{\{(\w+)\}\}")
-
     # Validate jump targets and intent references
     # Note: Rule model_validator handles action/jump/llm exclusivity and llm+routes
     for chain_name, rules in config.chains.items():
@@ -239,7 +237,7 @@ def validate_rules(config: RulesConfig) -> list[str]:
 
             # Validate label templates reference only defined variables
             if rule.action and rule.action.label:
-                template_vars = set(template_var_pattern.findall(rule.action.label))
+                template_vars = set(TEMPLATE_PATTERN.findall(rule.action.label))
                 undefined = template_vars - defined_vars
                 if undefined:
                     errors.append(
@@ -252,7 +250,7 @@ def validate_rules(config: RulesConfig) -> list[str]:
                 for route_name, route_action in rule.routes.items():
                     if route_action.label:
                         template_vars = set(
-                            template_var_pattern.findall(route_action.label)
+                            TEMPLATE_PATTERN.findall(route_action.label)
                         )
                         undefined = template_vars - defined_vars
                         if undefined:

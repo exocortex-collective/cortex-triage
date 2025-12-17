@@ -27,6 +27,10 @@ if TYPE_CHECKING:
 
 log = structlog.get_logger()
 
+# Regex pattern for {{variable}} template placeholders
+# Used by both matcher.py (rendering) and rules.py (validation)
+TEMPLATE_PATTERN = re.compile(r"\{\{(\w+)\}\}")
+
 
 class VariableError(Exception):
     """Raised when variable resolution fails.

@@ -7,7 +7,12 @@ from typing import Protocol
 import structlog
 
 from triage.engine.rules import format_classification_prompt
-from triage.engine.variables import VariableContext, VariableError, resolve_variables
+from triage.engine.variables import (
+    TEMPLATE_PATTERN,
+    VariableContext,
+    VariableError,
+    resolve_variables,
+)
 from triage.models.rules import (
     Action,
     Email,
@@ -17,9 +22,6 @@ from triage.models.rules import (
 )
 
 log = structlog.get_logger()
-
-# Regex for matching {{variable}} template placeholders
-_TEMPLATE_PATTERN = re.compile(r"\{\{(\w+)\}\}")
 
 
 class LLMClient(Protocol):
@@ -253,7 +255,7 @@ def _render_label(
             var_name = match.group(1)
             return variables.values.get(var_name, match.group(0))
 
-        label = _TEMPLATE_PATTERN.sub(replace, label)
+        label = TEMPLATE_PATTERN.sub(replace, label)
 
     # Apply prefix
     if prefix:
@@ -748,14 +750,13 @@ def evaluate_chain(
 
             if category in rule.routes:
                 # Merge standalone variables with LLM-extracted variables
-                merged_ctx = var_ctx
+                # Use .copy() to avoid mutating original context
+                merged_values = var_ctx.values.copy() if var_ctx else {}
                 if llm_var_ctx:
-                    if merged_ctx:
-                        # Combine both contexts (LLM extraction takes precedence)
-                        merged_values = {**merged_ctx.values, **llm_var_ctx.values}
-                        merged_ctx = VariableContext(values=merged_values)
-                    else:
-                        merged_ctx = llm_var_ctx
+                    merged_values.update(llm_var_ctx.values)
+                merged_ctx = (
+                    VariableContext(values=merged_values) if merged_values else None
+                )
 
                 action = _render_action(
                     rule.routes[category], config.label_prefix, merged_ctx
