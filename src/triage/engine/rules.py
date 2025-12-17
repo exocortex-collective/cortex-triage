@@ -235,29 +235,33 @@ def validate_rules(config: RulesConfig) -> list[str]:
                 for field in rule.llm.extract:
                     defined_vars.add(field)
 
+            # Helper to find undefined variables in a label template
+            def get_undefined_vars(
+                label: str, defined: set[str] = defined_vars
+            ) -> set[str]:
+                return set(TEMPLATE_PATTERN.findall(label)) - defined
+
             # Validate label templates reference only defined variables
-            if rule.action and rule.action.label:
-                template_vars = set(TEMPLATE_PATTERN.findall(rule.action.label))
-                undefined = template_vars - defined_vars
-                if undefined:
-                    errors.append(
-                        f"Chain '{chain_name}' rule {i}: "
-                        f"label template references undefined variables: {undefined}"
-                    )
+            if (
+                rule.action
+                and rule.action.label
+                and (undefined := get_undefined_vars(rule.action.label))
+            ):
+                errors.append(
+                    f"Chain '{chain_name}' rule {i}: "
+                    f"label template references undefined variables: {undefined}"
+                )
 
             # Validate route action label templates
             if rule.routes:
                 for route_name, route_action in rule.routes.items():
-                    if route_action.label:
-                        template_vars = set(
-                            TEMPLATE_PATTERN.findall(route_action.label)
+                    if route_action.label and (
+                        undefined := get_undefined_vars(route_action.label)
+                    ):
+                        errors.append(
+                            f"Chain '{chain_name}' rule {i} "
+                            f"route '{route_name}': label template "
+                            f"references undefined variables: {undefined}"
                         )
-                        undefined = template_vars - defined_vars
-                        if undefined:
-                            errors.append(
-                                f"Chain '{chain_name}' rule {i} "
-                                f"route '{route_name}': label template "
-                                f"references undefined variables: {undefined}"
-                            )
 
     return errors

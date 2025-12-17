@@ -65,6 +65,15 @@ class Config:
 # Max characters of email body to include in LLM prompts
 LLM_BODY_PREVIEW_LENGTH = 1000
 
+# Invalid LLM extraction responses to reject
+INVALID_LLM_EXTRACTION_VALUES = {
+    "none",
+    "n/a",
+    "unknown",
+    "null",
+    "undefined",
+}
+
 # How long a job can be in 'processing' before it's considered stale
 # and reset to 'pending' (visibility timeout)
 VISIBILITY_TIMEOUT_MINUTES = 5
@@ -366,13 +375,7 @@ class OllamaClient:
             value: str = result.get("response", "").strip()
 
             # Reject obviously invalid responses
-            if not value or value.lower() in {
-                "none",
-                "n/a",
-                "unknown",
-                "null",
-                "undefined",
-            }:
+            if not value or value.lower() in INVALID_LLM_EXTRACTION_VALUES:
                 logger.debug(f"LLM extraction returned invalid or empty value: {value}")
                 return None
 
