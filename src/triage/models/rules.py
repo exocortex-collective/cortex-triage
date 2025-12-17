@@ -39,6 +39,86 @@ class EmailCategoryConfig(BaseModel):
         return v
 
 
+# Variable extraction models for dynamic labels
+
+
+class HeaderRegexVariable(BaseModel):
+    """Extract variable from header using regex capture group.
+
+    Example:
+        header_regex:
+          header: "list-id"
+          pattern: "^([^<\\s]+)"  # Captures "owner/repo" from GitHub List-ID
+    """
+
+    header: str  # Header name (case-insensitive)
+    pattern: str  # Regex with capture group
+    group: int = 1  # Which capture group to use (default: first)
+
+
+class SubjectRegexVariable(BaseModel):
+    """Extract variable from subject using regex capture group.
+
+    Example:
+        subject_regex:
+          pattern: "#(\\d{3}-\\d{7}-\\d{7})"  # Captures Amazon order ID
+    """
+
+    pattern: str  # Regex with capture group
+    group: int = 1  # Which capture group to use (default: first)
+
+
+class LLMVariable(BaseModel):
+    """Extract variable using LLM.
+
+    The prompt template can use {from_addr}, {subject}, {body_preview}.
+
+    Example:
+        llm:
+          prompt: "Extract the project name. Return ONLY the name."
+          model: "qwen2.5:0.5b"
+    """
+
+    prompt: str  # Prompt template
+    model: str = "qwen2.5:0.5b"
+
+
+class Variable(BaseModel):
+    """A variable definition - exactly one source type.
+
+    Variables are resolved after a rule matches and before the action is applied.
+    If resolution fails, the rule is considered not matched and evaluation
+    continues to the next rule.
+
+    Example:
+        variables:
+          repo:
+            header_regex:
+              header: "list-id"
+              pattern: "^([^<\\s]+)"
+    """
+
+    header_regex: HeaderRegexVariable | None = None
+    subject_regex: SubjectRegexVariable | None = None
+    llm: LLMVariable | None = None
+
+    @model_validator(mode="after")
+    def exactly_one_source(self) -> Variable:
+        """Ensure exactly one extraction method is specified."""
+        sources = sum(
+            [
+                self.header_regex is not None,
+                self.subject_regex is not None,
+                self.llm is not None,
+            ]
+        )
+        if sources != 1:
+            raise ValueError(
+                "Variable must have exactly one of: header_regex, subject_regex, llm"
+            )
+        return self
+
+
 class MatchCondition(BaseModel):
     """Conditions for matching an email.
 
@@ -209,10 +289,27 @@ def _default_prompts() -> dict[str, ClassificationPrompt]:
 
 
 class LLMConfig(BaseModel):
-    """Configuration for LLM classification chain."""
+    """Configuration for LLM classification chain.
+
+    When `extract` is specified, the LLM will also extract variable values
+    alongside classification. These variables can be used in route action labels
+    with {{variable_name}} syntax.
+
+    Example:
+        llm:
+          prompt_version: "v1"
+          extract:
+            - company_name
+        routes:
+          subscription:
+            label: "Commercial/{{company_name}}/Subscription"
+    """
 
     model: str = "qwen2.5:7b"
     prompt_version: str = "v1"
+    extract: list[str] | None = (
+        None  # Variable names to extract alongside classification
+    )
 
 
 class Rule(BaseModel):
@@ -223,11 +320,28 @@ class Rule(BaseModel):
     - jump: Enter a sub-chain for further evaluation
     - return_to_parent: Exit this chain and continue matching in parent chain
     - llm: Use LLM classification with routes
+
+    Variables:
+    - variables: Extract values from email to use in label templates
+    - Variables are resolved after match, before action
+    - If variable resolution fails, rule is skipped (falls through to next)
+
+    Example with variables:
+        - match:
+            from_glob: "*@github.com"
+          variables:
+            repo:
+              header_regex:
+                header: "list-id"
+                pattern: "^([^<\\s]+)"
+          action:
+            label: "GitHub/{{repo}}"
     """
 
     match: MatchCondition = Field(
         default_factory=lambda: MatchCondition()  # type: ignore[call-arg]
     )
+    variables: dict[str, Variable] | None = None  # Variable definitions
     action: Action | None = None
     jump: str | None = None
     return_to_parent: bool | None = None  # Exit chain, continue in parent
@@ -301,3 +415,4 @@ class EvaluationResult(BaseModel):
     llm_confidence: float | None = None
     llm_reasoning: str | None = None
     trace: list[str] = Field(default_factory=list)  # Decision trace for debugging
+    variables: dict[str, str] = Field(default_factory=dict)  # Resolved variable values

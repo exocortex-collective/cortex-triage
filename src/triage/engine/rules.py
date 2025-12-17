@@ -97,6 +97,7 @@ def format_classification_prompt(
     from_addr: str,
     subject: str,
     body: str,
+    extract_fields: list[str] | None = None,
 ) -> tuple[str, str]:
     """Format a classification prompt with email data.
 
@@ -106,6 +107,8 @@ def format_classification_prompt(
         from_addr: Email sender address.
         subject: Email subject.
         body: Email body text.
+        extract_fields: Optional list of field names to extract
+            alongside classification.
 
     Returns:
         Tuple of (formatted_prompt, model_name).
@@ -133,6 +136,20 @@ def format_classification_prompt(
         body_preview=body_preview,
     )
 
+    # Add extraction instructions if fields specified
+    if extract_fields:
+        fields_str = ", ".join(extract_fields)
+        extracted_obj = ", ".join(f'"{f}": "..."' for f in extract_fields)
+        extract_instruction = f"""
+
+Also extract these fields from the email:
+{fields_str}
+
+Include an "extracted" object in your JSON response with the field values:
+{{"category": "...", "confidence": 0.0-1.0, "reasoning": "...",\
+ "extracted": {{{extracted_obj}}}}}"""
+        formatted += extract_instruction
+
     return formatted, prompt_config.model
 
 
@@ -146,6 +163,9 @@ def validate_rules(config: RulesConfig) -> list[str]:
     # Must have a 'main' chain
     if "main" not in config.chains:
         errors.append("Rules must have a 'main' chain")
+
+    # Regex for matching {{variable}} template placeholders
+    template_var_pattern = re.compile(r"\{\{(\w+)\}\}")
 
     # Validate jump targets and intent references
     # Note: Rule model_validator handles action/jump/llm exclusivity and llm+routes
@@ -164,7 +184,7 @@ def validate_rules(config: RulesConfig) -> list[str]:
                     f"Chain '{chain_name}' rule {i}: " f"unknown intent '{intent}'"
                 )
 
-            # Validate regex patterns
+            # Validate regex patterns in match conditions
             if rule.match.subject_regex:
                 patterns = (
                     [rule.match.subject_regex]
@@ -179,5 +199,67 @@ def validate_rules(config: RulesConfig) -> list[str]:
                             f"Chain '{chain_name}' rule {i}: "
                             f"invalid subject_regex '{pattern}': {e}"
                         )
+
+            # Validate variables
+            defined_vars: set[str] = set()
+            if rule.variables:
+                for var_name, var in rule.variables.items():
+                    # Variable name must be a valid identifier
+                    if not var_name.isidentifier():
+                        errors.append(
+                            f"Chain '{chain_name}' rule {i}: "
+                            f"invalid variable name '{var_name}' "
+                            "(must be valid identifier)"
+                        )
+
+                    defined_vars.add(var_name)
+
+                    # Validate regex patterns in variable extractors
+                    if var.header_regex:
+                        try:
+                            re.compile(var.header_regex.pattern)
+                        except re.error as e:
+                            errors.append(
+                                f"Chain '{chain_name}' rule {i}: "
+                                f"invalid header_regex pattern for '{var_name}': {e}"
+                            )
+                    if var.subject_regex:
+                        try:
+                            re.compile(var.subject_regex.pattern)
+                        except re.error as e:
+                            errors.append(
+                                f"Chain '{chain_name}' rule {i}: "
+                                f"invalid subject_regex pattern for '{var_name}': {e}"
+                            )
+
+            # Add LLM extract fields to defined vars
+            if rule.llm and rule.llm.extract:
+                for field in rule.llm.extract:
+                    defined_vars.add(field)
+
+            # Validate label templates reference only defined variables
+            if rule.action and rule.action.label:
+                template_vars = set(template_var_pattern.findall(rule.action.label))
+                undefined = template_vars - defined_vars
+                if undefined:
+                    errors.append(
+                        f"Chain '{chain_name}' rule {i}: "
+                        f"label template references undefined variables: {undefined}"
+                    )
+
+            # Validate route action label templates
+            if rule.routes:
+                for route_name, route_action in rule.routes.items():
+                    if route_action.label:
+                        template_vars = set(
+                            template_var_pattern.findall(route_action.label)
+                        )
+                        undefined = template_vars - defined_vars
+                        if undefined:
+                            errors.append(
+                                f"Chain '{chain_name}' rule {i} "
+                                f"route '{route_name}': label template "
+                                f"references undefined variables: {undefined}"
+                            )
 
     return errors

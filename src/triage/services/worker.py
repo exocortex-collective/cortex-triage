@@ -312,6 +312,169 @@ class OllamaClient:
             logger.error(f"Ollama categorize failed unexpectedly: {e}")
             raise LLMError(f"Ollama error: {e}") from e
 
+    def extract_value(
+        self,
+        from_addr: str,
+        subject: str,
+        body: str | None,
+        prompt: str,
+        model: str,
+    ) -> str | None:
+        """Extract a single value from email using LLM.
+
+        Used for standalone variable extraction (not classification).
+        The prompt template can use {from_addr}, {subject}, {body_preview}.
+
+        Args:
+            from_addr: Email sender address.
+            subject: Email subject.
+            body: Email body (may be None).
+            prompt: Prompt template with {from_addr}, {subject}, {body_preview}.
+            model: Model name to use.
+
+        Returns:
+            Extracted value as string, or None if extraction failed or
+            returned an obviously invalid response.
+
+        Note:
+            This method returns None on failure rather than raising LLMError,
+            because extraction failure should cause the rule to fall through
+            to the next rule (not fail the entire job).
+        """
+        body_preview = (body or "")[:LLM_BODY_PREVIEW_LENGTH]
+        try:
+            formatted = prompt.format(
+                from_addr=from_addr,
+                subject=subject,
+                body_preview=body_preview,
+            )
+        except KeyError as e:
+            logger.warning(f"Invalid prompt template for extraction: missing {e}")
+            return None
+
+        try:
+            response = self.client.post(
+                f"{self.base_url}/api/generate",
+                json={
+                    "model": model,
+                    "prompt": formatted,
+                    "stream": False,
+                },
+            )
+            response.raise_for_status()
+            result = response.json()
+            value: str = result.get("response", "").strip()
+
+            # Reject obviously invalid responses
+            if not value:
+                return None
+            lower_value = value.lower()
+            if lower_value in ("none", "n/a", "unknown", "null", "undefined", ""):
+                logger.debug(f"LLM extraction returned invalid value: {value}")
+                return None
+
+            return value
+        except httpx.RequestError as e:
+            logger.warning(f"Ollama extraction network error: {e}")
+            return None
+        except httpx.HTTPStatusError as e:
+            logger.warning(
+                f"Ollama extraction HTTP error {e.response.status_code}: {e}"
+            )
+            return None
+        except Exception as e:
+            logger.warning(f"Ollama extraction failed: {e}")
+            return None
+
+    def classify_with_extraction(
+        self,
+        prompt: str,
+        model: str,
+        extract_fields: list[str] | None = None,
+    ) -> tuple[str, float, str, dict[str, str]]:
+        """Classify email and optionally extract fields in one LLM call.
+
+        Used for LLM classification rules that also need to populate variables.
+        The prompt should already include extraction instructions if extract_fields
+        is provided.
+
+        Args:
+            prompt: Fully formatted classification prompt (including extraction
+                instructions if needed).
+            model: Model name to use.
+            extract_fields: List of field names to extract (for validation).
+                If None, no extraction is performed.
+
+        Returns:
+            Tuple of (category, confidence, reasoning, extracted_dict).
+            On failure, returns ("unknown", 0.0, error_message, {}).
+
+        Raises:
+            LLMError: If the LLM call fails (network, HTTP, or invalid response).
+        """
+        try:
+            response = self.client.post(
+                f"{self.base_url}/api/generate",
+                json={
+                    "model": model,
+                    "prompt": prompt,
+                    "stream": False,
+                    "format": "json",
+                },
+            )
+            response.raise_for_status()
+            result = response.json()
+            text = result.get("response", "{}")
+            data = json.loads(text)
+
+            # Validate response is a dict
+            if not isinstance(data, dict):
+                logger.error(f"Ollama returned non-dict JSON: {text}")
+                raise LLMError(f"Ollama returned non-dict JSON: {text}")
+
+            # Safe float conversion for confidence
+            raw_confidence = data.get("confidence")
+            try:
+                confidence = (
+                    float(raw_confidence) if raw_confidence is not None else 0.5
+                )
+            except (ValueError, TypeError):
+                logger.warning(f"Invalid confidence value from LLM: {raw_confidence}")
+                confidence = 0.5
+
+            # Extract extracted fields if present
+            extracted: dict[str, str] = {}
+            if extract_fields:
+                raw_extracted = data.get("extracted", {})
+                if isinstance(raw_extracted, dict):
+                    # Only include requested fields with string values
+                    for field in extract_fields:
+                        if field in raw_extracted:
+                            val = raw_extracted[field]
+                            if isinstance(val, str) and val.strip():
+                                extracted[field] = val.strip()
+
+            return (
+                data.get("category", "unknown"),
+                confidence,
+                data.get("reasoning", ""),
+                extracted,
+            )
+        except httpx.RequestError as e:
+            logger.error(f"Ollama network error: {e}")
+            raise LLMError(f"Ollama network error: {e}") from e
+        except httpx.HTTPStatusError as e:
+            logger.error(f"Ollama HTTP error {e.response.status_code}: {e}")
+            raise LLMError(f"Ollama HTTP {e.response.status_code}") from e
+        except json.JSONDecodeError as e:
+            logger.error(f"Ollama returned invalid JSON: {e}")
+            raise LLMError(f"Ollama invalid JSON: {e}") from e
+        except LLMError:
+            raise  # Re-raise LLMError as-is
+        except Exception as e:
+            logger.error(f"Ollama classification with extraction failed: {e}")
+            raise LLMError(f"Ollama error: {e}") from e
+
 
 class GmailClient:
     """Client for Gmail API operations."""
