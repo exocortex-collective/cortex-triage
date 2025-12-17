@@ -416,17 +416,27 @@ class MockLLMClient:
         classify_response: tuple[str, float, str] | None = None,
         email_intent_responses: dict[str, bool] | None = None,
         categorize_response: str | None = None,
+        extract_responses: dict[str, str | None] | None = None,
+        classify_with_extraction_response: (
+            tuple[str, float, str, dict[str, str]] | None
+        ) = None,
     ):
         self.intent_responses = intent_responses or {}
         self.classify_response = classify_response or ("unknown", 0.5, "default")
         self.email_intent_responses = email_intent_responses or {}
         self.categorize_response = categorize_response
+        self.extract_responses = extract_responses or {}
+        self.classify_with_extraction_response = classify_with_extraction_response
         self.intent_calls: list[tuple[str, str, str]] = []
         self.classify_calls: list[tuple[str, str]] = []
         self.email_intent_calls: list[tuple[str, str, str | None, str, str]] = []
         self.categorize_calls: list[
             tuple[str, str, str | None, str, str, list[str]]
         ] = []
+        self.extract_calls: list[tuple[str, str, str | None, str, str]] = []
+        self.classify_with_extraction_calls: list[tuple[str, str, list[str] | None]] = (
+            []
+        )
 
     def check_intent(self, subject: str, prompt: str, model: str) -> bool:
         self.intent_calls.append((subject, prompt, model))
@@ -469,6 +479,36 @@ class MockLLMClient:
     def classify(self, prompt: str, model: str) -> tuple[str, float, str]:
         self.classify_calls.append((prompt, model))
         return self.classify_response
+
+    def extract_value(
+        self,
+        from_addr: str,
+        subject: str,
+        body: str | None,
+        prompt: str,
+        model: str,
+    ) -> str | None:
+        """Mock extract_value for variable extraction."""
+        self.extract_calls.append((from_addr, subject, body, prompt, model))
+        # Return based on keywords in prompt for testing
+        for keyword, response in self.extract_responses.items():
+            if keyword.lower() in prompt.lower():
+                return response
+        return None
+
+    def classify_with_extraction(
+        self,
+        prompt: str,
+        model: str,
+        extract_fields: list[str] | None = None,
+    ) -> tuple[str, float, str, dict[str, str]]:
+        """Mock classify_with_extraction for LLM rules with extraction."""
+        self.classify_with_extraction_calls.append((prompt, model, extract_fields))
+        if self.classify_with_extraction_response:
+            return self.classify_with_extraction_response
+        # Default: use regular classify response with empty extraction
+        cat, conf, reason = self.classify_response
+        return (cat, conf, reason, {})
 
 
 class TestLLMMatching:
@@ -1702,3 +1742,414 @@ class TestHeaderAliases:
         # None match
         condition = MatchCondition(list_id_glob=["*yahoogroups*", "*listserv*"])
         assert not matches_condition(condition, email)
+
+
+class TestDynamicLabels:
+    """Tests for dynamic label templates with variables."""
+
+    def test_header_regex_variable_in_label(self) -> None:
+        """Test extracting variable from header and using in label."""
+        from triage.models.rules import (
+            HeaderRegexVariable,
+            Variable,
+        )
+
+        email = Email(
+            id=1,
+            gmail_id="github123",
+            from_addr="notifications@github.com",
+            to_addrs=["me@example.com"],
+            subject="[devonjones/postmark] Fix bug",
+            headers={"list-id": "devonjones/postmark <postmark.devonjones.github.com>"},
+        )
+        config = RulesConfig(
+            chains={
+                "main": [
+                    Rule(
+                        match=MatchCondition(from_glob="*@github.com"),
+                        variables={
+                            "repo": Variable(
+                                header_regex=HeaderRegexVariable(
+                                    header="list-id",
+                                    pattern=r"^([^\s<]+)",
+                                    group=1,
+                                )
+                            )
+                        },
+                        action=Action(label="GitHub/{{repo}}"),
+                    )
+                ]
+            }
+        )
+
+        result = evaluate(config, email)
+
+        assert result.matched
+        assert result.action is not None
+        assert result.action.label == "Cortex/GitHub/devonjones/postmark"
+        assert result.variables == {"repo": "devonjones/postmark"}
+
+    def test_subject_regex_variable_in_label(self) -> None:
+        """Test extracting variable from subject and using in label."""
+        from triage.models.rules import (
+            SubjectRegexVariable,
+            Variable,
+        )
+
+        email = Email(
+            id=1,
+            gmail_id="amazon456",
+            from_addr="auto-confirm@amazon.com",
+            to_addrs=["me@example.com"],
+            subject="Your order #111-2345678-9012345 has shipped",
+        )
+        config = RulesConfig(
+            chains={
+                "main": [
+                    Rule(
+                        match=MatchCondition(from_glob="*@amazon.com"),
+                        variables={
+                            "order_id": Variable(
+                                subject_regex=SubjectRegexVariable(
+                                    pattern=r"#(\d{3}-\d{7}-\d{7})",
+                                    group=1,
+                                )
+                            )
+                        },
+                        action=Action(label="Orders/Amazon/{{order_id}}"),
+                    )
+                ]
+            }
+        )
+
+        result = evaluate(config, email)
+
+        assert result.matched
+        assert result.action is not None
+        assert result.action.label == "Cortex/Orders/Amazon/111-2345678-9012345"
+        assert result.variables == {"order_id": "111-2345678-9012345"}
+
+    def test_llm_variable_in_label(self) -> None:
+        """Test extracting variable via LLM and using in label."""
+        from triage.models.rules import (
+            LLMVariable,
+            Variable,
+        )
+
+        email = Email(
+            id=1,
+            gmail_id="kickstarter789",
+            from_addr="no-reply@kickstarter.com",
+            to_addrs=["me@example.com"],
+            subject="Update #5 from Cool Widget Pro",
+            body="Great news backers!",
+        )
+        config = RulesConfig(
+            chains={
+                "main": [
+                    Rule(
+                        match=MatchCondition(from_glob="*@kickstarter.com"),
+                        variables={
+                            "project": Variable(
+                                llm=LLMVariable(
+                                    prompt="Extract the project name",
+                                    model="test-model",
+                                )
+                            )
+                        },
+                        action=Action(label="Kickstarter/{{project}}"),
+                    )
+                ]
+            }
+        )
+        llm_client = MockLLMClient(
+            extract_responses={"project name": "Cool Widget Pro"}
+        )
+
+        result = evaluate(config, email, llm_client)
+
+        assert result.matched
+        assert result.action is not None
+        assert result.action.label == "Cortex/Kickstarter/Cool Widget Pro"
+        assert result.variables == {"project": "Cool Widget Pro"}
+
+    def test_variable_failure_falls_through(self) -> None:
+        """Test that variable extraction failure causes rule to be skipped."""
+        from triage.models.rules import (
+            HeaderRegexVariable,
+            Variable,
+        )
+
+        email = Email(
+            id=1,
+            gmail_id="github123",
+            from_addr="notifications@github.com",
+            to_addrs=["me@example.com"],
+            subject="GitHub notification",
+            headers={},  # No List-ID header
+        )
+        config = RulesConfig(
+            chains={
+                "main": [
+                    # This rule will fail variable extraction
+                    Rule(
+                        match=MatchCondition(from_glob="*@github.com"),
+                        variables={
+                            "repo": Variable(
+                                header_regex=HeaderRegexVariable(
+                                    header="list-id",
+                                    pattern=r"^([^\s<]+)",
+                                    group=1,
+                                )
+                            )
+                        },
+                        action=Action(label="GitHub/{{repo}}"),
+                    ),
+                    # Fallback rule should match
+                    Rule(
+                        match=MatchCondition(from_glob="*@github.com"),
+                        action=Action(label="GitHub/Unknown"),
+                    ),
+                ]
+            }
+        )
+
+        result = evaluate(config, email)
+
+        assert result.matched
+        assert result.action is not None
+        # Should match fallback rule
+        assert result.action.label == "Cortex/GitHub/Unknown"
+        assert result.variables == {}
+
+    def test_multiple_variables_in_label(self) -> None:
+        """Test using multiple variables in a label template."""
+        from triage.models.rules import (
+            HeaderRegexVariable,
+            SubjectRegexVariable,
+            Variable,
+        )
+
+        email = Email(
+            id=1,
+            gmail_id="github123",
+            from_addr="notifications@github.com",
+            to_addrs=["me@example.com"],
+            subject="[devonjones/postmark] Issue #42: Bug fix",
+            headers={"list-id": "devonjones/postmark <postmark.devonjones.github.com>"},
+        )
+        config = RulesConfig(
+            chains={
+                "main": [
+                    Rule(
+                        match=MatchCondition(from_glob="*@github.com"),
+                        variables={
+                            "repo": Variable(
+                                header_regex=HeaderRegexVariable(
+                                    header="list-id",
+                                    pattern=r"^([^\s<]+)",
+                                    group=1,
+                                )
+                            ),
+                            "issue_num": Variable(
+                                subject_regex=SubjectRegexVariable(
+                                    pattern=r"#(\d+)",
+                                    group=1,
+                                )
+                            ),
+                        },
+                        action=Action(label="GitHub/{{repo}}/Issues/{{issue_num}}"),
+                    )
+                ]
+            }
+        )
+
+        result = evaluate(config, email)
+
+        assert result.matched
+        assert result.action is not None
+        assert result.action.label == "Cortex/GitHub/devonjones/postmark/Issues/42"
+        assert result.variables == {"repo": "devonjones/postmark", "issue_num": "42"}
+
+    def test_variable_with_archive_action(self) -> None:
+        """Test variables work with other action fields like archive."""
+        from triage.models.rules import (
+            HeaderRegexVariable,
+            Variable,
+        )
+
+        email = Email(
+            id=1,
+            gmail_id="github123",
+            from_addr="notifications@github.com",
+            to_addrs=["me@example.com"],
+            subject="[devonjones/postmark] PR merged",
+            headers={"list-id": "devonjones/postmark <postmark.devonjones.github.com>"},
+        )
+        config = RulesConfig(
+            chains={
+                "main": [
+                    Rule(
+                        match=MatchCondition(from_glob="*@github.com"),
+                        variables={
+                            "repo": Variable(
+                                header_regex=HeaderRegexVariable(
+                                    header="list-id",
+                                    pattern=r"^([^\s<]+)",
+                                    group=1,
+                                )
+                            )
+                        },
+                        action=Action(
+                            label="GitHub/{{repo}}",
+                            archive=True,
+                            mark_read=True,
+                        ),
+                    )
+                ]
+            }
+        )
+
+        result = evaluate(config, email)
+
+        assert result.matched
+        assert result.action is not None
+        assert result.action.label == "Cortex/GitHub/devonjones/postmark"
+        assert result.action.archive is True
+        assert result.action.mark_read is True
+
+    def test_llm_classification_with_extraction(self) -> None:
+        """Test LLM classification that also extracts variables."""
+        email = Email(
+            id=1,
+            gmail_id="test123",
+            from_addr="newsletter@company.com",
+            to_addrs=["me@example.com"],
+            subject="Weekly update from Acme Corp",
+            body="Your weekly digest...",
+        )
+        config = RulesConfig(
+            chains={
+                "main": [
+                    Rule(
+                        llm=LLMConfig(
+                            model="test-model",
+                            prompt_version="v1",
+                            extract=["company_name"],
+                        ),
+                        routes={
+                            "subscription": Action(
+                                label="Commercial/{{company_name}}/Newsletter"
+                            ),
+                            "automated_noise": Action(label="Automated", archive=True),
+                        },
+                    )
+                ]
+            }
+        )
+        llm_client = MockLLMClient(
+            classify_with_extraction_response=(
+                "subscription",
+                0.9,
+                "This is a newsletter",
+                {"company_name": "Acme Corp"},
+            )
+        )
+
+        result = evaluate(config, email, llm_client)
+
+        assert result.matched
+        assert result.action is not None
+        assert result.action.label == "Cortex/Commercial/Acme Corp/Newsletter"
+        assert result.llm_category == "subscription"
+        assert result.variables == {"company_name": "Acme Corp"}
+
+    def test_llm_classification_extraction_missing_field(self) -> None:
+        """Test LLM classification when extraction doesn't return all fields."""
+        email = Email(
+            id=1,
+            gmail_id="test123",
+            from_addr="newsletter@company.com",
+            to_addrs=["me@example.com"],
+            subject="Weekly update",
+            body="Content...",
+        )
+        config = RulesConfig(
+            chains={
+                "main": [
+                    Rule(
+                        llm=LLMConfig(
+                            model="test-model",
+                            prompt_version="v1",
+                            extract=["company_name"],
+                        ),
+                        routes={
+                            "subscription": Action(
+                                label="Commercial/{{company_name}}/Newsletter"
+                            ),
+                        },
+                    )
+                ]
+            }
+        )
+        # LLM returns category but no extracted fields
+        llm_client = MockLLMClient(
+            classify_with_extraction_response=(
+                "subscription",
+                0.8,
+                "Newsletter",
+                {},  # No extraction
+            )
+        )
+
+        result = evaluate(config, email, llm_client)
+
+        assert result.matched
+        assert result.action is not None
+        # Template variable should remain as-is if not extracted
+        assert "{{company_name}}" in result.action.label
+
+    def test_nested_label_hierarchy(self) -> None:
+        """Test that nested label paths are handled correctly."""
+        from triage.models.rules import (
+            HeaderRegexVariable,
+            Variable,
+        )
+
+        email = Email(
+            id=1,
+            gmail_id="github123",
+            from_addr="notifications@github.com",
+            to_addrs=["me@example.com"],
+            subject="[anthropics/claude-code] Review requested",
+            headers={
+                "list-id": "anthropics/claude-code <claude-code.anthropics.github.com>"
+            },
+        )
+        config = RulesConfig(
+            label_prefix="MyPrefix",
+            chains={
+                "main": [
+                    Rule(
+                        match=MatchCondition(from_glob="*@github.com"),
+                        variables={
+                            "repo": Variable(
+                                header_regex=HeaderRegexVariable(
+                                    header="list-id",
+                                    pattern=r"^([^\s<]+)",
+                                    group=1,
+                                )
+                            )
+                        },
+                        action=Action(label="GitHub/{{repo}}"),
+                    )
+                ]
+            },
+        )
+
+        result = evaluate(config, email)
+
+        assert result.matched
+        assert result.action is not None
+        # Should create nested hierarchy: MyPrefix/GitHub/anthropics/claude-code
+        assert result.action.label == "MyPrefix/GitHub/anthropics/claude-code"
