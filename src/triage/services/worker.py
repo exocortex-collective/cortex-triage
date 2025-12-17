@@ -17,6 +17,7 @@ from typing import Any
 import httpx
 import psycopg2
 from cortex_utils.metrics import (
+    EMAILS_CLASSIFIED,
     ERRORS,
     PROCESSING_DURATION,
     QUEUE_PROCESSED,
@@ -1020,6 +1021,10 @@ class TriageWorker:
 
             # Store classification
             self._store_classification(email, result, action_executed)
+
+            # Track classification method for metrics
+            method = "llm" if result.llm_category else "rule"
+            EMAILS_CLASSIFIED.labels(method=method).inc()
 
             # Mark job complete
             self._complete_job(job["id"])
