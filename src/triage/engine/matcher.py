@@ -7,6 +7,12 @@ from typing import Protocol
 import structlog
 
 from triage.engine.rules import format_classification_prompt
+from triage.engine.variables import (
+    TEMPLATE_PATTERN,
+    VariableContext,
+    VariableError,
+    resolve_variables,
+)
 from triage.models.rules import (
     Action,
     Email,
@@ -90,6 +96,53 @@ class LLMClient(Protocol):
 
         Returns:
             Tuple of (category, confidence, reasoning).
+        """
+        ...
+
+    def extract_value(
+        self,
+        from_addr: str,
+        subject: str,
+        body: str | None,
+        prompt: str,
+        model: str,
+    ) -> str | None:
+        """Extract a single value from email content.
+
+        Used for standalone variable extraction with LLM.
+
+        Args:
+            from_addr: Email sender address.
+            subject: Email subject.
+            body: Email body (may be None).
+            prompt: Prompt template with {from_addr}, {subject}, {body_preview}.
+            model: Model name to use.
+
+        Returns:
+            Extracted value as string, or None if extraction failed.
+        """
+        ...
+
+    def classify_with_extraction(
+        self,
+        prompt: str,
+        model: str,
+        extract_fields: list[str] | None = None,
+    ) -> tuple[str, float, str, dict[str, str]]:
+        """Classify email and optionally extract fields.
+
+        When extract_fields is specified, the LLM response should include
+        an "extracted" dict with the requested field values.
+
+        Args:
+            prompt: Fully formatted classification prompt
+                (includes extraction instructions).
+            model: Model name to use.
+            extract_fields: Optional list of field names to extract.
+
+        Returns:
+            Tuple of (category, confidence, reasoning, extracted_dict).
+            extracted_dict will be empty if extract_fields is None.
         """
         ...
 
@@ -180,10 +233,55 @@ def _is_mostly_links(body: str | None, threshold: float = 0.5) -> bool:
     return (url_length / content_length) >= threshold
 
 
-def _apply_label_prefix(action: Action, prefix: str) -> Action:
-    """Apply label prefix to an action if it has a label."""
-    if action.label and prefix:
-        return action.model_copy(update={"label": f"{prefix}/{action.label}"})
+def _render_label(
+    label: str,
+    prefix: str,
+    variables: VariableContext | None = None,
+) -> str:
+    """Render label template with variables and apply prefix.
+
+    Args:
+        label: Label string, possibly with {{variable}} placeholders.
+        prefix: Label prefix to prepend (e.g., "Cortex").
+        variables: Optional variable context for substitution.
+
+    Returns:
+        Rendered label with variables substituted and prefix applied.
+    """
+    # Substitute {{variable}} placeholders
+    if variables:
+
+        def replace(match: re.Match[str]) -> str:
+            var_name = match.group(1)
+            return variables.values.get(var_name, match.group(0))
+
+        label = TEMPLATE_PATTERN.sub(replace, label)
+
+    # Apply prefix
+    if prefix:
+        label = f"{prefix}/{label}"
+
+    return label
+
+
+def _render_action(
+    action: Action,
+    prefix: str,
+    variables: VariableContext | None = None,
+) -> Action:
+    """Apply label rendering to action.
+
+    Args:
+        action: Action with possibly templated label.
+        prefix: Label prefix to prepend.
+        variables: Optional variable context for substitution.
+
+    Returns:
+        New action with rendered label.
+    """
+    if action.label:
+        rendered = _render_label(action.label, prefix, variables)
+        return action.model_copy(update={"label": rendered})
     return action
 
 
@@ -561,6 +659,20 @@ def evaluate_chain(
 
         # Rule matched!
 
+        # Resolve variables if defined
+        var_ctx: VariableContext | None = None
+        if rule.variables:
+            try:
+                var_ctx = resolve_variables(email, rule.variables, llm_client)
+                _trace.append(
+                    f"  rule[{i}]: resolved variables {list(var_ctx.values.keys())}"
+                )
+            except VariableError as e:
+                _trace.append(
+                    f"  rule[{i}]: variable resolution failed: {e}, continuing"
+                )
+                continue  # Fall through to next rule
+
         # Handle return_to_parent - exit this chain and continue in parent
         if rule.return_to_parent:
             _trace.append(f"  rule[{i}]: chain '{chain_name}' returning to parent")
@@ -611,19 +723,44 @@ def evaluate_chain(
                 email.from_addr,
                 email.subject,
                 email.body or "",
+                extract_fields=rule.llm.extract,
             )
             # Override model if specified in rule
             if rule.llm.model:
                 model = rule.llm.model
 
-            category, confidence, reasoning = llm_client.classify(prompt, model)
-            _trace.append(
-                f"  rule[{i}]: LLM classified as '{category}' "
-                f"(confidence={confidence:.2f})"
-            )
+            # Use extraction-aware classification if extract fields specified
+            if rule.llm.extract:
+                category, confidence, reasoning, extracted = (
+                    llm_client.classify_with_extraction(prompt, model, rule.llm.extract)
+                )
+                # Build variable context from extracted values
+                llm_var_ctx = VariableContext(values=extracted) if extracted else None
+                _trace.append(
+                    f"  rule[{i}]: LLM classified as '{category}' "
+                    f"(confidence={confidence:.2f}, extracted={list(extracted.keys())})"
+                )
+            else:
+                category, confidence, reasoning = llm_client.classify(prompt, model)
+                llm_var_ctx = None
+                _trace.append(
+                    f"  rule[{i}]: LLM classified as '{category}' "
+                    f"(confidence={confidence:.2f})"
+                )
 
             if category in rule.routes:
-                action = _apply_label_prefix(rule.routes[category], config.label_prefix)
+                # Merge standalone variables with LLM-extracted variables
+                # LLM-extracted variables take precedence in case of collision
+                merged_values = (var_ctx.values if var_ctx else {}) | (
+                    llm_var_ctx.values if llm_var_ctx else {}
+                )
+                merged_ctx = (
+                    VariableContext(values=merged_values) if merged_values else None
+                )
+
+                action = _render_action(
+                    rule.routes[category], config.label_prefix, merged_ctx
+                )
                 _trace.append(f"  rule[{i}]: routed to action {action}")
                 return EvaluationResult(
                     matched=True,
@@ -634,6 +771,7 @@ def evaluate_chain(
                     llm_confidence=confidence,
                     llm_reasoning=reasoning,
                     trace=_trace,
+                    variables=merged_ctx.values if merged_ctx else {},
                 )
             # Category not in routes - continue
             _trace.append(
@@ -643,7 +781,7 @@ def evaluate_chain(
 
         # Handle action
         if rule.action:
-            action = _apply_label_prefix(rule.action, config.label_prefix)
+            action = _render_action(rule.action, config.label_prefix, var_ctx)
             _trace.append(f"  rule[{i}]: matched with action {action}")
             return EvaluationResult(
                 matched=True,
@@ -651,6 +789,7 @@ def evaluate_chain(
                 rule_index=i,
                 action=action,
                 trace=_trace,
+                variables=var_ctx.values if var_ctx else {},
             )
 
     # No rules matched
