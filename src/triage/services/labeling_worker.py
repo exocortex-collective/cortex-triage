@@ -21,6 +21,7 @@ from typing import Any
 
 import psycopg2
 from cortex_utils.metrics import (
+    EMAILS_LABELED,
     ERRORS,
     PROCESSING_DURATION,
     QUEUE_PROCESSED,
@@ -619,6 +620,7 @@ class LabelingWorker:
                     QUEUE_PROCESSED.labels(queue="labeling", status="success").inc(
                         len(group_jobs)
                     )
+                    EMAILS_LABELED.inc(len(gmail_ids))
                     logger.debug(
                         f"Completed batch: {len(gmail_ids)} messages, "
                         f"labels +{list(add_labels)} -{list(remove_labels)}"
