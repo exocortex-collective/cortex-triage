@@ -70,15 +70,16 @@ class Config:
 
 @dataclass
 class LabelingJob:
-    """A single labeling job from the queue."""
+    """A single labeling job from the queue.
+
+    Only gmail_id is used from the payload. Target state (labels, archive, etc.)
+    is queried from the classifications table at processing time, making stale
+    jobs harmless.
+    """
 
     job_id: int
     gmail_id: str
-    add_labels: list[str]
-    remove_labels: list[str]
-    archive: bool
-    mark_read: bool
-    star: bool
+    repair: bool = False  # If true, query Gmail API for current label state
 
 
 class GmailBatchClient:
@@ -414,15 +415,14 @@ class LabelingWorker:
         jobs = []
         for row in rows:
             job_id, payload = row
+            # Only extract gmail_id and repair flag from payload.
+            # Target state (labels, archive, etc.) is queried from classifications
+            # table at processing time, making stale jobs harmless.
             jobs.append(
                 LabelingJob(
                     job_id=job_id,
                     gmail_id=payload["gmail_id"],
-                    add_labels=payload.get("add_labels", []),
-                    remove_labels=payload.get("remove_labels", []),
-                    archive=payload.get("archive", False),
-                    mark_read=payload.get("mark_read", False),
-                    star=payload.get("star", False),
+                    repair=payload.get("repair", False),
                 )
             )
         return jobs
@@ -490,6 +490,88 @@ class LabelingWorker:
             result[gmail_id].append(label_name)
         return result
 
+    def _get_latest_classifications(
+        self, gmail_ids: list[str]
+    ) -> dict[str, dict | None]:
+        """Get the latest classification for multiple emails.
+
+        Returns dict mapping gmail_id -> action_taken dict (or None if not found).
+        The action_taken dict contains: label, add_label, remove_label, archive,
+        mark_read, star.
+        """
+        if not gmail_ids:
+            return {}
+
+        with self._get_conn() as conn, conn.cursor() as cur:
+            # Use DISTINCT ON to get latest classification per gmail_id
+            cur.execute(
+                """
+                SELECT DISTINCT ON (gmail_id) gmail_id, action_taken
+                FROM classifications
+                WHERE gmail_id = ANY(%s)
+                ORDER BY gmail_id, classified_at DESC
+                """,
+                (gmail_ids,),
+            )
+            rows = cur.fetchall()
+
+        return {gmail_id: action_taken for gmail_id, action_taken in rows}
+
+    def _get_gmail_current_labels(self, gmail_id: str) -> list[str] | None:
+        """Query Gmail API for current Cortex/* label names on a message.
+
+        Used in repair mode when emails_raw.label_ids may be stale.
+        Returns list of Cortex/* label names currently on the message,
+        or None on failure (caller should fail the job and retry later).
+        """
+        try:
+            service = self.gmail._get_service()
+            msg = self.gmail._execute_with_rate_limit(
+                lambda: service.users()
+                .messages()
+                .get(userId="me", id=gmail_id, format="minimal"),
+                1,  # messages.get is 1 quota unit
+                f"messages.get({gmail_id})",
+            )
+            label_ids = msg.get("labelIds", [])
+
+            # Convert IDs to names using label cache
+            self.gmail._ensure_label_cache()
+            id_to_name = {v: k for k, v in self.gmail._label_cache.items()}
+
+            return [
+                id_to_name[lid]
+                for lid in label_ids
+                if lid in id_to_name and id_to_name[lid].startswith("Cortex/")
+            ]
+        except Exception as e:
+            logger.error(f"Failed to get Gmail labels for {gmail_id}: {e}")
+            return None
+
+    def _get_target_labels(self, classification: dict) -> set[str]:
+        """Extract target Cortex/* labels from a classification's action_taken.
+
+        Returns set of label names that should be on the email.
+        """
+        # Collect all potential labels from classification
+        labels_to_process: list[str] = []
+
+        if label := classification.get("label"):
+            labels_to_process.append(label)
+
+        if add_label := classification.get("add_label"):
+            if isinstance(add_label, str):
+                labels_to_process.append(add_label)
+            elif isinstance(add_label, list):
+                labels_to_process.extend(add_label)
+
+        # Filter to Cortex/* labels
+        return {
+            lbl
+            for lbl in labels_to_process
+            if isinstance(lbl, str) and lbl.startswith("Cortex/")
+        }
+
     def _resolve_labels(
         self, label_names: list[str], create: bool = True
     ) -> list[str] | None:
@@ -531,7 +613,11 @@ class LabelingWorker:
         )
 
     def _process_batch(self) -> tuple[int, int]:
-        """Process a batch of jobs. Returns (processed, failed)."""
+        """Process a batch of jobs. Returns (processed, failed).
+
+        Uses reconciliation model: queries current state and target state at
+        processing time, making stale jobs harmless.
+        """
         jobs = self._claim_jobs(self.config.batch_size)
 
         if not jobs:
@@ -540,107 +626,220 @@ class LabelingWorker:
         start_time = time.time()
         logger.info(f"Processing batch of {len(jobs)} labeling jobs")
 
-        # Get current Cortex/* labels for all messages in this batch
-        # This ensures stale labels are removed when re-triaging
-        gmail_ids_in_batch = [j.gmail_id for j in jobs]
-        current_cortex_labels = self._get_current_cortex_labels(gmail_ids_in_batch)
+        # Separate repair jobs (need individual Gmail API calls) from normal jobs
+        normal_jobs = [j for j in jobs if not j.repair]
+        repair_jobs = [j for j in jobs if j.repair]
 
-        # Augment each job's remove_labels with current Cortex/* labels not being added
-        for job in jobs:
-            current = set(current_cortex_labels.get(job.gmail_id, []))
-            adding = set(job.add_labels)
-            # Remove Cortex/* labels that aren't being re-added
-            extra_removes = current - adding
-            if extra_removes:
-                job.remove_labels = list(set(job.remove_labels) | extra_removes)
-                logger.debug(
-                    f"gmail_id={job.gmail_id}: adding {len(extra_removes)} "
-                    f"stale Cortex labels to remove list"
-                )
-
-        # Group jobs by operation type for batching
-        operation_groups: dict[tuple, list[LabelingJob]] = defaultdict(list)
-
-        for job in jobs:
-            # Build full list of labels to add (including system labels)
-            add_labels = list(job.add_labels)
-            remove_labels = list(job.remove_labels)
-
-            if job.star:
-                add_labels.append("STARRED")
-            if job.archive:
-                remove_labels.append("INBOX")
-            if job.mark_read:
-                remove_labels.append("UNREAD")
-
-            key = self._build_operation_key(
-                add_labels, remove_labels, job.archive, job.mark_read, job.star
-            )
-            operation_groups[key].append(job)
-
-        processed = 0
-        failed = 0
+        processed, failed = 0, 0
 
         try:
-            # Process each operation group as a batch
-            for key, group_jobs in operation_groups.items():
-                add_labels, remove_labels, _, _, _ = key
+            # Process normal jobs in batch
+            if normal_jobs:
+                p, f = self._process_normal_batch(normal_jobs)
+                processed += p
+                failed += f
 
-                gmail_ids = [j.gmail_id for j in group_jobs]
-                job_ids = [j.job_id for j in group_jobs]
-
-                # Resolve label names to IDs
-                add_label_ids = self._resolve_labels(list(add_labels), create=True)
-                if add_label_ids is None:
-                    # Failed to create required labels - fail these jobs
-                    self._fail_jobs(job_ids, "Failed to create required label")
-                    failed += len(group_jobs)
-                    ERRORS.labels(
-                        service="labeling-worker", error_type="label_create_failed"
-                    ).inc()
-                    QUEUE_PROCESSED.labels(queue="labeling", status="error").inc(
-                        len(group_jobs)
-                    )
-                    continue
-
-                remove_label_ids = self._resolve_labels(
-                    list(remove_labels), create=False
-                )
-                # remove_label_ids is always a list when create=False (skips missing)
-                assert remove_label_ids is not None  # for type checker
-
-                # Execute batch modify
-                success = self.gmail.batch_modify(
-                    gmail_ids, add_label_ids, remove_label_ids
-                )
-
-                if success:
-                    self._complete_jobs(job_ids)
-                    processed += len(group_jobs)
-                    QUEUE_PROCESSED.labels(queue="labeling", status="success").inc(
-                        len(group_jobs)
-                    )
-                    EMAILS_LABELED.inc(len(gmail_ids))
-                    logger.debug(
-                        f"Completed batch: {len(gmail_ids)} messages, "
-                        f"labels +{list(add_labels)} -{list(remove_labels)}"
-                    )
-                else:
-                    self._fail_jobs(job_ids, "Gmail batch modify failed")
-                    failed += len(group_jobs)
-                    QUEUE_PROCESSED.labels(queue="labeling", status="error").inc(
-                        len(group_jobs)
-                    )
-                    ERRORS.labels(
-                        service="labeling-worker", error_type="batch_modify_failed"
-                    ).inc()
+            # Process repair jobs individually (Gmail API calls for current state)
+            for job in repair_jobs:
+                p, f = self._process_repair_job(job)
+                processed += p
+                failed += f
 
             return processed, failed
         finally:
-            # Always record batch processing duration
             PROCESSING_DURATION.labels(queue="labeling", operation="batch").observe(
                 time.time() - start_time
             )
+
+    def _process_normal_batch(self, jobs: list[LabelingJob]) -> tuple[int, int]:
+        """Process jobs using emails_raw for current state.
+
+        Reconciles current Cortex/* labels (from DB) against target state
+        (from classifications table).
+        """
+        gmail_ids = [j.gmail_id for j in jobs]
+
+        # Get current Cortex/* labels from database
+        current_labels_map = self._get_current_cortex_labels(gmail_ids)
+
+        # Get target state from classifications table
+        classifications = self._get_latest_classifications(gmail_ids)
+
+        # Build reconciled operations for each job
+        # Key: (add_labels, remove_labels, archive, mark_read, star)
+        operation_groups: dict[tuple, list[LabelingJob]] = defaultdict(list)
+        skip_job_ids: list[int] = []
+
+        for job in jobs:
+            classification = classifications.get(job.gmail_id)
+            if not classification:
+                logger.warning(f"No classification for {job.gmail_id}, skipping")
+                skip_job_ids.append(job.job_id)
+                continue
+
+            # Compute target Cortex/* labels
+            target = self._get_target_labels(classification)
+
+            # Current Cortex/* labels
+            current = set(current_labels_map.get(job.gmail_id, []))
+
+            # Reconcile: add missing, remove extra
+            add_labels = list(target - current)
+            remove_labels = list(current - target)
+
+            # System label actions from classification
+            archive = classification.get("archive") or False
+            mark_read = classification.get("mark_read") or False
+            star = classification.get("star") or False
+
+            if star:
+                add_labels.append("STARRED")
+            if archive:
+                remove_labels.append("INBOX")
+            if mark_read:
+                remove_labels.append("UNREAD")
+
+            key = self._build_operation_key(
+                add_labels, remove_labels, archive, mark_read, star
+            )
+            operation_groups[key].append(job)
+
+        # Mark skipped jobs as completed (no classification = nothing to do)
+        if skip_job_ids:
+            self._complete_jobs(skip_job_ids)
+
+        processed = len(skip_job_ids)
+        failed = 0
+
+        # Process each operation group as a batch
+        for key, group_jobs in operation_groups.items():
+            add_labels, remove_labels, _, _, _ = key
+
+            gmail_ids = [j.gmail_id for j in group_jobs]
+            job_ids = [j.job_id for j in group_jobs]
+
+            # Resolve label names to IDs
+            add_label_ids = self._resolve_labels(list(add_labels), create=True)
+            if add_label_ids is None:
+                self._fail_jobs(job_ids, "Failed to create required label")
+                failed += len(group_jobs)
+                ERRORS.labels(
+                    service="labeling-worker", error_type="label_create_failed"
+                ).inc()
+                QUEUE_PROCESSED.labels(queue="labeling", status="error").inc(
+                    len(group_jobs)
+                )
+                continue
+
+            remove_label_ids = self._resolve_labels(list(remove_labels), create=False)
+            assert remove_label_ids is not None  # create=False always returns list
+
+            # Execute batch modify
+            success = self.gmail.batch_modify(
+                gmail_ids, add_label_ids, remove_label_ids
+            )
+
+            if success:
+                self._complete_jobs(job_ids)
+                processed += len(group_jobs)
+                QUEUE_PROCESSED.labels(queue="labeling", status="success").inc(
+                    len(group_jobs)
+                )
+                EMAILS_LABELED.inc(len(gmail_ids))
+                logger.debug(
+                    f"Completed batch: {len(gmail_ids)} messages, "
+                    f"labels +{list(add_labels)} -{list(remove_labels)}"
+                )
+            else:
+                self._fail_jobs(job_ids, "Gmail batch modify failed")
+                failed += len(group_jobs)
+                QUEUE_PROCESSED.labels(queue="labeling", status="error").inc(
+                    len(group_jobs)
+                )
+                ERRORS.labels(
+                    service="labeling-worker", error_type="batch_modify_failed"
+                ).inc()
+
+        return processed, failed
+
+    def _process_repair_job(self, job: LabelingJob) -> tuple[int, int]:
+        """Process a single repair job using Gmail API for current state.
+
+        Used when emails_raw.label_ids may be stale and we need to query
+        Gmail directly for the actual label state.
+        """
+        # Get target state from classifications
+        classifications = self._get_latest_classifications([job.gmail_id])
+        classification = classifications.get(job.gmail_id)
+
+        if not classification:
+            logger.warning(f"No classification for repair job {job.gmail_id}")
+            self._complete_jobs([job.job_id])
+            return 1, 0
+
+        # Get current labels from Gmail API (not database)
+        current_labels = self._get_gmail_current_labels(job.gmail_id)
+        if current_labels is None:
+            self._fail_jobs([job.job_id], "Failed to get current labels from Gmail API")
+            QUEUE_PROCESSED.labels(queue="labeling", status="error").inc()
+            ERRORS.labels(
+                service="labeling-worker", error_type="gmail_api_failed"
+            ).inc()
+            return 0, 1
+        current = set(current_labels)
+
+        # Compute target
+        target = self._get_target_labels(classification)
+
+        # Reconcile
+        add_labels = list(target - current)
+        remove_labels = list(current - target)
+
+        # System label actions
+        archive = classification.get("archive") or False
+        mark_read = classification.get("mark_read") or False
+        star = classification.get("star") or False
+
+        if star:
+            add_labels.append("STARRED")
+        if archive:
+            remove_labels.append("INBOX")
+        if mark_read:
+            remove_labels.append("UNREAD")
+
+        # Resolve and apply
+        add_label_ids = self._resolve_labels(add_labels, create=True)
+        if add_label_ids is None:
+            self._fail_jobs([job.job_id], "Failed to create required label")
+            ERRORS.labels(
+                service="labeling-worker", error_type="label_create_failed"
+            ).inc()
+            QUEUE_PROCESSED.labels(queue="labeling", status="error").inc()
+            return 0, 1
+
+        remove_label_ids = self._resolve_labels(remove_labels, create=False)
+        assert remove_label_ids is not None
+
+        success = self.gmail.batch_modify(
+            [job.gmail_id], add_label_ids, remove_label_ids
+        )
+
+        if success:
+            self._complete_jobs([job.job_id])
+            QUEUE_PROCESSED.labels(queue="labeling", status="success").inc()
+            EMAILS_LABELED.inc()
+            logger.debug(
+                f"Repair completed: {job.gmail_id}, "
+                f"labels +{add_labels} -{remove_labels}"
+            )
+            return 1, 0
+        else:
+            self._fail_jobs([job.job_id], "Gmail batch modify failed")
+            QUEUE_PROCESSED.labels(queue="labeling", status="error").inc()
+            ERRORS.labels(
+                service="labeling-worker", error_type="batch_modify_failed"
+            ).inc()
+            return 0, 1
 
     def run(self) -> None:
         """Main processing loop."""
@@ -703,10 +902,52 @@ class LabelingWorker:
         return total_processed, total_failed
 
 
+def repair_failed_jobs(config: Config) -> int:
+    """Re-enqueue failed labeling jobs with repair=True flag.
+
+    Returns the number of jobs re-enqueued.
+    """
+    conn = None
+    try:
+        conn = psycopg2.connect(
+            host=config.postgres_host,
+            port=config.postgres_port,
+            dbname=config.postgres_db,
+            user=config.postgres_user,
+            password=config.postgres_password,
+        )
+        with conn.cursor() as cur:
+            # Re-enqueue failed labeling jobs with repair flag
+            cur.execute(
+                """
+                UPDATE queue
+                SET status = 'pending',
+                    payload = jsonb_set(payload, '{repair}', 'true'),
+                    attempts = 0,
+                    last_error = NULL,
+                    claimed_at = NULL
+                WHERE queue_name = 'labeling' AND status = 'failed'
+                RETURNING id
+                """
+            )
+            count: int = cur.rowcount or 0
+            conn.commit()
+            logger.info(f"Re-enqueued {count} failed jobs with repair=true")
+            return count
+    finally:
+        if conn:
+            conn.close()
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Labeling worker service")
     parser.add_argument(
         "--once", action="store_true", help="Process all pending jobs once and exit"
+    )
+    parser.add_argument(
+        "--repair-failed",
+        action="store_true",
+        help="Re-enqueue failed jobs with repair=true flag and exit",
     )
     parser.add_argument(
         "--batch-size",
@@ -763,6 +1004,12 @@ def main() -> None:
 
     signal.signal(signal.SIGTERM, shutdown_handler)
     signal.signal(signal.SIGINT, shutdown_handler)
+
+    # Handle --repair-failed mode (doesn't need Gmail client)
+    if args.repair_failed:
+        count = repair_failed_jobs(config)
+        logger.info(f"Repair mode: {count} jobs re-enqueued with repair=true")
+        sys.exit(0)
 
     try:
         if args.once:
