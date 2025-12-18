@@ -907,14 +907,15 @@ def repair_failed_jobs(config: Config) -> int:
 
     Returns the number of jobs re-enqueued.
     """
-    conn = psycopg2.connect(
-        host=config.postgres_host,
-        port=config.postgres_port,
-        dbname=config.postgres_db,
-        user=config.postgres_user,
-        password=config.postgres_password,
-    )
+    conn = None
     try:
+        conn = psycopg2.connect(
+            host=config.postgres_host,
+            port=config.postgres_port,
+            dbname=config.postgres_db,
+            user=config.postgres_user,
+            password=config.postgres_password,
+        )
         with conn.cursor() as cur:
             # Re-enqueue failed labeling jobs with repair flag
             cur.execute(
@@ -934,7 +935,8 @@ def repair_failed_jobs(config: Config) -> int:
             logger.info(f"Re-enqueued {count} failed jobs with repair=true")
             return count
     finally:
-        conn.close()
+        if conn:
+            conn.close()
 
 
 def main() -> None:
