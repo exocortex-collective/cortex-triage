@@ -963,6 +963,15 @@ def main() -> None:
     )
     args = parser.parse_args()
 
+    def check_required_vars(vars_list: list[str]) -> None:
+        """Check for required environment variables and exit if any are missing."""
+        missing = [v for v in vars_list if not os.environ.get(v)]
+        if missing:
+            logger.error(
+                f"Missing required environment variables: {', '.join(missing)}"
+            )
+            sys.exit(1)
+
     # For repair-failed mode, we only need database vars
     repair_required_vars = [
         "POSTGRES_HOST",
@@ -973,13 +982,7 @@ def main() -> None:
 
     # Handle --repair-failed mode first (doesn't need Gmail or metrics server)
     if args.repair_failed:
-        missing = [v for v in repair_required_vars if not os.environ.get(v)]
-        if missing:
-            logger.error(
-                f"Missing required environment variables: {', '.join(missing)}"
-            )
-            sys.exit(1)
-
+        check_required_vars(repair_required_vars)
         config = Config(
             postgres_host=os.environ["POSTGRES_HOST"],
             postgres_port=int(os.environ.get("POSTGRES_PORT", "5432")),
@@ -995,11 +998,7 @@ def main() -> None:
         sys.exit(0)
 
     # Normal mode - need all vars including Gmail
-    required_vars = repair_required_vars + ["GMAIL_TOKEN_PATH"]
-    missing = [v for v in required_vars if not os.environ.get(v)]
-    if missing:
-        logger.error(f"Missing required environment variables: {', '.join(missing)}")
-        sys.exit(1)
+    check_required_vars(repair_required_vars + ["GMAIL_TOKEN_PATH"])
 
     # Start metrics server
     try:
