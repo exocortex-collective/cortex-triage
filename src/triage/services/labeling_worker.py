@@ -963,17 +963,41 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    required_vars = [
+    def check_required_vars(vars_list: list[str]) -> None:
+        """Check for required environment variables and exit if any are missing."""
+        missing = [v for v in vars_list if not os.environ.get(v)]
+        if missing:
+            logger.error(
+                f"Missing required environment variables: {', '.join(missing)}"
+            )
+            sys.exit(1)
+
+    # For repair-failed mode, we only need database vars
+    repair_required_vars = [
         "POSTGRES_HOST",
         "POSTGRES_DB",
         "POSTGRES_USER",
         "POSTGRES_PASSWORD",
-        "GMAIL_TOKEN_PATH",
     ]
-    missing = [v for v in required_vars if not os.environ.get(v)]
-    if missing:
-        logger.error(f"Missing required environment variables: {', '.join(missing)}")
-        sys.exit(1)
+
+    # Handle --repair-failed mode first (doesn't need Gmail or metrics server)
+    if args.repair_failed:
+        check_required_vars(repair_required_vars)
+        config = Config(
+            postgres_host=os.environ["POSTGRES_HOST"],
+            postgres_port=int(os.environ.get("POSTGRES_PORT", "5432")),
+            postgres_db=os.environ["POSTGRES_DB"],
+            postgres_user=os.environ["POSTGRES_USER"],
+            postgres_password=os.environ["POSTGRES_PASSWORD"],
+            gmail_token_path="",  # Not needed for repair mode
+            batch_size=args.batch_size,
+            batch_delay=args.batch_delay,
+        )
+        repair_failed_jobs(config)
+        sys.exit(0)
+
+    # Normal mode - need all vars including Gmail
+    check_required_vars(repair_required_vars + ["GMAIL_TOKEN_PATH"])
 
     # Start metrics server
     try:
@@ -1004,12 +1028,6 @@ def main() -> None:
 
     signal.signal(signal.SIGTERM, shutdown_handler)
     signal.signal(signal.SIGINT, shutdown_handler)
-
-    # Handle --repair-failed mode (doesn't need Gmail client)
-    if args.repair_failed:
-        count = repair_failed_jobs(config)
-        logger.info(f"Repair mode: {count} jobs re-enqueued with repair=true")
-        sys.exit(0)
 
     try:
         if args.once:
