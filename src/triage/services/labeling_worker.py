@@ -993,8 +993,7 @@ def main() -> None:
             batch_size=args.batch_size,
             batch_delay=args.batch_delay,
         )
-        count = repair_failed_jobs(config)
-        logger.info(f"Repair mode: {count} jobs re-enqueued with repair=true")
+        repair_failed_jobs(config)
         sys.exit(0)
 
     # Normal mode - need all vars including Gmail
