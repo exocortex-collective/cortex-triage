@@ -2,6 +2,9 @@
 
 import fnmatch
 import re
+import time
+from datetime import UTC, datetime
+from functools import lru_cache
 from typing import Protocol
 
 import structlog
@@ -147,6 +150,87 @@ class LLMClient(Protocol):
         ...
 
 
+@lru_cache(maxsize=256)
+def _compile_regex(pattern: str) -> re.Pattern[str]:
+    """Compile and cache a regex pattern.
+
+    Uses LRU cache to avoid recompiling the same patterns repeatedly.
+    Patterns are compiled with IGNORECASE flag.
+    """
+    return re.compile(pattern, re.IGNORECASE)
+
+
+# Duration pattern for relative dates (e.g., "7d", "2w", "1m", "1y")
+_DURATION_PATTERN = re.compile(r"^(\d+)([dwmy])$", re.IGNORECASE)
+
+
+def _parse_date_to_ms(date_value: str | int) -> int | None:
+    """Parse a date value to milliseconds since epoch.
+
+    Args:
+        date_value: Either an ISO date string (YYYY-MM-DD) or a timestamp in ms.
+
+    Returns:
+        Timestamp in milliseconds, or None if parsing fails.
+    """
+    if isinstance(date_value, int):
+        return date_value
+
+    # Try parsing ISO date format
+    try:
+        dt = datetime.fromisoformat(date_value.replace("Z", "+00:00"))
+        return int(dt.timestamp() * 1000)
+    except ValueError:
+        pass
+
+    # Try parsing date-only format
+    try:
+        dt = datetime.strptime(date_value, "%Y-%m-%d").replace(tzinfo=UTC)
+        return int(dt.timestamp() * 1000)
+    except ValueError:
+        pass
+
+    log.warning("Failed to parse date", date_value=date_value)
+    return None
+
+
+def _parse_duration_to_ms(duration: str) -> int | None:
+    """Parse a duration string to milliseconds.
+
+    Supported formats:
+    - "7d" = 7 days
+    - "2w" = 2 weeks
+    - "1m" = 1 month (30 days)
+    - "1y" = 1 year (365 days)
+
+    Args:
+        duration: Duration string like "7d", "2w", "1m", "1y".
+
+    Returns:
+        Duration in milliseconds, or None if parsing fails.
+    """
+    match = _DURATION_PATTERN.match(duration)
+    if not match:
+        log.warning("Invalid duration format", duration=duration)
+        return None
+
+    amount = int(match.group(1))
+    unit = match.group(2).lower()
+
+    # Convert to milliseconds
+    ms_per_day = 24 * 60 * 60 * 1000
+    if unit == "d":
+        return amount * ms_per_day
+    elif unit == "w":
+        return amount * 7 * ms_per_day
+    elif unit == "m":
+        return amount * 30 * ms_per_day  # Approximate month
+    elif unit == "y":
+        return amount * 365 * ms_per_day  # Approximate year
+
+    return None
+
+
 def _normalize(s: str | None) -> str:
     """Normalize string for comparison."""
     return (s or "").lower().strip()
@@ -168,9 +252,13 @@ def _match_contains(needles: list[str] | str | None, haystack: str) -> bool:
 
 
 def _match_regex(pattern: str, value: str) -> bool:
-    """Match a regex pattern against a value."""
+    """Match a regex pattern against a value (case-insensitive).
+
+    Uses cached compiled patterns for performance.
+    """
     try:
-        return bool(re.search(pattern, value, re.IGNORECASE))
+        compiled = _compile_regex(pattern)
+        return bool(compiled.search(value))
     except re.error:
         log.error(
             "Invalid regex pattern encountered during matching",
@@ -370,17 +458,61 @@ def matches_condition(
         if not any(n in email_to for email_to in to_addrs_norm for n in norm_contains):
             return False
 
+    # From regex (any pattern in list)
+    from_regexes = _to_list(condition.from_regex)
+    if from_regexes and not any(
+        _match_regex(pattern, email.from_addr) for pattern in from_regexes
+    ):
+        return False
+
+    # To regex (any pattern matches any recipient)
+    to_regexes = _to_list(condition.to_regex)
+    if to_regexes and not any(
+        _match_regex(pattern, email_to)
+        for email_to in email.to_addrs
+        for pattern in to_regexes
+    ):
+        return False
+
+    # Subject exact match (any in list)
+    subjects = _to_list(condition.subject)
+    if subjects and not any(subject_norm == _normalize(s) for s in subjects):
+        return False
+
+    # Subject glob (any in list)
+    subject_globs = _to_list(condition.subject_glob)
+    if subject_globs and not any(
+        fnmatch.fnmatch(subject_norm, _normalize(g)) for g in subject_globs
+    ):
+        return False
+
     subject_contains = _to_list(condition.subject_contains)
     if subject_contains and not any(
         _normalize(n) in subject_norm for n in subject_contains
     ):
         return False
 
+    # Body glob (any in list)
+    body_globs = _to_list(condition.body_glob)
+    if body_globs:
+        if body_norm is None:
+            return False
+        if not any(fnmatch.fnmatch(body_norm, _normalize(g)) for g in body_globs):
+            return False
+
     body_contains = _to_list(condition.body_contains)
     if body_contains:
         if body_norm is None:
             return False
         if not any(_normalize(n) in body_norm for n in body_contains):
+            return False
+
+    # Body regex (any pattern in list)
+    body_regexes = _to_list(condition.body_regex)
+    if body_regexes:
+        if email.body is None:
+            return False
+        if not any(_match_regex(pattern, email.body) for pattern in body_regexes):
             return False
 
     # Header matching (glob patterns) - all specified headers must match
@@ -399,6 +531,51 @@ def matches_condition(
             # Empty substring would match everything - treat as no match
             if not substring or _normalize(substring) not in _normalize(header_value):
                 _trace(f"header_contains[{header_name}]: no match")
+                return False
+
+    # Header regex - all specified headers must match regex
+    if condition.header_regex:
+        for header_name, pattern in condition.header_regex.items():
+            header_value = email.headers.get(header_name.lower(), "")
+            # Missing header (empty value) never matches
+            if not header_value or not _match_regex(pattern, header_value):
+                _trace(f"header_regex[{header_name}]: '{header_value}' !~ '{pattern}'")
+                return False
+
+    # Header exists - check if header(s) are present
+    header_exists = _to_list(condition.header_exists)
+    if header_exists:
+        for header_name in header_exists:
+            if header_name.lower() not in email.headers:
+                _trace(f"header_exists[{header_name}]: not present")
+                return False
+
+    # Header name glob - match both header name pattern and value pattern
+    if condition.header_name_glob:
+        for name_pattern, value_pattern in condition.header_name_glob.items():
+            matched = False
+            for header_name, header_value in email.headers.items():
+                if _match_glob(name_pattern, header_name) and _match_glob(
+                    value_pattern, header_value
+                ):
+                    matched = True
+                    break
+            if not matched:
+                _trace(f"header_name_glob[{name_pattern}]: no match")
+                return False
+
+    # Header name regex - match both header name pattern and value pattern
+    if condition.header_name_regex:
+        for name_pattern, value_pattern in condition.header_name_regex.items():
+            matched = False
+            for header_name, header_value in email.headers.items():
+                if _match_regex(name_pattern, header_name) and _match_regex(
+                    value_pattern, header_value
+                ):
+                    matched = True
+                    break
+            if not matched:
+                _trace(f"header_name_regex[{name_pattern}]: no match")
                 return False
 
     # List-ID aliases (shortcuts for header matching on List-ID)
@@ -426,6 +603,13 @@ def matches_condition(
             return False
         list_id_norm = _normalize(list_id_value)
         if not any(_normalize(s) in list_id_norm for s in list_id_contains):
+            return False
+
+    list_id_regexes = _to_list(condition.list_id_regex)
+    if list_id_regexes:
+        if not list_id_value:
+            return False
+        if not any(_match_regex(pattern, list_id_value) for pattern in list_id_regexes):
             return False
 
     # Reply-To aliases (shortcuts for header matching on Reply-To)
@@ -457,19 +641,341 @@ def matches_condition(
         if not any(_normalize(s) in reply_to_norm for s in reply_to_contains):
             return False
 
-    # Regex (any pattern in list)
+    reply_to_regexes = _to_list(condition.reply_to_regex)
+    if reply_to_regexes:
+        if not reply_to_value:
+            return False
+        if not any(
+            _match_regex(pattern, reply_to_value) for pattern in reply_to_regexes
+        ):
+            return False
+
+    # CC matching (from emails_parsed.cc_addrs)
+    cc_addrs_norm = [_normalize(a) for a in email.cc_addrs]
+
+    cc_addrs = _to_list(condition.cc)
+    if cc_addrs:
+        if not cc_addrs_norm:
+            return False
+        cond_cc_set = {_normalize(addr) for addr in cc_addrs}
+        if not set(cc_addrs_norm).intersection(cond_cc_set):
+            return False
+
+    cc_globs = _to_list(condition.cc_glob)
+    if cc_globs:
+        if not cc_addrs_norm:
+            return False
+        normalized_globs = [_normalize(g) for g in cc_globs]
+        if not any(
+            fnmatch.fnmatch(cc_addr, g)
+            for cc_addr in cc_addrs_norm
+            for g in normalized_globs
+        ):
+            return False
+
+    cc_contains = _to_list(condition.cc_contains)
+    if cc_contains:
+        if not cc_addrs_norm:
+            return False
+        norm_contains = [_normalize(n) for n in cc_contains]
+        if not any(n in cc_addr for cc_addr in cc_addrs_norm for n in norm_contains):
+            return False
+
+    cc_regexes = _to_list(condition.cc_regex)
+    if cc_regexes:
+        if not email.cc_addrs:
+            return False
+        if not any(
+            _match_regex(pattern, cc_addr)
+            for cc_addr in email.cc_addrs
+            for pattern in cc_regexes
+        ):
+            return False
+
+    # BCC matching (from emails_parsed.bcc_addrs)
+    bcc_addrs_norm = [_normalize(a) for a in email.bcc_addrs]
+
+    bcc_addrs = _to_list(condition.bcc)
+    if bcc_addrs:
+        if not bcc_addrs_norm:
+            return False
+        cond_bcc_set = {_normalize(addr) for addr in bcc_addrs}
+        if not set(bcc_addrs_norm).intersection(cond_bcc_set):
+            return False
+
+    bcc_globs = _to_list(condition.bcc_glob)
+    if bcc_globs:
+        if not bcc_addrs_norm:
+            return False
+        normalized_globs = [_normalize(g) for g in bcc_globs]
+        if not any(
+            fnmatch.fnmatch(bcc_addr, g)
+            for bcc_addr in bcc_addrs_norm
+            for g in normalized_globs
+        ):
+            return False
+
+    bcc_contains = _to_list(condition.bcc_contains)
+    if bcc_contains:
+        if not bcc_addrs_norm:
+            return False
+        norm_contains = [_normalize(n) for n in bcc_contains]
+        if not any(n in bcc_addr for bcc_addr in bcc_addrs_norm for n in norm_contains):
+            return False
+
+    bcc_regexes = _to_list(condition.bcc_regex)
+    if bcc_regexes:
+        if not email.bcc_addrs:
+            return False
+        if not any(
+            _match_regex(pattern, bcc_addr)
+            for bcc_addr in email.bcc_addrs
+            for pattern in bcc_regexes
+        ):
+            return False
+
+    # Delivered-To header matching
+    deliveredto_value = email.headers.get("delivered-to", "")
+
+    deliveredtos = _to_list(condition.deliveredto)
+    if deliveredtos:
+        if not deliveredto_value:
+            return False
+        deliveredto_norm = _normalize(deliveredto_value)
+        if not any(deliveredto_norm == _normalize(dt) for dt in deliveredtos):
+            return False
+
+    deliveredto_globs = _to_list(condition.deliveredto_glob)
+    if deliveredto_globs:
+        if not deliveredto_value:
+            return False
+        deliveredto_norm = _normalize(deliveredto_value)
+        if not any(
+            fnmatch.fnmatch(deliveredto_norm, _normalize(g)) for g in deliveredto_globs
+        ):
+            return False
+
+    deliveredto_contains = _to_list(condition.deliveredto_contains)
+    if deliveredto_contains:
+        if not deliveredto_value:
+            return False
+        deliveredto_norm = _normalize(deliveredto_value)
+        if not any(_normalize(s) in deliveredto_norm for s in deliveredto_contains):
+            return False
+
+    deliveredto_regexes = _to_list(condition.deliveredto_regex)
+    if deliveredto_regexes:
+        if not deliveredto_value:
+            return False
+        if not any(
+            _match_regex(pattern, deliveredto_value) for pattern in deliveredto_regexes
+        ):
+            return False
+
+    # Subject regex (any pattern in list)
     subject_regexes = _to_list(condition.subject_regex)
     if subject_regexes and not any(
         _match_regex(pattern, email.subject) for pattern in subject_regexes
     ):
         return False
 
-    # Attachment
+    # Status conditions (based on Gmail label_ids)
+    if condition.is_read is not None:
+        # is_read = UNREAD not in label_ids
+        is_read = "UNREAD" not in email.label_ids
+        if is_read != condition.is_read:
+            return False
+
+    if condition.is_starred is not None:
+        is_starred = "STARRED" in email.label_ids
+        if is_starred != condition.is_starred:
+            return False
+
+    if condition.is_important is not None:
+        is_important = "IMPORTANT" in email.label_ids
+        if is_important != condition.is_important:
+            return False
+
+    if condition.in_inbox is not None:
+        in_inbox = "INBOX" in email.label_ids
+        if in_inbox != condition.in_inbox:
+            return False
+
+    # has_label - check for specific label(s)
+    has_labels = _to_list(condition.has_label)
+    if has_labels:
+        label_ids_set = set(email.label_ids)
+        if not any(label in label_ids_set for label in has_labels):
+            return False
+
+    # Size conditions
+    if condition.size_larger is not None and (
+        email.size_estimate is None or email.size_estimate <= condition.size_larger
+    ):
+        return False
+
+    if condition.size_smaller is not None and (
+        email.size_estimate is None or email.size_estimate >= condition.size_smaller
+    ):
+        return False
+
+    # Date conditions
+    if condition.date_before is not None:
+        if email.internal_date is None:
+            return False
+        target_ms = _parse_date_to_ms(condition.date_before)
+        if target_ms is None or email.internal_date >= target_ms:
+            return False
+
+    if condition.date_after is not None:
+        if email.internal_date is None:
+            return False
+        target_ms = _parse_date_to_ms(condition.date_after)
+        if target_ms is None or email.internal_date <= target_ms:
+            return False
+
+    if condition.older_than is not None:
+        if email.internal_date is None:
+            return False
+        duration_ms = _parse_duration_to_ms(condition.older_than)
+        if duration_ms is None:
+            return False
+        now_ms = int(time.time() * 1000)
+        threshold_ms = now_ms - duration_ms
+        if email.internal_date >= threshold_ms:
+            return False
+
+    if condition.newer_than is not None:
+        if email.internal_date is None:
+            return False
+        duration_ms = _parse_duration_to_ms(condition.newer_than)
+        if duration_ms is None:
+            return False
+        now_ms = int(time.time() * 1000)
+        threshold_ms = now_ms - duration_ms
+        if email.internal_date <= threshold_ms:
+            return False
+
+    # Attachment conditions
     if (
         condition.has_attachment is not None
         and email.has_attachment != condition.has_attachment
     ):
         return False
+
+    # Attachment filename matching
+    filenames_norm = [_normalize(f) for f in email.attachment_filenames if f]
+
+    att_filenames = _to_list(condition.attachment_filename)
+    if att_filenames:
+        if not filenames_norm:
+            return False
+        cond_set = {_normalize(f) for f in att_filenames}
+        if not set(filenames_norm).intersection(cond_set):
+            return False
+
+    att_filename_globs = _to_list(condition.attachment_filename_glob)
+    if att_filename_globs:
+        if not filenames_norm:
+            return False
+        normalized_globs = [_normalize(g) for g in att_filename_globs]
+        if not any(
+            fnmatch.fnmatch(fn, g) for fn in filenames_norm for g in normalized_globs
+        ):
+            return False
+
+    att_filename_contains = _to_list(condition.attachment_filename_contains)
+    if att_filename_contains:
+        if not filenames_norm:
+            return False
+        norm_contains = [_normalize(c) for c in att_filename_contains]
+        if not any(c in fn for fn in filenames_norm for c in norm_contains):
+            return False
+
+    att_filename_regexes = _to_list(condition.attachment_filename_regex)
+    if att_filename_regexes:
+        if not email.attachment_filenames:
+            return False
+        if not any(
+            _match_regex(pattern, fn)
+            for fn in email.attachment_filenames
+            if fn
+            for pattern in att_filename_regexes
+        ):
+            return False
+
+    # Attachment MIME type matching
+    mimes_norm = [_normalize(m) for m in email.attachment_mime_types if m]
+
+    att_mimes = _to_list(condition.attachment_mime)
+    if att_mimes:
+        if not mimes_norm:
+            return False
+        cond_set = {_normalize(m) for m in att_mimes}
+        if not set(mimes_norm).intersection(cond_set):
+            return False
+
+    att_mime_globs = _to_list(condition.attachment_mime_glob)
+    if att_mime_globs:
+        if not mimes_norm:
+            return False
+        normalized_globs = [_normalize(g) for g in att_mime_globs]
+        if not any(
+            fnmatch.fnmatch(mime, g) for mime in mimes_norm for g in normalized_globs
+        ):
+            return False
+
+    att_mime_contains = _to_list(condition.attachment_mime_contains)
+    if att_mime_contains:
+        if not mimes_norm:
+            return False
+        norm_contains = [_normalize(c) for c in att_mime_contains]
+        if not any(c in mime for mime in mimes_norm for c in norm_contains):
+            return False
+
+    # Convenience shortcuts for common attachment types
+    if condition.has_calendar_invite is not None:
+        has_ics = any(
+            fn.endswith(".ics") for fn in email.attachment_filenames if fn
+        ) or any(
+            m in ("text/calendar", "application/ics")
+            for m in email.attachment_mime_types
+            if m
+        )
+        if has_ics != condition.has_calendar_invite:
+            return False
+
+    if condition.has_pdf is not None:
+        has_pdf = any(
+            m == "application/pdf" for m in email.attachment_mime_types if m
+        ) or any(fn.endswith(".pdf") for fn in email.attachment_filenames if fn)
+        if has_pdf != condition.has_pdf:
+            return False
+
+    if condition.has_image is not None:
+        has_image = any(
+            m.startswith("image/") for m in email.attachment_mime_types if m
+        )
+        if has_image != condition.has_image:
+            return False
+
+    if condition.has_spreadsheet is not None:
+        spreadsheet_mimes = {
+            "application/vnd.ms-excel",
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            "application/vnd.oasis.opendocument.spreadsheet",
+            "text/csv",
+        }
+        spreadsheet_exts = {".xls", ".xlsx", ".csv", ".ods"}
+        has_spreadsheet = any(
+            m in spreadsheet_mimes for m in email.attachment_mime_types if m
+        ) or any(
+            any(fn.endswith(ext) for ext in spreadsheet_exts)
+            for fn in email.attachment_filenames
+            if fn
+        )
+        if has_spreadsheet != condition.has_spreadsheet:
+            return False
 
     # Body is mostly links
     if condition.body_is_mostly_links is not None:
@@ -591,8 +1097,15 @@ def matches_condition(
             for sub in condition.all_of
         )
         _trace(f"all_of: {all_matched}")
+        # Apply negation if set
+        if condition.negate:
+            return not all_matched
         return all_matched
 
+    # All conditions passed - apply negation if set
+    if condition.negate:
+        _trace("negate: inverting True -> False")
+        return False
     return True
 
 
