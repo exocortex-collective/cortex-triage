@@ -552,26 +552,24 @@ class LabelingWorker:
 
         Returns set of label names that should be on the email.
         """
-        target: set[str] = set()
+        # Collect all potential labels from classification
+        labels_to_process: list = []
 
-        # Primary label (already has Cortex/ prefix from triage worker)
-        if classification.get("label"):
-            label = classification["label"]
-            if label.startswith("Cortex/"):
-                target.add(label)
+        if label := classification.get("label"):
+            labels_to_process.append(label)
 
-        # Additional labels (add_label field)
-        add_label = classification.get("add_label")
-        if add_label:
+        if add_label := classification.get("add_label"):
             if isinstance(add_label, str):
-                if add_label.startswith("Cortex/"):
-                    target.add(add_label)
-            else:
-                for lbl in add_label:
-                    if lbl.startswith("Cortex/"):
-                        target.add(lbl)
+                labels_to_process.append(add_label)
+            elif isinstance(add_label, list):
+                labels_to_process.extend(add_label)
 
-        return target
+        # Filter to Cortex/* labels
+        return {
+            lbl
+            for lbl in labels_to_process
+            if isinstance(lbl, str) and lbl.startswith("Cortex/")
+        }
 
     def _resolve_labels(
         self, label_names: list[str], create: bool = True
@@ -911,21 +909,16 @@ def repair_failed_jobs(config: Config) -> int:
     )
     try:
         with conn.cursor() as cur:
-            # Get gmail_ids from failed labeling jobs
+            # Re-enqueue failed labeling jobs with repair flag
             cur.execute(
                 """
-                WITH failed AS (
-                    SELECT id, payload->>'gmail_id' as gmail_id
-                    FROM queue
-                    WHERE queue_name = 'labeling' AND status = 'failed'
-                )
                 UPDATE queue
                 SET status = 'pending',
                     payload = jsonb_set(payload, '{repair}', 'true'),
                     attempts = 0,
                     last_error = NULL,
                     claimed_at = NULL
-                WHERE id IN (SELECT id FROM failed)
+                WHERE queue_name = 'labeling' AND status = 'failed'
                 RETURNING id
                 """
             )
