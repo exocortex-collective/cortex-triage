@@ -31,7 +31,7 @@ from psycopg2.pool import SimpleConnectionPool
 
 from triage.engine.matcher import evaluate
 from triage.engine.rules import load_rules, validate_rules
-from triage.models.rules import Action, Email, EvaluationResult, RulesConfig
+from triage.models.rules import Email, EvaluationResult, RulesConfig
 
 
 class LLMError(Exception):
@@ -979,78 +979,13 @@ class TriageWorker:
             logger.warning(f"Failed to fetch body from API for {gmail_id}: {e}")
         return None
 
-    def _labels_to_list(self, labels: str | list[str] | None) -> list[str]:
-        """Convert a string or list of strings to a list."""
-        if not labels:
-            return []
-        if isinstance(labels, str):
-            return [labels]
-        return labels
+    def _enqueue_labeling(self, gmail_id: str, priority: int = 0) -> bool:
+        """Enqueue labeling job for batch processing.
 
-    def _get_existing_cortex_labels(self, gmail_id: str) -> list[str]:
-        """Get current Cortex/* labels from Gmail (via emails_raw).
-
-        When re-triaging an email, we need to remove old Cortex labels
-        before applying new ones. This queries the actual Gmail label state
-        from emails_raw.label_ids joined with gmail_labels to find current
-        Cortex/* labels on the email.
-
-        Note: We query emails_raw (source of truth for Gmail state) rather than
-        classifications (which only records intent). This ensures we see labels
-        that may have been added/removed outside the triage system.
+        The labeling worker queries the classifications table for the target
+        state (labels, archive, etc.) - we only need to pass the gmail_id.
         """
-        with self._get_conn() as conn, conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT DISTINCT gl.name
-                FROM emails_raw er
-                JOIN gmail_labels gl ON gl.id = ANY(er.label_ids)
-                WHERE er.gmail_id = %s
-                  AND gl.name LIKE %s
-                """,
-                (gmail_id, f"{self.rules.label_prefix}/%"),
-            )
-            rows = cur.fetchall()
-            return [row[0] for row in rows]
-
-    def _enqueue_labeling(
-        self, action: Action, gmail_id: str, priority: int = 0
-    ) -> bool:
-        """Enqueue labeling action for batch processing.
-
-        Instead of calling Gmail API directly, we enqueue the action
-        for the labeling worker to process in batches.
-
-        When re-triaging, existing Cortex/* labels are automatically
-        removed to prevent label accumulation.
-        """
-        # Build list of labels to add
-        add_labels: list[str] = []
-        if action.label:
-            add_labels.append(action.label)
-        add_labels.extend(self._labels_to_list(action.add_label))
-
-        # Build list of labels to remove - start with explicit removals
-        remove_labels: list[str] = self._labels_to_list(action.remove_label)
-
-        # Get existing Cortex labels and remove any that aren't being re-added
-        existing_cortex = self._get_existing_cortex_labels(gmail_id)
-        for label in existing_cortex:
-            if label not in add_labels and label not in remove_labels:
-                remove_labels.append(label)
-
-        # Defensive check: ensure no label appears in both add and remove lists
-        # (add takes precedence - we don't remove labels we're about to add)
-        remove_labels = [label for label in remove_labels if label not in add_labels]
-
-        payload = {
-            "gmail_id": gmail_id,
-            "add_labels": add_labels,
-            "remove_labels": remove_labels,
-            "archive": action.archive or False,
-            "mark_read": action.mark_read or False,
-            "star": action.star or False,
-        }
+        payload = {"gmail_id": gmail_id}
 
         try:
             with self._get_conn() as conn, conn.cursor() as cur:
@@ -1067,9 +1002,9 @@ class TriageWorker:
             logger.error(f"Failed to enqueue labeling for {gmail_id}: {e}")
             return False
 
-    def _execute_action(self, action: Action, gmail_id: str, priority: int = 0) -> bool:
+    def _execute_action(self, gmail_id: str, priority: int = 0) -> bool:
         """Execute an action on an email by enqueueing for batch processing."""
-        return self._enqueue_labeling(action, gmail_id, priority)
+        return self._enqueue_labeling(gmail_id, priority)
 
     def _store_classification(
         self,
@@ -1167,7 +1102,7 @@ class TriageWorker:
             action_executed = False
             if result.matched and result.action:
                 action_executed = self._execute_action(
-                    result.action, gmail_id, priority=job.get("priority", 0)
+                    gmail_id, priority=job.get("priority", 0)
                 )
                 if action_executed:
                     logger.info(
