@@ -517,11 +517,12 @@ class LabelingWorker:
 
         return {gmail_id: action_taken for gmail_id, action_taken in rows}
 
-    def _get_gmail_current_labels(self, gmail_id: str) -> list[str]:
+    def _get_gmail_current_labels(self, gmail_id: str) -> list[str] | None:
         """Query Gmail API for current Cortex/* label names on a message.
 
         Used in repair mode when emails_raw.label_ids may be stale.
-        Returns list of Cortex/* label names currently on the message.
+        Returns list of Cortex/* label names currently on the message,
+        or None on failure (caller should fail the job and retry later).
         """
         try:
             service = self.gmail._get_service()
@@ -545,7 +546,7 @@ class LabelingWorker:
             ]
         except Exception as e:
             logger.error(f"Failed to get Gmail labels for {gmail_id}: {e}")
-            return []
+            return None
 
     def _get_target_labels(self, classification: dict) -> set[str]:
         """Extract target Cortex/* labels from a classification's action_taken.
@@ -553,7 +554,7 @@ class LabelingWorker:
         Returns set of label names that should be on the email.
         """
         # Collect all potential labels from classification
-        labels_to_process: list = []
+        labels_to_process: list[str] = []
 
         if label := classification.get("label"):
             labels_to_process.append(label)
@@ -777,7 +778,15 @@ class LabelingWorker:
             return 1, 0
 
         # Get current labels from Gmail API (not database)
-        current = set(self._get_gmail_current_labels(job.gmail_id))
+        current_labels = self._get_gmail_current_labels(job.gmail_id)
+        if current_labels is None:
+            self._fail_jobs([job.job_id], "Failed to get current labels from Gmail API")
+            QUEUE_PROCESSED.labels(queue="labeling", status="error").inc()
+            ERRORS.labels(
+                service="labeling-worker", error_type="gmail_api_failed"
+            ).inc()
+            return 0, 1
+        current = set(current_labels)
 
         # Compute target
         target = self._get_target_labels(classification)
@@ -898,8 +907,6 @@ def repair_failed_jobs(config: Config) -> int:
 
     Returns the number of jobs re-enqueued.
     """
-    import psycopg2
-
     conn = psycopg2.connect(
         host=config.postgres_host,
         port=config.postgres_port,
