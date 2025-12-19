@@ -20,6 +20,9 @@ from triage.models.patterns import (
 
 logger = logging.getLogger(__name__)
 
+# Pattern activation threshold - occurrences needed to become active
+PATTERN_ACTIVATION_COUNT = 3
+
 
 def get_pattern_by_sender_merchant(
     conn: psycopg2.extensions.connection,
@@ -257,14 +260,14 @@ def add_email_to_pattern(
                 typical_currency = stats.typical_curr,
                 amount_varies = stats.varies,
                 status = CASE
-                    WHEN stats.cnt >= 3 AND status = 'emerging' THEN 'active'
+                    WHEN stats.cnt >= %s AND status = 'emerging' THEN 'active'
                     ELSE status
                 END,
                 -- Confidence heuristic:
                 -- - Emerging (<3 occurrences): 15% per occurrence
                 -- - Active (>=3): Starts at 50%, +10% per extra, capped at 100%
                 confidence = CASE
-                    WHEN stats.cnt >= 3 THEN LEAST(0.5 + (stats.cnt - 3) * 0.1, 1.0)
+                    WHEN stats.cnt >= %s THEN LEAST(0.5 + (stats.cnt - %s) * 0.1, 1.0)
                     ELSE stats.cnt * 0.15
                 END,
                 updated_at = NOW()
@@ -272,7 +275,14 @@ def add_email_to_pattern(
             WHERE email_patterns.id = %s
             RETURNING occurrence_count, status
             """,
-            (pattern_id, email_date, pattern_id),
+            (
+                pattern_id,
+                email_date,
+                PATTERN_ACTIVATION_COUNT,
+                PATTERN_ACTIVATION_COUNT,
+                PATTERN_ACTIVATION_COUNT,
+                pattern_id,
+            ),
         )
         result = cur.fetchone()
 
@@ -280,7 +290,11 @@ def add_email_to_pattern(
 
         # Check if pattern just became active (exactly 3 occurrences)
         # This is the transition point where we trigger retroactive processing
-        if result and result[0] == 3 and result[1] == "active":
+        if (
+            result
+            and result["occurrence_count"] == PATTERN_ACTIVATION_COUNT
+            and result["status"] == "active"
+        ):
             logger.info(
                 f"Pattern {pattern_id} became active, triggering retroactive enqueue"
             )
