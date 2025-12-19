@@ -273,7 +273,10 @@ def add_email_to_pattern(
                 updated_at = NOW()
             FROM stats
             WHERE email_patterns.id = %s
-            RETURNING occurrence_count, status
+            RETURNING
+                occurrence_count,
+                status,
+                (stats.cnt = %s AND status = 'emerging') AS transitioned
             """,
             (
                 pattern_id,
@@ -282,19 +285,16 @@ def add_email_to_pattern(
                 PATTERN_ACTIVATION_COUNT,
                 PATTERN_ACTIVATION_COUNT,
                 pattern_id,
+                PATTERN_ACTIVATION_COUNT,
             ),
         )
         result = cur.fetchone()
 
         logger.info(f"Added email {gmail_id} to pattern {pattern_id}")
 
-        # Check if pattern just became active (exactly 3 occurrences)
+        # Check if pattern just became active (transitioned from emerging)
         # This is the transition point where we trigger retroactive processing
-        if (
-            result
-            and result["occurrence_count"] == PATTERN_ACTIVATION_COUNT
-            and result["status"] == "active"
-        ):
+        if result and result["transitioned"]:
             logger.info(
                 f"Pattern {pattern_id} became active, triggering retroactive enqueue"
             )

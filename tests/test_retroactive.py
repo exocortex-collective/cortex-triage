@@ -96,8 +96,8 @@ class TestAddEmailToPatternRetroactive:
                 "currency": None,
                 "matched_at": FIXED_TIMESTAMP,
             },
-            # UPDATE RETURNING (occurrence_count=3, status='active')
-            {"occurrence_count": 3, "status": "active"},
+            # UPDATE RETURNING (occurrence_count=3, status='active', transitioned=True)
+            {"occurrence_count": 3, "status": "active", "transitioned": True},
         ]
 
         add_email_to_pattern(conn, pattern_id=1, gmail_id="test123")
@@ -121,8 +121,8 @@ class TestAddEmailToPatternRetroactive:
                 "currency": None,
                 "matched_at": FIXED_TIMESTAMP,
             },
-            # occurrence_count=2, status='emerging'
-            {"occurrence_count": 2, "status": "emerging"},
+            # occurrence_count=2, status='emerging', no transition
+            {"occurrence_count": 2, "status": "emerging", "transitioned": False},
         ]
 
         add_email_to_pattern(conn, pattern_id=1, gmail_id="test123")
@@ -145,8 +145,8 @@ class TestAddEmailToPatternRetroactive:
                 "currency": None,
                 "matched_at": FIXED_TIMESTAMP,
             },
-            # occurrence_count=4, status='active' (already was active)
-            {"occurrence_count": 4, "status": "active"},
+            # occurrence_count=4, status='active' (already was active, no transition)
+            {"occurrence_count": 4, "status": "active", "transitioned": False},
         ]
 
         add_email_to_pattern(conn, pattern_id=1, gmail_id="test123")
@@ -170,8 +170,8 @@ class TestAddEmailToPatternRetroactive:
                 "currency": None,
                 "matched_at": FIXED_TIMESTAMP,
             },
-            # 5 occurrences, already active
-            {"occurrence_count": 5, "status": "active"},
+            # 5 occurrences, already active, no transition
+            {"occurrence_count": 5, "status": "active", "transitioned": False},
         ]
 
         add_email_to_pattern(conn, pattern_id=1, gmail_id="test123")
@@ -194,7 +194,7 @@ class TestAddEmailToPatternRetroactive:
                 "currency": "USD",
                 "matched_at": FIXED_TIMESTAMP,
             },
-            {"occurrence_count": 3, "status": "active"},
+            {"occurrence_count": 3, "status": "active", "transitioned": True},
         ]
 
         result = add_email_to_pattern(
