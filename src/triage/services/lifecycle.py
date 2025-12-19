@@ -307,9 +307,16 @@ def run_lifecycle_maintenance(
             logger.error(error_msg)
             report.errors.append(error_msg)
 
-    # Update maintenance timestamp
-    _update_maintenance_timestamp(conn)
-    conn.commit()
+    # Update maintenance timestamp only if no errors occurred
+    # This allows quicker retry of failed patterns
+    if not report.errors:
+        _update_maintenance_timestamp(conn)
+        conn.commit()
+    else:
+        logger.warning(
+            f"Lifecycle maintenance finished with {len(report.errors)} errors. "
+            "Timestamp not updated to allow for retry."
+        )
 
     return report
 
@@ -405,14 +412,20 @@ def _get_pattern_dates(
     conn: psycopg2.extensions.connection,
     pattern_id: int,
 ) -> list[date]:
-    """Get all email dates for a pattern (for next_expected calculation)."""
+    """Get all email dates for a pattern (for next_expected calculation).
+
+    Uses the actual email date (from Date header) rather than matched_at
+    to ensure accurate temporal pattern detection, especially for backfilled
+    or delayed processing.
+    """
     with conn.cursor() as cur:
         cur.execute(
             """
-            SELECT DATE(matched_at) as email_date
-            FROM pattern_emails
-            WHERE pattern_id = %s
-            ORDER BY matched_at
+            SELECT DATE(ep.date_header) as email_date
+            FROM pattern_emails pe
+            JOIN emails_parsed ep ON pe.gmail_id = ep.gmail_id
+            WHERE pe.pattern_id = %s
+            ORDER BY ep.date_header
             """,
             (pattern_id,),
         )
