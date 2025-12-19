@@ -83,6 +83,7 @@ class EmailPattern(BaseModel):
     first_seen: datetime | None = None
     last_seen: datetime | None = None
     status: PatternStatus = PatternStatus.EMERGING
+    consecutive_misses: int = Field(default=0, ge=0)  # Missed expected emails
 
     # Cached amount stats (computed from pattern_emails)
     typical_amount: Decimal | None = None  # Most common or median
