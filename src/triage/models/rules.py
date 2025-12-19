@@ -68,6 +68,66 @@ class SubjectRegexVariable(BaseModel):
     group: int = Field(1, gt=0)  # Which capture group to use (default: first)
 
 
+class BodyRegexVariable(BaseModel):
+    """Extract variable from email body using regex capture group.
+
+    Example:
+        body_regex:
+          pattern: "Order #(\\d+)"  # Captures order number from body
+    """
+
+    pattern: str  # Regex with capture group
+    group: int = Field(1, gt=0)  # Which capture group to use (default: first)
+
+
+class FromRegexVariable(BaseModel):
+    """Extract variable from sender address using regex capture group.
+
+    Example:
+        from_regex:
+          pattern: "([^@]+)@"  # Captures username from email address
+    """
+
+    pattern: str  # Regex with capture group
+    group: int = Field(1, gt=0)  # Which capture group to use (default: first)
+
+
+class ToRegexVariable(BaseModel):
+    """Extract variable from first matching to_addr using regex capture group.
+
+    Example:
+        to_regex:
+          pattern: "([^+]+)\\+"  # Captures the local part before + extension
+    """
+
+    pattern: str  # Regex with capture group
+    group: int = Field(1, gt=0)  # Which capture group to use (default: first)
+
+
+class CcRegexVariable(BaseModel):
+    """Extract variable from first matching cc_addr using regex capture group.
+
+    Example:
+        cc_regex:
+          pattern: "([^@]+)@"  # Captures username from CC address
+    """
+
+    pattern: str  # Regex with capture group
+    group: int = Field(1, gt=0)  # Which capture group to use (default: first)
+
+
+class AttachmentFilenameRegexVariable(BaseModel):
+    """Extract variable from first matching attachment filename using regex.
+
+    Example:
+        attachment_filename_regex:
+          pattern: "invoice_(\\d+)\\.pdf"  # Captures invoice number
+    """
+
+    pattern: str  # Regex with capture group
+    group: int = Field(1, gt=0)  # Which capture group to use (default: first)
+
+
 class LLMVariable(BaseModel):
     """Extract variable using LLM.
 
@@ -100,6 +160,11 @@ class Variable(BaseModel):
 
     header_regex: HeaderRegexVariable | None = None
     subject_regex: SubjectRegexVariable | None = None
+    body_regex: BodyRegexVariable | None = None
+    from_regex: FromRegexVariable | None = None
+    to_regex: ToRegexVariable | None = None
+    cc_regex: CcRegexVariable | None = None
+    attachment_filename_regex: AttachmentFilenameRegexVariable | None = None
     llm: LLMVariable | None = None
 
     @model_validator(mode="after")
@@ -109,12 +174,19 @@ class Variable(BaseModel):
             [
                 self.header_regex is not None,
                 self.subject_regex is not None,
+                self.body_regex is not None,
+                self.from_regex is not None,
+                self.to_regex is not None,
+                self.cc_regex is not None,
+                self.attachment_filename_regex is not None,
                 self.llm is not None,
             ]
         )
         if sources != 1:
             raise ValueError(
-                "Variable must have exactly one of: header_regex, subject_regex, llm"
+                "Variable must have exactly one of: header_regex, subject_regex, "
+                "body_regex, from_regex, to_regex, cc_regex, "
+                "attachment_filename_regex, llm"
             )
         return self
 
@@ -157,22 +229,32 @@ class MatchCondition(BaseModel):
 
     model_config = ConfigDict(populate_by_name=True)
 
-    # Exact matches (single or list - any match)
+    # From/To - Exact matches (single or list - any match)
     from_addr: list[str] | str | None = Field(None, alias="from")
     to_addr: list[str] | str | None = Field(None, alias="to")
 
-    # Glob patterns (single or list - any match)
+    # From/To - Glob patterns (single or list - any match)
     from_glob: list[str] | str | None = None
     to_glob: list[str] | str | None = None
 
-    # Substring matches (single or list - any match)
+    # From/To - Substring matches (single or list - any match)
     from_contains: list[str] | str | None = None
     to_contains: list[str] | str | None = None
-    subject_contains: list[str] | str | None = None
-    body_contains: list[str] | str | None = None
 
-    # Regex (single or list - any match)
-    subject_regex: list[str] | str | None = None
+    # From/To - Regex (single or list - any match)
+    from_regex: list[str] | str | None = None
+    to_regex: list[str] | str | None = None
+
+    # Subject - all match types
+    subject: list[str] | str | None = None  # Exact match
+    subject_glob: list[str] | str | None = None  # Glob pattern
+    subject_contains: list[str] | str | None = None  # Substring
+    subject_regex: list[str] | str | None = None  # Regex
+
+    # Body - all match types
+    body_glob: list[str] | str | None = None  # Glob pattern
+    body_contains: list[str] | str | None = None  # Substring
+    body_regex: list[str] | str | None = None  # Regex
 
     # Intent (LLM-based boolean classifiers)
     subject_intent: str | IntentConfig | None = None  # Subject only
@@ -188,18 +270,85 @@ class MatchCondition(BaseModel):
     # Example: header: {"List-ID": "*googlegroups*", "Reply-To": "*@noreply*"}
     header: dict[str, str] | None = None  # Glob pattern match
     header_contains: dict[str, str] | None = None  # Substring match
+    header_regex: dict[str, str] | None = None  # Regex match
+    header_exists: list[str] | str | None = None  # Check if header is present
+
+    # Header name pattern matching (match header name pattern + value pattern)
+    # Example: header_name_glob: {"X-*": "*spam*"} - any X-* header containing "spam"
+    header_name_glob: dict[str, str] | None = None  # Glob both name and value
+    header_name_regex: dict[str, str] | None = None  # Regex both name and value
 
     # Common header aliases (shortcuts for header/header_contains)
     list_id: list[str] | str | None = None  # Exact List-ID match
     list_id_glob: list[str] | str | None = None  # Glob pattern on List-ID
     list_id_contains: list[str] | str | None = None  # Substring in List-ID
+    list_id_regex: list[str] | str | None = None  # Regex on List-ID
     reply_to: list[str] | str | None = None  # Exact Reply-To match
     reply_to_glob: list[str] | str | None = None  # Glob pattern on Reply-To
     reply_to_contains: list[str] | str | None = None  # Substring in Reply-To
+    reply_to_regex: list[str] | str | None = None  # Regex on Reply-To
+
+    # CC recipients (from emails_parsed.cc_addrs)
+    cc: list[str] | str | None = None  # Exact CC match
+    cc_glob: list[str] | str | None = None  # Glob pattern on CC
+    cc_contains: list[str] | str | None = None  # Substring in CC
+    cc_regex: list[str] | str | None = None  # Regex on CC
+
+    # BCC recipients (from emails_parsed.bcc_addrs)
+    bcc: list[str] | str | None = None  # Exact BCC match
+    bcc_glob: list[str] | str | None = None  # Glob pattern on BCC
+    bcc_contains: list[str] | str | None = None  # Substring in BCC
+    bcc_regex: list[str] | str | None = None  # Regex on BCC
+
+    # Delivered-To header (from headers)
+    deliveredto: list[str] | str | None = None  # Exact Delivered-To match
+    deliveredto_glob: list[str] | str | None = None  # Glob pattern
+    deliveredto_contains: list[str] | str | None = None  # Substring
+    deliveredto_regex: list[str] | str | None = None  # Regex
+
+    # Status conditions (based on Gmail label_ids)
+    is_read: bool | None = None  # True if UNREAD not in label_ids
+    is_starred: bool | None = None  # True if STARRED in label_ids
+    is_important: bool | None = None  # True if IMPORTANT in label_ids
+    in_inbox: bool | None = None  # True if INBOX in label_ids
+    has_label: list[str] | str | None = None  # Check for specific label(s)
+
+    # Size conditions (from emails_raw.size_estimate)
+    size_larger: int | None = None  # size_estimate > N bytes
+    size_smaller: int | None = None  # size_estimate < N bytes
+
+    # Date conditions (from emails_raw.internal_date, ms since epoch)
+    # Absolute: ISO format string "2024-01-15" or timestamp in ms
+    date_before: str | int | None = None  # internal_date < date
+    date_after: str | int | None = None  # internal_date > date
+    # Relative: duration strings like "7d", "2w", "1m", "1y"
+    older_than: str | None = None  # internal_date < (now - duration)
+    newer_than: str | None = None  # internal_date > (now - duration)
+
+    # Attachment conditions
+    has_attachment: bool | None = None
+    # Filename matching (from attachments table)
+    attachment_filename: list[str] | str | None = None  # Exact filename match
+    attachment_filename_glob: list[str] | str | None = None  # Glob pattern
+    attachment_filename_contains: list[str] | str | None = None  # Substring
+    attachment_filename_regex: list[str] | str | None = None  # Regex
+    # MIME type matching
+    attachment_mime: list[str] | str | None = None  # Exact MIME type
+    attachment_mime_glob: list[str] | str | None = (
+        None  # Glob pattern (e.g., "image/*")
+    )
+    attachment_mime_contains: list[str] | str | None = None  # Substring
+    # Convenience shortcuts
+    has_calendar_invite: bool | None = None  # .ics or text/calendar
+    has_pdf: bool | None = None  # application/pdf
+    has_image: bool | None = None  # image/*
+    has_spreadsheet: bool | None = None  # Excel/Sheets MIME types
 
     # Other
-    has_attachment: bool | None = None
     body_is_mostly_links: bool | None = None  # True if body is mostly URLs
+
+    # Negation - inverts the entire condition result
+    negate: bool = False  # If True, condition matches when it would normally NOT match
 
     # Compound conditions
     any_of: list[MatchCondition] | None = None
@@ -397,10 +546,23 @@ class Email(BaseModel):
     gmail_id: str
     from_addr: str
     to_addrs: list[str]  # All recipient addresses
+    cc_addrs: list[str] = Field(default_factory=list)  # CC recipients
+    bcc_addrs: list[str] = Field(default_factory=list)  # BCC recipients
     subject: str
     body: str | None = None
     has_attachment: bool = False
     headers: dict[str, str] = Field(default_factory=dict)  # Raw headers from emails_raw
+    label_ids: list[str] = Field(
+        default_factory=list
+    )  # Gmail label IDs (STARRED, INBOX, etc.)
+    size_estimate: int | None = None  # Approximate message size in bytes
+    internal_date: int | None = None  # Email date in milliseconds since epoch
+    attachment_filenames: list[str] = Field(
+        default_factory=list
+    )  # Attachment filenames
+    attachment_mime_types: list[str] = Field(
+        default_factory=list
+    )  # Attachment MIME types
 
 
 class EvaluationResult(BaseModel):

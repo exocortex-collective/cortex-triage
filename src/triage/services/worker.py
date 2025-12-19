@@ -902,16 +902,24 @@ class TriageWorker:
     def _get_email_data(self, gmail_id: str) -> Email | None:
         """Fetch email data from emails_parsed and headers from emails_raw."""
         with self._get_conn() as conn, conn.cursor() as cur:
-            # Get parsed email data, raw headers, and check if attachments exist
+            # Get parsed email, headers, labels, size, date, and attachments
             cur.execute(
                 """
                     SELECT
                         ep.id, ep.gmail_id, ep.from_addr, ep.to_addrs,
+                        ep.cc_addrs, ep.bcc_addrs,
                         ep.subject, ep.body_text,
                         EXISTS(
                             SELECT 1 FROM attachments a WHERE a.gmail_id = ep.gmail_id
                         ),
-                        er.headers
+                        er.headers,
+                        er.label_ids,
+                        er.size_estimate,
+                        er.internal_date,
+                        (SELECT array_agg(filename) FROM attachments a
+                         WHERE a.gmail_id = ep.gmail_id),
+                        (SELECT array_agg(mime_type) FROM attachments a
+                         WHERE a.gmail_id = ep.gmail_id)
                     FROM emails_parsed ep
                     LEFT JOIN emails_raw er ON ep.gmail_id = er.gmail_id
                     WHERE ep.gmail_id = %s
@@ -920,15 +928,22 @@ class TriageWorker:
             )
             row = cur.fetchone()
             if row:
-                # to_addrs is an array from the DB
+                # Address arrays from the DB
                 to_addrs = row[3] if row[3] else []
-                has_attachment: bool = row[6] if row[6] is not None else False
+                cc_addrs = row[4] if row[4] else []
+                bcc_addrs = row[5] if row[5] else []
+                has_attachment: bool = row[8] if row[8] is not None else False
+                label_ids = row[10] if row[10] else []
+                size_estimate = row[11]  # May be None
+                internal_date = row[12]  # May be None (ms since epoch)
+                attachment_filenames = row[13] if row[13] else []
+                attachment_mime_types = row[14] if row[14] else []
 
                 # Convert headers from JSONB array to dict (lowercase keys)
                 # Format: [{"name": "List-ID", "value": "<foo.bar>"}, ...]
                 # Duplicate headers (rare, mainly Received) are concatenated with comma
                 headers_dict: dict[str, str] = {}
-                raw_headers = row[7]
+                raw_headers = row[9]
                 if raw_headers:
                     for h in raw_headers:
                         name = h.get("name", "")
@@ -946,10 +961,17 @@ class TriageWorker:
                     gmail_id=row[1],
                     from_addr=row[2] or "",
                     to_addrs=to_addrs,
-                    subject=row[4] or "",
-                    body=row[5],
+                    cc_addrs=cc_addrs,
+                    bcc_addrs=bcc_addrs,
+                    subject=row[6] or "",
+                    body=row[7],
                     has_attachment=has_attachment,
                     headers=headers_dict,
+                    label_ids=label_ids,
+                    size_estimate=size_estimate,
+                    internal_date=internal_date,
+                    attachment_filenames=attachment_filenames,
+                    attachment_mime_types=attachment_mime_types,
                 )
         return None
 
