@@ -56,23 +56,171 @@ A rule must have exactly one outcome:
 
 ## Match Conditions
 
-### Basic Fields
+All matching is **case-insensitive**.
+
+### Universal Match Types
+
+Most fields support four match types:
+
+| Suffix | Description | Example |
+|--------|-------------|---------|
+| (none) | Exact match | `from: "test@example.com"` |
+| `_glob` | Glob pattern (`*`, `?`) | `from_glob: "*@github.com"` |
+| `_contains` | Substring match | `from_contains: "github"` |
+| `_regex` | Regular expression | `from_regex: ".*@(github|gitlab)\\.com"` |
+
+### Sender/Recipient Fields
 
 | Field | Type | Description |
 |-------|------|-------------|
 | `from` | string/list | Exact sender address match |
-| `to` | string/list | Exact recipient address match |
-| `from_glob` | string/list | Glob pattern for sender (e.g., `*@github.com`) |
-| `to_glob` | string/list | Glob pattern for recipient |
+| `from_glob` | string/list | Glob pattern for sender |
 | `from_contains` | string/list | Substring match in sender |
+| `from_regex` | string/list | Regex pattern for sender |
+| `to` | string/list | Exact recipient address match |
+| `to_glob` | string/list | Glob pattern for recipient |
 | `to_contains` | string/list | Substring match in recipient |
+| `to_regex` | string/list | Regex pattern for recipient |
+| `cc` | string/list | Exact CC address match |
+| `cc_glob` | string/list | Glob pattern for CC |
+| `cc_contains` | string/list | Substring match in CC |
+| `cc_regex` | string/list | Regex pattern for CC |
+| `bcc` | string/list | Exact BCC address match |
+| `bcc_glob` | string/list | Glob pattern for BCC |
+| `bcc_contains` | string/list | Substring match in BCC |
+| `bcc_regex` | string/list | Regex pattern for BCC |
+| `deliveredto` | string/list | Exact Delivered-To header match |
+| `deliveredto_glob` | string/list | Glob pattern for Delivered-To |
+| `deliveredto_contains` | string/list | Substring match in Delivered-To |
+| `deliveredto_regex` | string/list | Regex pattern for Delivered-To |
+
+### Subject/Body Fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `subject` | string/list | Exact subject match |
+| `subject_glob` | string/list | Glob pattern for subject |
 | `subject_contains` | string/list | Substring match in subject |
-| `body_contains` | string/list | Substring match in body |
 | `subject_regex` | string/list | Regex pattern for subject |
-| `has_attachment` | boolean | Whether email has attachments |
+| `body_contains` | string/list | Substring match in body |
+| `body_glob` | string/list | Glob pattern for body |
+| `body_regex` | string/list | Regex pattern for body |
 | `subject_intent` | string/object | LLM-based intent detection |
 
-All matching is **case-insensitive**.
+### Header Fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `list_id` | string/list | Exact List-ID header match |
+| `list_id_glob` | string/list | Glob pattern for List-ID |
+| `list_id_contains` | string/list | Substring match in List-ID |
+| `list_id_regex` | string/list | Regex pattern for List-ID |
+| `reply_to` | string/list | Exact Reply-To match |
+| `reply_to_glob` | string/list | Glob pattern for Reply-To |
+| `reply_to_contains` | string/list | Substring match in Reply-To |
+| `reply_to_regex` | string/list | Regex pattern for Reply-To |
+| `header` | dict | Match specific header value (e.g., `{"X-Priority": "1"}`) |
+| `header_glob` | dict | Glob pattern for header value |
+| `header_contains` | dict | Substring match in header value |
+| `header_regex` | dict | Regex pattern for header value |
+| `header_exists` | string/list | Check if header exists |
+| `header_name_glob` | dict | Glob pattern for both header name AND value |
+| `header_name_regex` | dict | Regex pattern for both header name AND value |
+
+```yaml
+# Match emails with any X-* header containing "spam"
+match:
+  header_name_glob:
+    "X-*": "*spam*"
+```
+
+### Status Conditions
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `is_read` | boolean | Whether email is read (not UNREAD) |
+| `is_starred` | boolean | Whether email is starred |
+| `is_important` | boolean | Whether email is marked important |
+| `in_inbox` | boolean | Whether email is in inbox |
+| `has_label` | string/list | Whether email has specific Gmail label(s) |
+
+```yaml
+# Match unread starred emails
+match:
+  is_read: false
+  is_starred: true
+```
+
+### Size Conditions
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `size_larger` | integer | Email larger than N bytes |
+| `size_smaller` | integer | Email smaller than N bytes |
+
+```yaml
+# Match emails larger than 10MB
+match:
+  size_larger: 10485760
+```
+
+### Date Conditions
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `date_before` | string/int | Email before date (ISO format or ms timestamp) |
+| `date_after` | string/int | Email after date |
+| `older_than` | string | Email older than duration (e.g., "7d", "2w", "1m", "1y") |
+| `newer_than` | string | Email newer than duration |
+
+```yaml
+# Match emails from the last week
+match:
+  newer_than: "7d"
+
+# Match emails before a specific date
+match:
+  date_before: "2024-01-01"
+```
+
+### Attachment Conditions
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `has_attachment` | boolean | Whether email has attachments |
+| `attachment_filename` | string/list | Exact attachment filename match |
+| `attachment_filename_glob` | string/list | Glob pattern for filename |
+| `attachment_filename_contains` | string/list | Substring match in filename |
+| `attachment_filename_regex` | string/list | Regex pattern for filename |
+| `attachment_mime` | string/list | Exact MIME type match |
+| `attachment_mime_glob` | string/list | Glob pattern for MIME type |
+| `attachment_mime_contains` | string/list | Substring match in MIME type |
+| `has_calendar_invite` | boolean | Has .ics or text/calendar attachment |
+| `has_pdf` | boolean | Has PDF attachment |
+| `has_image` | boolean | Has image attachment (image/*) |
+| `has_spreadsheet` | boolean | Has Excel/CSV/ODS attachment |
+
+```yaml
+# Match emails with PDF invoices
+match:
+  has_pdf: true
+  subject_contains: "invoice"
+
+# Match emails with specific attachment types
+match:
+  attachment_mime_glob: "application/vnd.ms-*"
+```
+
+### Negation
+
+Any match condition can be negated with `negate: true`:
+
+```yaml
+# Match emails NOT from github.com
+match:
+  from_glob: "*@github.com"
+  negate: true
+```
 
 ### Logic Rules
 
@@ -178,6 +326,73 @@ action:
   add_label: ["Work", "Priority"]
   remove_label: ["Pending", "Review"]
 ```
+
+## Variables
+
+Variables let you extract values from emails for use in dynamic labels. Define variables on a rule, then use `{{variable_name}}` in label templates.
+
+```yaml
+- match:
+    list_id_contains: "github.com"
+  variables:
+    repo:
+      header_regex:
+        header: "list-id"
+        pattern: "^([^<\\s]+)"  # Captures "owner/repo"
+  action:
+    label: "GitHub/{{repo}}"
+```
+
+### Extraction Types
+
+| Type | Description | Fields |
+|------|-------------|--------|
+| `header_regex` | Extract from header | `header`, `pattern`, `group` |
+| `subject_regex` | Extract from subject | `pattern`, `group` |
+| `body_regex` | Extract from body | `pattern`, `group` |
+| `from_regex` | Extract from sender | `pattern`, `group` |
+| `to_regex` | Extract from recipient | `pattern`, `group` |
+| `cc_regex` | Extract from CC | `pattern`, `group` |
+| `attachment_filename_regex` | Extract from attachment filename | `pattern`, `group` |
+| `llm` | Extract via LLM | `prompt`, `model` |
+
+Each regex type uses a capture group (default: group 1) to extract the value.
+
+```yaml
+variables:
+  # Extract order ID from subject
+  order_id:
+    subject_regex:
+      pattern: "Order #(\\d+)"
+      group: 1
+
+  # Extract username from sender
+  sender_name:
+    from_regex:
+      pattern: "([^@]+)@"
+
+  # Extract from email body
+  tracking_number:
+    body_regex:
+      pattern: "Tracking: ([A-Z0-9]+)"
+
+  # Extract from attachment filename
+  invoice_number:
+    attachment_filename_regex:
+      pattern: "invoice_(\\d+)\\.pdf"
+
+  # LLM extraction for complex cases
+  project_name:
+    llm:
+      prompt: "Extract the project name from this email. Return only the name."
+      model: "qwen2.5:0.5b"
+```
+
+### Variable Resolution
+
+- All variables must resolve successfully for the rule to match
+- If any variable fails to extract, the rule is skipped (falls through to next rule)
+- Variables are resolved after match conditions pass, before actions execute
 
 ## Chains and Jumps
 

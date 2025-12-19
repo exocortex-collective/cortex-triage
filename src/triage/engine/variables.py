@@ -18,10 +18,15 @@ import structlog
 
 if TYPE_CHECKING:
     from triage.models.rules import (
+        AttachmentFilenameRegexVariable,
+        BodyRegexVariable,
+        CcRegexVariable,
         Email,
+        FromRegexVariable,
         HeaderRegexVariable,
         LLMVariable,
         SubjectRegexVariable,
+        ToRegexVariable,
         Variable,
     )
 
@@ -171,6 +176,229 @@ def resolve_subject_regex(
         return None
 
 
+def resolve_body_regex(
+    email: Email,
+    config: BodyRegexVariable,
+) -> str | None:
+    """Extract value from email body using regex.
+
+    Args:
+        email: Email with body.
+        config: Body regex configuration.
+
+    Returns:
+        Captured group value, or None if body missing or regex doesn't match.
+    """
+    if not email.body:
+        log.debug(
+            "Body empty for extraction",
+            gmail_id=email.gmail_id,
+        )
+        return None
+
+    try:
+        match = re.search(config.pattern, email.body, re.IGNORECASE)
+        if match and len(match.groups()) >= config.group:
+            value = match.group(config.group)
+            log.debug(
+                "Body regex extraction succeeded",
+                pattern=config.pattern,
+                value=value[:50] if len(value) > 50 else value,
+            )
+            return value
+        log.debug(
+            "Body regex did not match",
+            pattern=config.pattern,
+        )
+        return None
+    except re.error as e:
+        log.error(
+            "Invalid extraction regex",
+            pattern=config.pattern,
+            error=str(e),
+        )
+        return None
+
+
+def resolve_from_regex(
+    email: Email,
+    config: FromRegexVariable,
+) -> str | None:
+    """Extract value from sender address using regex.
+
+    Args:
+        email: Email with from_addr.
+        config: From regex configuration.
+
+    Returns:
+        Captured group value, or None if regex doesn't match.
+    """
+    try:
+        match = re.search(config.pattern, email.from_addr, re.IGNORECASE)
+        if match and len(match.groups()) >= config.group:
+            value = match.group(config.group)
+            log.debug(
+                "From regex extraction succeeded",
+                pattern=config.pattern,
+                value=value,
+            )
+            return value
+        log.debug(
+            "From regex did not match",
+            pattern=config.pattern,
+            from_addr=email.from_addr,
+        )
+        return None
+    except re.error as e:
+        log.error(
+            "Invalid extraction regex",
+            pattern=config.pattern,
+            error=str(e),
+        )
+        return None
+
+
+def resolve_to_regex(
+    email: Email,
+    config: ToRegexVariable,
+) -> str | None:
+    """Extract value from first matching to_addr using regex.
+
+    Args:
+        email: Email with to_addrs.
+        config: To regex configuration.
+
+    Returns:
+        Captured group value from first matching address, or None.
+    """
+    if not email.to_addrs:
+        log.debug(
+            "No to_addrs for extraction",
+            gmail_id=email.gmail_id,
+        )
+        return None
+
+    try:
+        for addr in email.to_addrs:
+            match = re.search(config.pattern, addr, re.IGNORECASE)
+            if match and len(match.groups()) >= config.group:
+                value = match.group(config.group)
+                log.debug(
+                    "To regex extraction succeeded",
+                    pattern=config.pattern,
+                    addr=addr,
+                    value=value,
+                )
+                return value
+        log.debug(
+            "To regex did not match any address",
+            pattern=config.pattern,
+            to_addrs=email.to_addrs[:3],
+        )
+        return None
+    except re.error as e:
+        log.error(
+            "Invalid extraction regex",
+            pattern=config.pattern,
+            error=str(e),
+        )
+        return None
+
+
+def resolve_cc_regex(
+    email: Email,
+    config: CcRegexVariable,
+) -> str | None:
+    """Extract value from first matching cc_addr using regex.
+
+    Args:
+        email: Email with cc_addrs.
+        config: CC regex configuration.
+
+    Returns:
+        Captured group value from first matching address, or None.
+    """
+    if not email.cc_addrs:
+        log.debug(
+            "No cc_addrs for extraction",
+            gmail_id=email.gmail_id,
+        )
+        return None
+
+    try:
+        for addr in email.cc_addrs:
+            match = re.search(config.pattern, addr, re.IGNORECASE)
+            if match and len(match.groups()) >= config.group:
+                value = match.group(config.group)
+                log.debug(
+                    "CC regex extraction succeeded",
+                    pattern=config.pattern,
+                    addr=addr,
+                    value=value,
+                )
+                return value
+        log.debug(
+            "CC regex did not match any address",
+            pattern=config.pattern,
+            cc_addrs=email.cc_addrs[:3],
+        )
+        return None
+    except re.error as e:
+        log.error(
+            "Invalid extraction regex",
+            pattern=config.pattern,
+            error=str(e),
+        )
+        return None
+
+
+def resolve_attachment_filename_regex(
+    email: Email,
+    config: AttachmentFilenameRegexVariable,
+) -> str | None:
+    """Extract value from first matching attachment filename using regex.
+
+    Args:
+        email: Email with attachment_filenames.
+        config: Attachment filename regex configuration.
+
+    Returns:
+        Captured group value from first matching filename, or None.
+    """
+    if not email.attachment_filenames:
+        log.debug(
+            "No attachment_filenames for extraction",
+            gmail_id=email.gmail_id,
+        )
+        return None
+
+    try:
+        for filename in email.attachment_filenames:
+            match = re.search(config.pattern, filename, re.IGNORECASE)
+            if match and len(match.groups()) >= config.group:
+                value = match.group(config.group)
+                log.debug(
+                    "Attachment filename regex extraction succeeded",
+                    pattern=config.pattern,
+                    filename=filename,
+                    value=value,
+                )
+                return value
+        log.debug(
+            "Attachment filename regex did not match",
+            pattern=config.pattern,
+            filenames=email.attachment_filenames[:3],
+        )
+        return None
+    except re.error as e:
+        log.error(
+            "Invalid extraction regex",
+            pattern=config.pattern,
+            error=str(e),
+        )
+        return None
+
+
 def resolve_llm(
     email: Email,
     config: LLMVariable,
@@ -237,6 +465,18 @@ def resolve_variables(
             value = resolve_header_regex(email, var.header_regex)
         elif var.subject_regex:
             value = resolve_subject_regex(email, var.subject_regex)
+        elif var.body_regex:
+            value = resolve_body_regex(email, var.body_regex)
+        elif var.from_regex:
+            value = resolve_from_regex(email, var.from_regex)
+        elif var.to_regex:
+            value = resolve_to_regex(email, var.to_regex)
+        elif var.cc_regex:
+            value = resolve_cc_regex(email, var.cc_regex)
+        elif var.attachment_filename_regex:
+            value = resolve_attachment_filename_regex(
+                email, var.attachment_filename_regex
+            )
         elif var.llm:
             if llm_client is None:
                 raise VariableError(
