@@ -9,6 +9,9 @@ from triage.services.patterns import (
     enqueue_pattern_for_retriage,
 )
 
+# Fixed timestamp for deterministic tests
+FIXED_TIMESTAMP = datetime(2023, 10, 26, 12, 0, 0)
+
 
 class TestEnqueuePatternForRetriage:
     """Tests for enqueue_pattern_for_retriage function."""
@@ -91,7 +94,7 @@ class TestAddEmailToPatternRetroactive:
                 "gmail_id": "test123",
                 "amount": None,
                 "currency": None,
-                "matched_at": datetime.now(),
+                "matched_at": FIXED_TIMESTAMP,
             },
             # UPDATE RETURNING (occurrence_count=3, status='active')
             {"occurrence_count": 3, "status": "active"},
@@ -116,7 +119,7 @@ class TestAddEmailToPatternRetroactive:
                 "gmail_id": "test123",
                 "amount": None,
                 "currency": None,
-                "matched_at": datetime.now(),
+                "matched_at": FIXED_TIMESTAMP,
             },
             # occurrence_count=2, status='emerging'
             {"occurrence_count": 2, "status": "emerging"},
@@ -140,7 +143,7 @@ class TestAddEmailToPatternRetroactive:
                 "gmail_id": "test123",
                 "amount": None,
                 "currency": None,
-                "matched_at": datetime.now(),
+                "matched_at": FIXED_TIMESTAMP,
             },
             # occurrence_count=4, status='active' (already was active)
             {"occurrence_count": 4, "status": "active"},
@@ -165,7 +168,7 @@ class TestAddEmailToPatternRetroactive:
                 "gmail_id": "test123",
                 "amount": None,
                 "currency": None,
-                "matched_at": datetime.now(),
+                "matched_at": FIXED_TIMESTAMP,
             },
             # 5 occurrences, already active
             {"occurrence_count": 5, "status": "active"},
@@ -189,7 +192,7 @@ class TestAddEmailToPatternRetroactive:
                 "gmail_id": "test123",
                 "amount": Decimal("10.00"),
                 "currency": "USD",
-                "matched_at": datetime.now(),
+                "matched_at": FIXED_TIMESTAMP,
             },
             {"occurrence_count": 3, "status": "active"},
         ]
