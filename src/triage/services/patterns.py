@@ -235,7 +235,7 @@ def add_email_to_pattern(
         )
         pe_row = cur.fetchone()
 
-        # Update pattern stats
+        # Update pattern stats and get resulting state
         cur.execute(
             """
             WITH stats AS (
@@ -270,11 +270,22 @@ def add_email_to_pattern(
                 updated_at = NOW()
             FROM stats
             WHERE email_patterns.id = %s
+            RETURNING occurrence_count, status
             """,
             (pattern_id, email_date, pattern_id),
         )
+        result = cur.fetchone()
 
         logger.info(f"Added email {gmail_id} to pattern {pattern_id}")
+
+        # Check if pattern just became active (exactly 3 occurrences)
+        # This is the transition point where we trigger retroactive processing
+        if result and result[0] == 3 and result[1] == "active":
+            logger.info(
+                f"Pattern {pattern_id} became active, triggering retroactive enqueue"
+            )
+            enqueue_pattern_for_retriage(conn, pattern_id)
+
         return PatternEmail(
             id=pe_row["id"],
             pattern_id=pe_row["pattern_id"],
@@ -312,6 +323,52 @@ def get_pattern_emails(
             )
             for row in cur.fetchall()
         ]
+
+
+def enqueue_pattern_for_retriage(
+    conn: psycopg2.extensions.connection,
+    pattern_id: int,
+    priority: int = -100,
+) -> int:
+    """Enqueue all emails in a pattern for re-triage.
+
+    When a pattern becomes ACTIVE, this re-enqueues all historical emails
+    so they can be re-classified with the pattern now confirmed.
+
+    Uses priority=-100 (backfill) to avoid blocking real-time processing.
+
+    Args:
+        conn: Database connection
+        pattern_id: Pattern whose emails should be enqueued
+        priority: Queue priority (default -100 for backfill)
+
+    Returns:
+        Number of emails enqueued
+    """
+    with conn.cursor() as cur:
+        # Insert emails into triage queue, skipping any already pending
+        cur.execute(
+            """
+            INSERT INTO queue (queue_name, payload, status, priority)
+            SELECT 'triage',
+                   jsonb_build_object('gmail_id', pe.gmail_id),
+                   'pending',
+                   %s
+            FROM pattern_emails pe
+            WHERE pe.pattern_id = %s
+            AND NOT EXISTS (
+                SELECT 1 FROM queue q
+                WHERE q.queue_name = 'triage'
+                AND q.payload->>'gmail_id' = pe.gmail_id
+                AND q.status = 'pending'
+            )
+            """,
+            (priority, pattern_id),
+        )
+        count = cur.rowcount or 0
+
+    logger.info(f"Enqueued {count} emails from pattern {pattern_id} for retriage")
+    return count
 
 
 def get_pattern_for_email(
