@@ -1104,8 +1104,8 @@ def matches_condition(
             )
             return _result(False)
 
-    pattern_intervals = _to_list(condition.pattern_interval)
-    if pattern_intervals:
+    if condition.pattern_interval:
+        pattern_intervals = _to_list(condition.pattern_interval)
         if email.pattern_info is None:
             _trace("pattern_interval: no pattern info")
             return _result(False)
@@ -1116,8 +1116,8 @@ def matches_condition(
             )
             return _result(False)
 
-    pattern_statuses = _to_list(condition.pattern_status)
-    if pattern_statuses:
+    if condition.pattern_status:
+        pattern_statuses = _to_list(condition.pattern_status)
         if email.pattern_info is None:
             _trace("pattern_status: no pattern info")
             return _result(False)

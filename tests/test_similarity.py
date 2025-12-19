@@ -73,8 +73,8 @@ class TestMatchSubject:
         result = match_subject("Your receipt from Apple.")
         assert result is not None
         assert result.template_name == "apple_receipt"
-        # Merchant is always "Apple" for this template
-        assert result.merchant is None  # Not extracted from regex
+        # Merchant is always "Apple" for this template (set in match_subject)
+        assert result.merchant == "Apple"
 
     def test_order_shipped(self) -> None:
         """Test order shipped notification."""

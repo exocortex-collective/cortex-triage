@@ -135,6 +135,10 @@ def match_subject(subject: str) -> SubjectMatch | None:
                 except (ValueError, IndexError):
                     pass
 
+            # Special case: apple_receipt always has merchant "Apple"
+            if p.name == "apple_receipt":
+                result.merchant = "Apple"
+
             return result
 
     # Try status patterns (no extraction needed)
@@ -159,9 +163,6 @@ def extract_merchant_from_subject(
     """
     result = match_subject(subject)
     if result:
-        # Special case: Apple receipt always has merchant "Apple"
-        if result.template_name == "apple_receipt":
-            return "Apple", None
         return result.merchant, result.amount
 
     return None, None
@@ -226,10 +227,6 @@ def group_by_similarity(
             merchant = result.merchant
             amount = result.amount
 
-            # Special case for apple_receipt
-            if template_name == "apple_receipt":
-                merchant = "Apple"
-
         key = (template_name, merchant)
 
         if key not in groups:
@@ -274,8 +271,6 @@ def find_similar_emails(
         return None
 
     merchant = result.merchant
-    if result.template_name == "apple_receipt":
-        merchant = "Apple"
 
     # Get historical emails from this sender
     emails = get_sender_emails(conn, sender, limit)

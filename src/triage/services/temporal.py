@@ -238,6 +238,10 @@ def calculate_confidence(
 ) -> float:
     """Calculate confidence score for a pattern given dates.
 
+    NOTE: This function is not currently used by the _detect_* functions,
+    which each have their own confidence heuristics. It's kept for potential
+    future refactoring to centralize confidence calculation logic.
+
     Factors:
     - Number of occurrences (more = higher confidence)
     - Consistency (how well dates match the pattern)

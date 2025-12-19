@@ -151,8 +151,6 @@ class PatternFieldVariable(BaseModel):
     Example:
         pattern_field:
           field: "merchant"  # Extract merchant name from pattern
-
-    Available fields: merchant, sender, interval_type, status, confidence
     """
 
     field: Literal[

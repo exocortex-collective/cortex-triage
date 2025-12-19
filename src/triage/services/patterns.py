@@ -258,6 +258,9 @@ def add_email_to_pattern(
                     WHEN stats.cnt >= 3 AND status = 'emerging' THEN 'active'
                     ELSE status
                 END,
+                -- Confidence heuristic:
+                -- - Emerging (<3 occurrences): 15% per occurrence
+                -- - Active (>=3): Starts at 50%, +10% per extra, capped at 100%
                 confidence = CASE
                     WHEN stats.cnt >= 3 THEN LEAST(0.5 + (stats.cnt - 3) * 0.1, 1.0)
                     ELSE stats.cnt * 0.15
