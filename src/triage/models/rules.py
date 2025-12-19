@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -143,6 +143,21 @@ class LLMVariable(BaseModel):
     model: str = "qwen2.5:0.5b"
 
 
+class PatternFieldVariable(BaseModel):
+    """Extract variable from pattern info.
+
+    Requires email.pattern_info to be populated.
+
+    Example:
+        pattern_field:
+          field: "merchant"  # Extract merchant name from pattern
+    """
+
+    field: Literal[
+        "merchant", "sender", "interval_type", "status", "confidence"
+    ]  # Field name from PatternInfo
+
+
 class Variable(BaseModel):
     """A variable definition - exactly one source type.
 
@@ -166,6 +181,7 @@ class Variable(BaseModel):
     cc_regex: CcRegexVariable | None = None
     attachment_filename_regex: AttachmentFilenameRegexVariable | None = None
     llm: LLMVariable | None = None
+    pattern_field: PatternFieldVariable | None = None
 
     @model_validator(mode="after")
     def exactly_one_source(self) -> Variable:
@@ -180,13 +196,14 @@ class Variable(BaseModel):
                 self.cc_regex is not None,
                 self.attachment_filename_regex is not None,
                 self.llm is not None,
+                self.pattern_field is not None,
             ]
         )
         if sources != 1:
             raise ValueError(
                 "Variable must have exactly one of: header_regex, subject_regex, "
                 "body_regex, from_regex, to_regex, cc_regex, "
-                "attachment_filename_regex, llm"
+                "attachment_filename_regex, llm, pattern_field"
             )
         return self
 
@@ -346,6 +363,13 @@ class MatchCondition(BaseModel):
 
     # Other
     body_is_mostly_links: bool | None = None  # True if body is mostly URLs
+
+    # Pattern matching (subscription detection)
+    # Requires email.pattern_info to be populated before matching
+    matches_pattern: bool | None = None  # True if email matches any known pattern
+    pattern_confidence_min: float | None = None  # Minimum pattern confidence (0.0-1.0)
+    pattern_interval: list[str] | str | None = None  # monthly, weekly, yearly, etc.
+    pattern_status: list[str] | str | None = None  # emerging, active, dormant, ended
 
     # Negation - inverts the entire condition result
     negate: bool = False  # If True, condition matches when it would normally NOT match
@@ -539,6 +563,18 @@ class RulesConfig(BaseModel):
     chains: dict[str, list[Rule]] = Field(default_factory=dict)
 
 
+class PatternInfo(BaseModel):
+    """Pattern information for an email (if it matches a known pattern)."""
+
+    pattern_id: int
+    sender: str
+    merchant: str
+    interval_type: str  # IntervalType: monthly, weekly, yearly, irregular
+    confidence: float
+    occurrence_count: int
+    status: str  # PatternStatus: emerging, active, dormant, ended
+
+
 class Email(BaseModel):
     """Email data for rule matching."""
 
@@ -563,6 +599,9 @@ class Email(BaseModel):
     attachment_mime_types: list[str] = Field(
         default_factory=list
     )  # Attachment MIME types
+
+    # Pattern detection info (populated before matching if available)
+    pattern_info: PatternInfo | None = None
 
 
 class EvaluationResult(BaseModel):

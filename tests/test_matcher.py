@@ -2153,3 +2153,555 @@ class TestDynamicLabels:
         assert result.action is not None
         # Should create nested hierarchy: MyPrefix/GitHub/anthropics/claude-code
         assert result.action.label == "MyPrefix/GitHub/anthropics/claude-code"
+
+
+class TestPatternMatching:
+    """Tests for pattern matching conditions (subscription detection)."""
+
+    def test_matches_pattern_true_with_pattern_info(self) -> None:
+        """Test matches_pattern=True when email has pattern_info."""
+        from triage.models.rules import PatternInfo
+
+        email = Email(
+            id=1,
+            gmail_id="abc123",
+            from_addr="service@paypal.com",
+            to_addrs=["me@example.com"],
+            subject="Host Havoc Ltd.: $10.00 USD",
+            pattern_info=PatternInfo(
+                pattern_id=1,
+                sender="service@paypal.com",
+                merchant="Host Havoc Ltd.",
+                interval_type="monthly",
+                confidence=0.95,
+                occurrence_count=5,
+                status="active",
+            ),
+        )
+        condition = MatchCondition(matches_pattern=True)
+
+        assert matches_condition(condition, email) is True
+
+    def test_matches_pattern_true_without_pattern_info(self) -> None:
+        """Test matches_pattern=True fails when email has no pattern_info."""
+        email = Email(
+            id=1,
+            gmail_id="abc123",
+            from_addr="random@example.com",
+            to_addrs=["me@example.com"],
+            subject="Random email",
+        )
+        condition = MatchCondition(matches_pattern=True)
+
+        assert matches_condition(condition, email) is False
+
+    def test_matches_pattern_false_with_pattern_info(self) -> None:
+        """Test matches_pattern=False when email has pattern_info (negation)."""
+        from triage.models.rules import PatternInfo
+
+        email = Email(
+            id=1,
+            gmail_id="abc123",
+            from_addr="service@paypal.com",
+            to_addrs=["me@example.com"],
+            subject="Receipt",
+            pattern_info=PatternInfo(
+                pattern_id=1,
+                sender="service@paypal.com",
+                merchant="Some Merchant",
+                interval_type="monthly",
+                confidence=0.9,
+                occurrence_count=3,
+                status="active",
+            ),
+        )
+        condition = MatchCondition(matches_pattern=False)
+
+        assert matches_condition(condition, email) is False
+
+    def test_matches_pattern_false_without_pattern_info(self) -> None:
+        """Test matches_pattern=False when email has no pattern_info."""
+        email = Email(
+            id=1,
+            gmail_id="abc123",
+            from_addr="random@example.com",
+            to_addrs=["me@example.com"],
+            subject="Random email",
+        )
+        condition = MatchCondition(matches_pattern=False)
+
+        assert matches_condition(condition, email) is True
+
+    def test_pattern_confidence_min_above_threshold(self) -> None:
+        """Test pattern_confidence_min passes when confidence is above threshold."""
+        from triage.models.rules import PatternInfo
+
+        email = Email(
+            id=1,
+            gmail_id="abc123",
+            from_addr="service@paypal.com",
+            to_addrs=["me@example.com"],
+            subject="Receipt",
+            pattern_info=PatternInfo(
+                pattern_id=1,
+                sender="service@paypal.com",
+                merchant="Host Havoc Ltd.",
+                interval_type="monthly",
+                confidence=0.95,
+                occurrence_count=5,
+                status="active",
+            ),
+        )
+        condition = MatchCondition(pattern_confidence_min=0.8)
+
+        assert matches_condition(condition, email) is True
+
+    def test_pattern_confidence_min_below_threshold(self) -> None:
+        """Test pattern_confidence_min fails when confidence is below threshold."""
+        from triage.models.rules import PatternInfo
+
+        email = Email(
+            id=1,
+            gmail_id="abc123",
+            from_addr="service@paypal.com",
+            to_addrs=["me@example.com"],
+            subject="Receipt",
+            pattern_info=PatternInfo(
+                pattern_id=1,
+                sender="service@paypal.com",
+                merchant="Some Merchant",
+                interval_type="monthly",
+                confidence=0.5,
+                occurrence_count=2,
+                status="emerging",
+            ),
+        )
+        condition = MatchCondition(pattern_confidence_min=0.8)
+
+        assert matches_condition(condition, email) is False
+
+    def test_pattern_confidence_min_no_pattern_fails(self) -> None:
+        """Test pattern_confidence_min fails when email has no pattern_info."""
+        email = Email(
+            id=1,
+            gmail_id="abc123",
+            from_addr="random@example.com",
+            to_addrs=["me@example.com"],
+            subject="Random email",
+        )
+        condition = MatchCondition(pattern_confidence_min=0.5)
+
+        assert matches_condition(condition, email) is False
+
+    def test_pattern_interval_single_value_matches(self) -> None:
+        """Test pattern_interval with single value matches."""
+        from triage.models.rules import PatternInfo
+
+        email = Email(
+            id=1,
+            gmail_id="abc123",
+            from_addr="service@paypal.com",
+            to_addrs=["me@example.com"],
+            subject="Receipt",
+            pattern_info=PatternInfo(
+                pattern_id=1,
+                sender="service@paypal.com",
+                merchant="Host Havoc Ltd.",
+                interval_type="monthly",
+                confidence=0.95,
+                occurrence_count=5,
+                status="active",
+            ),
+        )
+        condition = MatchCondition(pattern_interval="monthly")
+
+        assert matches_condition(condition, email) is True
+
+    def test_pattern_interval_list_matches_any(self) -> None:
+        """Test pattern_interval with list matches any."""
+        from triage.models.rules import PatternInfo
+
+        email = Email(
+            id=1,
+            gmail_id="abc123",
+            from_addr="service@paypal.com",
+            to_addrs=["me@example.com"],
+            subject="Receipt",
+            pattern_info=PatternInfo(
+                pattern_id=1,
+                sender="service@paypal.com",
+                merchant="Host Havoc Ltd.",
+                interval_type="weekly",
+                confidence=0.8,
+                occurrence_count=4,
+                status="active",
+            ),
+        )
+        condition = MatchCondition(pattern_interval=["monthly", "weekly", "yearly"])
+
+        assert matches_condition(condition, email) is True
+
+    def test_pattern_interval_no_match(self) -> None:
+        """Test pattern_interval fails when interval doesn't match."""
+        from triage.models.rules import PatternInfo
+
+        email = Email(
+            id=1,
+            gmail_id="abc123",
+            from_addr="service@paypal.com",
+            to_addrs=["me@example.com"],
+            subject="Receipt",
+            pattern_info=PatternInfo(
+                pattern_id=1,
+                sender="service@paypal.com",
+                merchant="Random",
+                interval_type="irregular",
+                confidence=0.3,
+                occurrence_count=2,
+                status="emerging",
+            ),
+        )
+        condition = MatchCondition(pattern_interval=["monthly", "yearly"])
+
+        assert matches_condition(condition, email) is False
+
+    def test_pattern_status_single_value(self) -> None:
+        """Test pattern_status with single value."""
+        from triage.models.rules import PatternInfo
+
+        email = Email(
+            id=1,
+            gmail_id="abc123",
+            from_addr="service@paypal.com",
+            to_addrs=["me@example.com"],
+            subject="Receipt",
+            pattern_info=PatternInfo(
+                pattern_id=1,
+                sender="service@paypal.com",
+                merchant="Host Havoc Ltd.",
+                interval_type="monthly",
+                confidence=0.95,
+                occurrence_count=5,
+                status="active",
+            ),
+        )
+        condition = MatchCondition(pattern_status="active")
+
+        assert matches_condition(condition, email) is True
+
+    def test_pattern_status_list_matches_any(self) -> None:
+        """Test pattern_status with list matches any."""
+        from triage.models.rules import PatternInfo
+
+        email = Email(
+            id=1,
+            gmail_id="abc123",
+            from_addr="service@paypal.com",
+            to_addrs=["me@example.com"],
+            subject="Receipt",
+            pattern_info=PatternInfo(
+                pattern_id=1,
+                sender="service@paypal.com",
+                merchant="Host Havoc Ltd.",
+                interval_type="monthly",
+                confidence=0.6,
+                occurrence_count=2,
+                status="emerging",
+            ),
+        )
+        condition = MatchCondition(pattern_status=["active", "emerging"])
+
+        assert matches_condition(condition, email) is True
+
+    def test_pattern_status_no_match(self) -> None:
+        """Test pattern_status fails when status doesn't match."""
+        from triage.models.rules import PatternInfo
+
+        email = Email(
+            id=1,
+            gmail_id="abc123",
+            from_addr="service@paypal.com",
+            to_addrs=["me@example.com"],
+            subject="Receipt",
+            pattern_info=PatternInfo(
+                pattern_id=1,
+                sender="service@paypal.com",
+                merchant="Old Service",
+                interval_type="monthly",
+                confidence=0.3,
+                occurrence_count=10,
+                status="dormant",
+            ),
+        )
+        condition = MatchCondition(pattern_status="active")
+
+        assert matches_condition(condition, email) is False
+
+    def test_combined_pattern_conditions(self) -> None:
+        """Test combining multiple pattern conditions."""
+        from triage.models.rules import PatternInfo
+
+        email = Email(
+            id=1,
+            gmail_id="abc123",
+            from_addr="service@paypal.com",
+            to_addrs=["me@example.com"],
+            subject="Receipt",
+            pattern_info=PatternInfo(
+                pattern_id=1,
+                sender="service@paypal.com",
+                merchant="Host Havoc Ltd.",
+                interval_type="monthly",
+                confidence=0.95,
+                occurrence_count=5,
+                status="active",
+            ),
+        )
+        # Require active, monthly, high confidence
+        condition = MatchCondition(
+            matches_pattern=True,
+            pattern_status="active",
+            pattern_interval="monthly",
+            pattern_confidence_min=0.9,
+        )
+
+        assert matches_condition(condition, email) is True
+
+        # Fails confidence threshold
+        condition_low = MatchCondition(
+            matches_pattern=True,
+            pattern_confidence_min=0.99,
+        )
+
+        assert matches_condition(condition_low, email) is False
+
+    def test_pattern_with_regular_conditions(self) -> None:
+        """Test pattern conditions combined with regular conditions."""
+        from triage.models.rules import PatternInfo
+
+        email = Email(
+            id=1,
+            gmail_id="abc123",
+            from_addr="service@paypal.com",
+            to_addrs=["me@example.com"],
+            subject="Host Havoc Ltd.: $10.00 USD",
+            pattern_info=PatternInfo(
+                pattern_id=1,
+                sender="service@paypal.com",
+                merchant="Host Havoc Ltd.",
+                interval_type="monthly",
+                confidence=0.95,
+                occurrence_count=5,
+                status="active",
+            ),
+        )
+        # Both pattern and from_glob must match
+        condition = MatchCondition(
+            from_glob="*@paypal.com",
+            matches_pattern=True,
+            pattern_interval="monthly",
+        )
+
+        assert matches_condition(condition, email) is True
+
+        # Wrong sender fails
+        condition_wrong_sender = MatchCondition(
+            from_glob="*@stripe.com",
+            matches_pattern=True,
+        )
+
+        assert matches_condition(condition_wrong_sender, email) is False
+
+
+class TestPatternFieldVariables:
+    """Tests for pattern_field variable extraction."""
+
+    def test_pattern_field_variable_merchant(self) -> None:
+        """Test extracting merchant from pattern_info."""
+        from triage.models.rules import PatternFieldVariable, PatternInfo, Variable
+
+        email = Email(
+            id=1,
+            gmail_id="abc123",
+            from_addr="service@paypal.com",
+            to_addrs=["me@example.com"],
+            subject="Receipt",
+            pattern_info=PatternInfo(
+                pattern_id=1,
+                sender="service@paypal.com",
+                merchant="Host Havoc Ltd.",
+                interval_type="monthly",
+                confidence=0.95,
+                occurrence_count=5,
+                status="active",
+            ),
+        )
+        config = RulesConfig(
+            chains={
+                "main": [
+                    Rule(
+                        match=MatchCondition(matches_pattern=True),
+                        variables={
+                            "merchant": Variable(
+                                pattern_field=PatternFieldVariable(field="merchant")
+                            )
+                        },
+                        action=Action(label="Subscriptions/{{merchant}}"),
+                    )
+                ]
+            }
+        )
+
+        result = evaluate(config, email)
+
+        assert result.matched
+        assert result.action is not None
+        assert result.action.label == "Cortex/Subscriptions/Host Havoc Ltd."
+        assert result.variables == {"merchant": "Host Havoc Ltd."}
+
+    def test_pattern_field_variable_interval_type(self) -> None:
+        """Test extracting interval_type from pattern_info."""
+        from triage.models.rules import PatternFieldVariable, PatternInfo, Variable
+
+        email = Email(
+            id=1,
+            gmail_id="abc123",
+            from_addr="service@paypal.com",
+            to_addrs=["me@example.com"],
+            subject="Receipt",
+            pattern_info=PatternInfo(
+                pattern_id=1,
+                sender="service@paypal.com",
+                merchant="Host Havoc Ltd.",
+                interval_type="monthly",
+                confidence=0.95,
+                occurrence_count=5,
+                status="active",
+            ),
+        )
+        config = RulesConfig(
+            chains={
+                "main": [
+                    Rule(
+                        match=MatchCondition(matches_pattern=True),
+                        variables={
+                            "interval": Variable(
+                                pattern_field=PatternFieldVariable(
+                                    field="interval_type"
+                                )
+                            )
+                        },
+                        action=Action(label="Subscriptions/{{interval}}"),
+                    )
+                ]
+            }
+        )
+
+        result = evaluate(config, email)
+
+        assert result.matched
+        assert result.action is not None
+        assert result.action.label == "Cortex/Subscriptions/monthly"
+        assert result.variables == {"interval": "monthly"}
+
+    def test_pattern_field_variable_no_pattern_fails(self) -> None:
+        """Test pattern_field variable fails when no pattern_info."""
+        from triage.models.rules import PatternFieldVariable, Variable
+
+        email = Email(
+            id=1,
+            gmail_id="abc123",
+            from_addr="random@example.com",
+            to_addrs=["me@example.com"],
+            subject="Random email",
+        )
+        config = RulesConfig(
+            chains={
+                "main": [
+                    Rule(
+                        match=MatchCondition(),
+                        variables={
+                            "merchant": Variable(
+                                pattern_field=PatternFieldVariable(field="merchant")
+                            )
+                        },
+                        action=Action(label="Subscriptions/{{merchant}}"),
+                    ),
+                    # Fallback
+                    Rule(
+                        match=MatchCondition(),
+                        action=Action(label="Uncategorized"),
+                    ),
+                ]
+            }
+        )
+
+        result = evaluate(config, email)
+
+        # Should fall through to Uncategorized
+        assert result.matched
+        assert result.action is not None
+        assert result.action.label == "Cortex/Uncategorized"
+
+    def test_pattern_field_variable_invalid_field(self) -> None:
+        """Test pattern_field with invalid field name raises validation error."""
+        import pytest
+        from pydantic import ValidationError
+
+        from triage.models.rules import PatternFieldVariable
+
+        # With Literal type, invalid field names are caught at construction
+        with pytest.raises(ValidationError) as exc_info:
+            PatternFieldVariable(field="nonexistent")
+
+        # Verify it's the expected validation error
+        assert "literal_error" in str(exc_info.value)
+
+    def test_pattern_field_multiple_fields(self) -> None:
+        """Test extracting multiple fields from pattern_info."""
+        from triage.models.rules import PatternFieldVariable, PatternInfo, Variable
+
+        email = Email(
+            id=1,
+            gmail_id="abc123",
+            from_addr="service@paypal.com",
+            to_addrs=["me@example.com"],
+            subject="Receipt",
+            pattern_info=PatternInfo(
+                pattern_id=1,
+                sender="service@paypal.com",
+                merchant="Host Havoc Ltd.",
+                interval_type="monthly",
+                confidence=0.95,
+                occurrence_count=5,
+                status="active",
+            ),
+        )
+        config = RulesConfig(
+            chains={
+                "main": [
+                    Rule(
+                        match=MatchCondition(matches_pattern=True),
+                        variables={
+                            "merchant": Variable(
+                                pattern_field=PatternFieldVariable(field="merchant")
+                            ),
+                            "status": Variable(
+                                pattern_field=PatternFieldVariable(field="status")
+                            ),
+                        },
+                        action=Action(label="Subscriptions/{{status}}/{{merchant}}"),
+                    )
+                ]
+            }
+        )
+
+        result = evaluate(config, email)
+
+        assert result.matched
+        assert result.action is not None
+        assert result.action.label == "Cortex/Subscriptions/active/Host Havoc Ltd."
+        assert result.variables == {
+            "merchant": "Host Havoc Ltd.",
+            "status": "active",
+        }
