@@ -384,12 +384,14 @@ class TestCheckMaintenanceNeeded:
 
     def test_maintenance_needed_after_interval(self) -> None:
         """Maintenance should be needed if interval has elapsed."""
+        from datetime import UTC
+
         conn = MagicMock()
         cursor = MagicMock()
         conn.cursor.return_value.__enter__.return_value = cursor
 
         # Last run 25 hours ago
-        old_time = datetime.now() - timedelta(hours=25)
+        old_time = datetime.now(UTC) - timedelta(hours=25)
         cursor.fetchone.return_value = (old_time.isoformat(),)
 
         config = LifecycleConfig(maintenance_interval_hours=24)
@@ -398,12 +400,14 @@ class TestCheckMaintenanceNeeded:
 
     def test_maintenance_not_needed_within_interval(self) -> None:
         """Maintenance should not be needed if within interval."""
+        from datetime import UTC
+
         conn = MagicMock()
         cursor = MagicMock()
         conn.cursor.return_value.__enter__.return_value = cursor
 
         # Last run 1 hour ago
-        recent_time = datetime.now() - timedelta(hours=1)
+        recent_time = datetime.now(UTC) - timedelta(hours=1)
         cursor.fetchone.return_value = (recent_time.isoformat(),)
 
         config = LifecycleConfig(maintenance_interval_hours=24)

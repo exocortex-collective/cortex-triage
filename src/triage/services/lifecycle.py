@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 
 import psycopg2
@@ -19,6 +19,7 @@ from psycopg2.extras import RealDictCursor
 
 from triage.models.patterns import EmailPattern, IntervalType, PatternStatus
 from triage.services.patterns import (
+    _row_to_pattern,
     add_email_to_pattern,
     get_pattern_by_id,
     update_pattern,
@@ -58,6 +59,7 @@ def process_pattern_match(
     email_date: datetime,
     amount: Decimal | None = None,
     currency: str | None = None,
+    config: LifecycleConfig | None = None,
 ) -> EmailPattern | None:
     """Process an email matching a pattern - update stats and possibly revive.
 
@@ -72,10 +74,13 @@ def process_pattern_match(
         email_date: Date/time of the email
         amount: Transaction amount (if applicable)
         currency: Currency code (if applicable)
+        config: Lifecycle configuration (defaults to LifecycleConfig())
 
     Returns:
         Updated EmailPattern, or None if pattern not found
     """
+    if config is None:
+        config = LifecycleConfig()
     pattern = get_pattern_by_id(conn, pattern_id)
     if not pattern:
         logger.warning(f"Pattern {pattern_id} not found for match processing")
@@ -101,7 +106,7 @@ def process_pattern_match(
     # Revival: if dormant and email arrives, revive to active
     if pattern.status == PatternStatus.DORMANT:
         updates["status"] = PatternStatus.ACTIVE
-        updates["confidence"] = LifecycleConfig().revival_confidence
+        updates["confidence"] = config.revival_confidence
         logger.info(f"Revived dormant pattern {pattern_id} ({pattern.merchant})")
 
     # Apply updates
@@ -139,8 +144,6 @@ def check_overdue_patterns(
             (today,),
         )
         rows = cur.fetchall()
-
-    from triage.services.patterns import _row_to_pattern
 
     return [_row_to_pattern(row) for row in rows]
 
@@ -315,7 +318,7 @@ def run_lifecycle_maintenance(
             report.errors.append(error_msg)
 
     # Update maintenance timestamp
-    _update_maintenance_timestamp(conn, today)
+    _update_maintenance_timestamp(conn)
 
     logger.info(
         f"Lifecycle maintenance complete: "
@@ -357,7 +360,7 @@ def check_maintenance_needed(
 
     try:
         last_check = datetime.fromisoformat(row[0])
-        elapsed = datetime.now() - last_check
+        elapsed = datetime.now(UTC) - last_check
         return elapsed > timedelta(hours=config.maintenance_interval_hours)
     except (ValueError, TypeError):
         # Invalid timestamp, run maintenance
@@ -366,10 +369,9 @@ def check_maintenance_needed(
 
 def _update_maintenance_timestamp(
     conn: psycopg2.extensions.connection,
-    today: date,
 ) -> None:
     """Update the last maintenance timestamp in sync_state."""
-    now = datetime.now().isoformat()
+    now = datetime.now(UTC).isoformat()
     with conn.cursor() as cur:
         cur.execute(
             """
