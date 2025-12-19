@@ -296,10 +296,12 @@ def run_lifecycle_maintenance(
             updated = apply_decay(conn, pattern.id, config)
             if updated:
                 report.patterns_decayed += 1
-                if updated.status == PatternStatus.DORMANT:
-                    report.patterns_dormant += 1
-                elif updated.status == PatternStatus.ENDED:
-                    report.patterns_ended += 1
+                # Count state transitions only
+                if updated.status != pattern.status:
+                    if updated.status == PatternStatus.DORMANT:
+                        report.patterns_dormant += 1
+                    elif updated.status == PatternStatus.ENDED:
+                        report.patterns_ended += 1
             conn.commit()
         except Exception as e:
             conn.rollback()
