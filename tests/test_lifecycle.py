@@ -1,6 +1,6 @@
 """Tests for pattern lifecycle management."""
 
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from unittest.mock import MagicMock, patch
 
@@ -384,8 +384,6 @@ class TestCheckMaintenanceNeeded:
 
     def test_maintenance_needed_after_interval(self) -> None:
         """Maintenance should be needed if interval has elapsed."""
-        from datetime import UTC
-
         conn = MagicMock()
         cursor = MagicMock()
         conn.cursor.return_value.__enter__.return_value = cursor
@@ -400,8 +398,6 @@ class TestCheckMaintenanceNeeded:
 
     def test_maintenance_not_needed_within_interval(self) -> None:
         """Maintenance should not be needed if within interval."""
-        from datetime import UTC
-
         conn = MagicMock()
         cursor = MagicMock()
         conn.cursor.return_value.__enter__.return_value = cursor

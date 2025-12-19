@@ -93,15 +93,9 @@ def process_pattern_match(
     updates: dict = {"consecutive_misses": 0}
 
     # Calculate next expected date
-    if pattern.interval_type != IntervalType.IRREGULAR and pattern.interval_params:
-        # Get dates from pattern_emails to calculate next expected
-        dates = _get_pattern_dates(conn, pattern_id)
-        if dates:
-            next_exp = predict_next(
-                dates, pattern.interval_type, pattern.interval_params
-            )
-            if next_exp:
-                updates["next_expected"] = next_exp
+    next_exp = _recalculate_next_expected(conn, pattern)
+    if next_exp:
+        updates["next_expected"] = next_exp
 
     # Revival: if dormant and email arrives, revive to active
     if pattern.status == PatternStatus.DORMANT:
@@ -111,7 +105,6 @@ def process_pattern_match(
 
     # Apply updates
     updated = update_pattern(conn, pattern_id, **updates)
-    conn.commit()
 
     return updated
 
@@ -179,14 +172,9 @@ def apply_decay(
     }
 
     # Calculate next expected for the following period
-    if pattern.interval_type != IntervalType.IRREGULAR and pattern.interval_params:
-        dates = _get_pattern_dates(conn, pattern_id)
-        if dates:
-            next_exp = predict_next(
-                dates, pattern.interval_type, pattern.interval_params
-            )
-            if next_exp:
-                updates["next_expected"] = next_exp
+    next_exp = _recalculate_next_expected(conn, pattern)
+    if next_exp:
+        updates["next_expected"] = next_exp
 
     # State transitions based on miss count
     if new_misses >= config.end_after_misses:
@@ -204,7 +192,6 @@ def apply_decay(
             )
 
     updated = update_pattern(conn, pattern_id, **updates)
-    conn.commit()
 
     return updated
 
@@ -239,7 +226,6 @@ def revive_pattern(
         confidence=config.revival_confidence,
         consecutive_misses=0,
     )
-    conn.commit()
 
     logger.info(f"Revived pattern {pattern_id} ({pattern.merchant})")
     return updated
@@ -269,7 +255,6 @@ def end_pattern(
         return pattern
 
     updated = update_pattern(conn, pattern_id, status=PatternStatus.ENDED)
-    conn.commit()
 
     logger.info(f"Ended pattern {pattern_id} ({pattern.merchant}): {reason}")
     return updated
@@ -312,20 +297,16 @@ def run_lifecycle_maintenance(
                     report.patterns_dormant += 1
                 elif updated.status == PatternStatus.ENDED:
                     report.patterns_ended += 1
+            conn.commit()
         except Exception as e:
+            conn.rollback()
             error_msg = f"Error decaying pattern {pattern.id}: {e}"
             logger.error(error_msg)
             report.errors.append(error_msg)
 
     # Update maintenance timestamp
     _update_maintenance_timestamp(conn)
-
-    logger.info(
-        f"Lifecycle maintenance complete: "
-        f"{report.patterns_decayed} decayed, "
-        f"{report.patterns_dormant} dormant, "
-        f"{report.patterns_ended} ended"
-    )
+    conn.commit()
 
     return report
 
@@ -381,7 +362,32 @@ def _update_maintenance_timestamp(
             """,
             (now,),
         )
-    conn.commit()
+
+
+def _recalculate_next_expected(
+    conn: psycopg2.extensions.connection,
+    pattern: EmailPattern,
+) -> date | None:
+    """Recalculate next expected date for a pattern.
+
+    Args:
+        conn: Database connection
+        pattern: Pattern to recalculate for
+
+    Returns:
+        Next expected date, or None if can't be calculated
+    """
+    if pattern.interval_type == IntervalType.IRREGULAR or not pattern.interval_params:
+        return None
+
+    if pattern.id is None:
+        return None
+
+    dates = _get_pattern_dates(conn, pattern.id)
+    if not dates:
+        return None
+
+    return predict_next(dates, pattern.interval_type, pattern.interval_params)
 
 
 def _get_pattern_dates(
