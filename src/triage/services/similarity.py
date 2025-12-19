@@ -45,54 +45,57 @@ class SimilarityGroup:
     dates: list[str] = field(default_factory=list)  # ISO date strings
 
 
+@dataclass
+class SubjectPattern:
+    """A subject line pattern for extracting merchant/amount from receipts."""
+
+    name: str
+    regex: str
+    merchant_group: int = 0  # Capture group for merchant (1-indexed, 0 = none)
+    amount_group: int = 0  # Capture group for amount (1-indexed, 0 = none)
+    currency_group: int = 0  # Capture group for currency (1-indexed, 0 = none)
+
+
 # =============================================================================
 # Subject Template Patterns
 # =============================================================================
-# Each pattern has: (name, regex, merchant_group, amount_group, currency_group)
 # Groups are 1-indexed, 0 means not present
 
-SUBJECT_PATTERNS: list[tuple[str, str, int, int, int]] = [
+SUBJECT_PATTERNS: list[SubjectPattern] = [
     # PayPal receipt: "Host Havoc Ltd.: $10.00 USD"
     # Handles $, €, £ and various currency codes
-    (
-        "paypal_receipt",
-        r"^(.+?):\s*[$€£]?([\d,]+\.?\d*)\s*([A-Z]{3})$",
-        1,  # merchant in group 1
-        2,  # amount in group 2
-        3,  # currency in group 3
+    SubjectPattern(
+        name="paypal_receipt",
+        regex=r"^(.+?):\s*[$€£]?([\d,]+\.?\d*)\s*([A-Z]{3})$",
+        merchant_group=1,
+        amount_group=2,
+        currency_group=3,
     ),
     # PayPal auto-payment: "You sent an automatic payment to Wikimedia Foundation, Inc."
-    (
-        "paypal_auto_payment",
-        r"^You sent an automatic payment to (.+?)\.{0,3}$",
-        1,  # merchant in group 1
-        0,  # no amount
-        0,  # no currency
+    SubjectPattern(
+        name="paypal_auto_payment",
+        regex=r"^You sent an automatic payment to (.+?)\.{0,3}$",
+        merchant_group=1,
     ),
     # PayPal payment received:
     # "Item #ABC123 - Notification of Payment Received from Name (email)"
-    (
-        "paypal_payment_received",
-        r"^Item #([A-Z0-9]+) - Notification of Payment Received from (.+?) \((.+?)\)$",
-        0,  # no merchant (it's a person)
-        0,
-        0,
+    SubjectPattern(
+        name="paypal_payment_received",
+        regex=(
+            r"^Item #([A-Z0-9]+) - Notification of Payment Received from "
+            r"(.+?) \((.+?)\)$"
+        ),
     ),
     # Apple receipt: "Your receipt from Apple."
-    (
-        "apple_receipt",
-        r"^Your receipt from Apple\.$",
-        0,  # merchant is always "Apple"
-        0,
-        0,
+    SubjectPattern(
+        name="apple_receipt",
+        regex=r"^Your receipt from Apple\.$",
     ),
     # Generic order shipped: "Your {merchant} order is on its way"
-    (
-        "order_shipped",
-        r"^Your (.+?) order is on its way$",
-        1,
-        0,
-        0,
+    SubjectPattern(
+        name="order_shipped",
+        regex=r"^Your (.+?) order is on its way$",
+        merchant_group=1,
     ),
 ]
 
@@ -111,23 +114,23 @@ def match_subject(subject: str) -> SubjectMatch | None:
     Returns None if no pattern matches.
     """
     # Try receipt/transaction patterns first
-    for name, pattern, merchant_grp, amount_grp, currency_grp in SUBJECT_PATTERNS:
-        match = re.match(pattern, subject, re.IGNORECASE)
+    for p in SUBJECT_PATTERNS:
+        match = re.match(p.regex, subject, re.IGNORECASE)
         if match:
-            result = SubjectMatch(template_name=name)
+            result = SubjectMatch(template_name=p.name)
 
-            if merchant_grp > 0:
-                merchant = match.group(merchant_grp).strip()
+            if p.merchant_group > 0:
+                merchant = match.group(p.merchant_group).strip()
                 # Clean up truncated merchants (ending with ...)
                 merchant = re.sub(r"\.{2,}$", "", merchant).strip()
                 result.merchant = merchant
 
-            if amount_grp > 0 and currency_grp > 0:
+            if p.amount_group > 0 and p.currency_group > 0:
                 try:
-                    amount_str = match.group(amount_grp).replace(",", "")
+                    amount_str = match.group(p.amount_group).replace(",", "")
                     result.amount = ExtractedAmount(
                         amount=Decimal(amount_str),
-                        currency=match.group(currency_grp).upper(),
+                        currency=match.group(p.currency_group).upper(),
                     )
                 except (ValueError, IndexError):
                     pass

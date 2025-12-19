@@ -2644,51 +2644,18 @@ class TestPatternFieldVariables:
         assert result.action.label == "Cortex/Uncategorized"
 
     def test_pattern_field_variable_invalid_field(self) -> None:
-        """Test pattern_field with invalid field name fails."""
-        from triage.models.rules import PatternFieldVariable, PatternInfo, Variable
+        """Test pattern_field with invalid field name raises validation error."""
+        import pytest
+        from pydantic import ValidationError
 
-        email = Email(
-            id=1,
-            gmail_id="abc123",
-            from_addr="service@paypal.com",
-            to_addrs=["me@example.com"],
-            subject="Receipt",
-            pattern_info=PatternInfo(
-                pattern_id=1,
-                sender="service@paypal.com",
-                merchant="Host Havoc Ltd.",
-                interval_type="monthly",
-                confidence=0.95,
-                occurrence_count=5,
-                status="active",
-            ),
-        )
-        config = RulesConfig(
-            chains={
-                "main": [
-                    Rule(
-                        match=MatchCondition(matches_pattern=True),
-                        variables={
-                            "nonexistent": Variable(
-                                pattern_field=PatternFieldVariable(field="nonexistent")
-                            )
-                        },
-                        action=Action(label="Test/{{nonexistent}}"),
-                    ),
-                    Rule(
-                        match=MatchCondition(),
-                        action=Action(label="Fallback"),
-                    ),
-                ]
-            }
-        )
+        from triage.models.rules import PatternFieldVariable
 
-        result = evaluate(config, email)
+        # With Literal type, invalid field names are caught at construction
+        with pytest.raises(ValidationError) as exc_info:
+            PatternFieldVariable(field="nonexistent")
 
-        # Should fall through to Fallback
-        assert result.matched
-        assert result.action is not None
-        assert result.action.label == "Cortex/Fallback"
+        # Verify it's the expected validation error
+        assert "literal_error" in str(exc_info.value)
 
     def test_pattern_field_multiple_fields(self) -> None:
         """Test extracting multiple fields from pattern_info."""

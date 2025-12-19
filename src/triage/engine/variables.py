@@ -464,7 +464,7 @@ def resolve_pattern_field(
             log.debug(
                 "Pattern field extraction succeeded",
                 field=field_name,
-                value=result[:50] if len(result) > 50 else result,
+                value=result[:50],
             )
             return result
     log.debug(

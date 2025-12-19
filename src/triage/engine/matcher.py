@@ -1090,9 +1090,7 @@ def matches_condition(
     if condition.matches_pattern is not None:
         has_pattern = email.pattern_info is not None
         _trace(f"matches_pattern check: has_pattern={has_pattern}")
-        if condition.matches_pattern and not has_pattern:
-            return _result(False)
-        if not condition.matches_pattern and has_pattern:
+        if condition.matches_pattern != has_pattern:
             return _result(False)
 
     if condition.pattern_confidence_min is not None:

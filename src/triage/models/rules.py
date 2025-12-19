@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -155,7 +155,9 @@ class PatternFieldVariable(BaseModel):
     Available fields: merchant, sender, interval_type, status, confidence
     """
 
-    field: str  # Field name from PatternInfo
+    field: Literal[
+        "merchant", "sender", "interval_type", "status", "confidence"
+    ]  # Field name from PatternInfo
 
 
 class Variable(BaseModel):
@@ -569,10 +571,10 @@ class PatternInfo(BaseModel):
     pattern_id: int
     sender: str
     merchant: str
-    interval_type: str  # monthly, weekly, yearly, irregular
+    interval_type: str  # IntervalType: monthly, weekly, yearly, irregular
     confidence: float
     occurrence_count: int
-    status: str  # emerging, active, dormant, ended
+    status: str  # PatternStatus: emerging, active, dormant, ended
 
 
 class Email(BaseModel):
