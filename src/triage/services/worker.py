@@ -765,7 +765,10 @@ class TriageWorker:
             with self._get_conn() as conn:
                 return check_maintenance_needed(conn, LifecycleConfig())
         except Exception as e:
-            logger.warning(f"Error checking maintenance status: {e}")
+            logger.error(
+                f"Error checking maintenance status, maintenance will be skipped: {e}",
+                exc_info=True,
+            )
             return False
 
     def _run_lifecycle_maintenance(self) -> None:
