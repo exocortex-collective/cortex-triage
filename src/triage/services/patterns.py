@@ -173,6 +173,7 @@ def update_pattern(
     # Filter to allowed fields
     updates = {k: v for k, v in updates.items() if k in allowed}
     if not updates:
+        logger.debug(f"No valid fields to update for pattern {pattern_id}")
         return get_pattern_by_id(conn, pattern_id)
 
     # Convert enums and special types

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from datetime import date, datetime
 from decimal import Decimal
 
 import psycopg2
@@ -243,11 +244,13 @@ def group_by_similarity(
         if amount:
             group.amounts.append(amount)
 
-        if email.get("date_header"):
-            date_str = email["date_header"]
-            if hasattr(date_str, "isoformat"):
-                date_str = date_str.date().isoformat()
-            group.dates.append(str(date_str))
+        if date_obj := email.get("date_header"):
+            if isinstance(date_obj, datetime):
+                group.dates.append(date_obj.date().isoformat())
+            elif isinstance(date_obj, date):
+                group.dates.append(date_obj.isoformat())
+            else:
+                group.dates.append(str(date_obj))
 
     return list(groups.values())
 

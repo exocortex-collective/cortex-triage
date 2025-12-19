@@ -457,18 +457,26 @@ def resolve_pattern_field(
         return None
 
     field_name = config.field
-    if hasattr(email.pattern_info, field_name):
-        value = getattr(email.pattern_info, field_name)
-        if value is not None:
-            result = str(value)
-            log.debug(
-                "Pattern field extraction succeeded",
-                field=field_name,
-                value=result[:50],
-            )
-            return result
+    if not hasattr(email.pattern_info, field_name):
+        log.debug(
+            "Pattern field not found on pattern_info object",
+            field=field_name,
+            gmail_id=email.gmail_id,
+        )
+        return None
+
+    value = getattr(email.pattern_info, field_name)
+    if value is not None:
+        result = str(value)
+        log.debug(
+            "Pattern field extraction succeeded",
+            field=field_name,
+            value=result[:50],
+        )
+        return result
+
     log.debug(
-        "Pattern field not found",
+        "Pattern field value is None",
         field=field_name,
         gmail_id=email.gmail_id,
     )
