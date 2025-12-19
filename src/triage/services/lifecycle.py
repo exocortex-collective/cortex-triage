@@ -176,19 +176,22 @@ def apply_decay(
     if next_exp:
         updates["next_expected"] = next_exp
 
-    # State transitions based on miss count
+    # State transitions based on miss count and confidence
     if new_misses >= config.end_after_misses:
         updates["status"] = PatternStatus.ENDED
         logger.info(
             f"Auto-ended pattern {pattern_id} ({pattern.merchant}) "
             f"after {new_misses} misses"
         )
-    elif new_misses >= config.dormant_after_misses:
+    elif new_misses >= config.dormant_after_misses or (
+        pattern.status == PatternStatus.ACTIVE
+        and new_confidence < config.min_confidence_active
+    ):
         if pattern.status != PatternStatus.DORMANT:
             updates["status"] = PatternStatus.DORMANT
             logger.info(
                 f"Pattern {pattern_id} ({pattern.merchant}) now dormant "
-                f"after {new_misses} misses"
+                f"after {new_misses} misses (confidence: {new_confidence:.2f})"
             )
 
     updated = update_pattern(conn, pattern_id, **updates)
