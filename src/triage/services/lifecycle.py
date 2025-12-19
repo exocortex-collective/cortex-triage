@@ -172,7 +172,7 @@ def apply_decay(
     }
 
     # Calculate next expected for the following period
-    next_exp = _recalculate_next_expected(conn, pattern)
+    next_exp = _recalculate_next_expected(conn, pattern, is_decay_scenario=True)
     if next_exp:
         updates["next_expected"] = next_exp
 
@@ -377,16 +377,19 @@ def _update_maintenance_timestamp(
 def _recalculate_next_expected(
     conn: psycopg2.extensions.connection,
     pattern: EmailPattern,
+    is_decay_scenario: bool = False,
 ) -> date | None:
     """Recalculate next expected date for a pattern.
 
     When decaying a pattern, the prediction should be based on the missed
-    next_expected date, not just the last received email date. This ensures
-    the next_expected advances even when emails are missed.
+    next_expected date to ensure next_expected advances even when emails
+    are missed. For successful matches, we don't include next_expected to
+    avoid skewing predictions if an email arrives early.
 
     Args:
         conn: Database connection
         pattern: Pattern to recalculate for
+        is_decay_scenario: True if recalculating after a missed email
 
     Returns:
         Next expected date, or None if can't be calculated
@@ -398,8 +401,8 @@ def _recalculate_next_expected(
         return None
 
     dates = _get_pattern_dates(conn, pattern.id)
-    # Include the missed next_expected date in predictions for decay scenarios
-    if pattern.next_expected:
+    # Include the missed next_expected date only in decay scenarios
+    if is_decay_scenario and pattern.next_expected:
         dates.append(pattern.next_expected)
 
     if not dates:

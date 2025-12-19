@@ -529,3 +529,4 @@ class TestRunLifecycleMaintenance:
         assert report.patterns_decayed == 0  # Failed
         assert len(report.errors) == 1
         assert "Database error" in report.errors[0]
+        mock_update_ts.assert_not_called()  # Timestamp not updated on error
