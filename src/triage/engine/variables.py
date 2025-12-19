@@ -25,6 +25,7 @@ if TYPE_CHECKING:
         FromRegexVariable,
         HeaderRegexVariable,
         LLMVariable,
+        PatternFieldVariable,
         SubjectRegexVariable,
         ToRegexVariable,
         Variable,
@@ -435,6 +436,45 @@ def resolve_llm(
     return value
 
 
+def resolve_pattern_field(
+    email: Email,
+    config: PatternFieldVariable,
+) -> str | None:
+    """Extract value from pattern info field.
+
+    Args:
+        email: Email with optional pattern_info.
+        config: Pattern field configuration specifying which field to extract.
+
+    Returns:
+        Field value as string, or None if pattern_info missing or field not found.
+    """
+    if email.pattern_info is None:
+        log.debug(
+            "No pattern_info for extraction",
+            gmail_id=email.gmail_id,
+        )
+        return None
+
+    field_name = config.field
+    if hasattr(email.pattern_info, field_name):
+        value = getattr(email.pattern_info, field_name)
+        if value is not None:
+            result = str(value)
+            log.debug(
+                "Pattern field extraction succeeded",
+                field=field_name,
+                value=result[:50] if len(result) > 50 else result,
+            )
+            return result
+    log.debug(
+        "Pattern field not found",
+        field=field_name,
+        gmail_id=email.gmail_id,
+    )
+    return None
+
+
 def resolve_variables(
     email: Email,
     variables: dict[str, Variable],
@@ -483,6 +523,8 @@ def resolve_variables(
                     f"LLM variable '{name}' requires LLM client but none provided"
                 )
             value = resolve_llm(email, var.llm, llm_client)
+        elif var.pattern_field:
+            value = resolve_pattern_field(email, var.pattern_field)
 
         # Check if resolution succeeded
         if value is None or value.strip() == "":
