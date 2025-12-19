@@ -1086,6 +1086,48 @@ def matches_condition(
         if actual_category != expected_value:
             return _result(False)
 
+    # Pattern matching (subscription detection)
+    if condition.matches_pattern is not None:
+        has_pattern = email.pattern_info is not None
+        _trace(f"matches_pattern check: has_pattern={has_pattern}")
+        if condition.matches_pattern != has_pattern:
+            return _result(False)
+
+    if condition.pattern_confidence_min is not None:
+        if email.pattern_info is None:
+            _trace("pattern_confidence_min: no pattern info")
+            return _result(False)
+        if email.pattern_info.confidence < condition.pattern_confidence_min:
+            _trace(
+                f"pattern_confidence_min: {email.pattern_info.confidence} < "
+                f"{condition.pattern_confidence_min}"
+            )
+            return _result(False)
+
+    if condition.pattern_interval:
+        pattern_intervals = _to_list(condition.pattern_interval)
+        if email.pattern_info is None:
+            _trace("pattern_interval: no pattern info")
+            return _result(False)
+        if email.pattern_info.interval_type not in pattern_intervals:
+            _trace(
+                f"pattern_interval: {email.pattern_info.interval_type} not in "
+                f"{pattern_intervals}"
+            )
+            return _result(False)
+
+    if condition.pattern_status:
+        pattern_statuses = _to_list(condition.pattern_status)
+        if email.pattern_info is None:
+            _trace("pattern_status: no pattern info")
+            return _result(False)
+        if email.pattern_info.status not in pattern_statuses:
+            _trace(
+                f"pattern_status: {email.pattern_info.status} not in "
+                f"{pattern_statuses}"
+            )
+            return _result(False)
+
     # Compound conditions
     # any_of: at least one sub-condition must match (OR)
     if condition.any_of is not None:

@@ -820,10 +820,90 @@ class TriageWorker:
                     -- (allows re-evaluation with different rules versions)
                     CREATE UNIQUE INDEX IF NOT EXISTS idx_classifications_dedup
                     ON classifications(gmail_id, rules_version);
+
+                    -- ==============================================
+                    -- Pattern Detection Tables (subscriptions, etc.)
+                    -- ==============================================
+
+                    -- Detected recurring email patterns
+                    -- Identity: (sender, merchant) - amounts tracked per-occurrence
+                    CREATE TABLE IF NOT EXISTS email_patterns (
+                        id BIGSERIAL PRIMARY KEY,
+
+                        -- Pattern identity
+                        sender TEXT NOT NULL,
+                        merchant TEXT NOT NULL,
+                        subject_template TEXT,
+                        body_signature TEXT,
+
+                        -- Temporal pattern
+                        interval_type TEXT NOT NULL DEFAULT 'irregular',
+                        interval_params JSONB,
+                        next_expected DATE,
+
+                        -- Confidence and lifecycle
+                        confidence REAL NOT NULL DEFAULT 0.0,
+                        occurrence_count INT NOT NULL DEFAULT 0,
+                        first_seen TIMESTAMPTZ NOT NULL,
+                        last_seen TIMESTAMPTZ NOT NULL,
+                        status TEXT NOT NULL DEFAULT 'emerging',
+
+                        -- Cached amount stats (computed from pattern_emails)
+                        typical_amount NUMERIC(10,2),
+                        typical_currency TEXT,
+                        amount_varies BOOLEAN DEFAULT FALSE,
+
+                        -- For labeling
+                        pattern_label TEXT,
+
+                        created_at TIMESTAMPTZ DEFAULT NOW(),
+                        updated_at TIMESTAMPTZ DEFAULT NOW(),
+
+                        CONSTRAINT unique_pattern UNIQUE (sender, merchant),
+                        CONSTRAINT valid_pattern_status CHECK (
+                            status IN ('emerging', 'active', 'dormant', 'ended')
+                        ),
+                        CONSTRAINT valid_interval_type CHECK (
+                            interval_type IN (
+                                'monthly', 'weekly', 'biweekly', 'quarterly',
+                                'yearly', 'day_of_week', 'irregular'
+                            )
+                        )
+                    );
+
+                    CREATE INDEX IF NOT EXISTS idx_patterns_sender
+                        ON email_patterns(sender);
+                    CREATE INDEX IF NOT EXISTS idx_patterns_status
+                        ON email_patterns(status)
+                        WHERE status IN ('emerging', 'active');
+                    CREATE INDEX IF NOT EXISTS idx_patterns_next_expected
+                        ON email_patterns(next_expected)
+                        WHERE next_expected IS NOT NULL;
+
+                    -- Junction table: which emails belong to which pattern
+                    CREATE TABLE IF NOT EXISTS pattern_emails (
+                        id BIGSERIAL PRIMARY KEY,
+                        pattern_id BIGINT NOT NULL
+                            REFERENCES email_patterns(id) ON DELETE CASCADE,
+                        gmail_id TEXT NOT NULL,
+
+                        -- Per-occurrence data (may vary)
+                        amount NUMERIC(10,2),
+                        currency TEXT,
+
+                        matched_at TIMESTAMPTZ DEFAULT NOW(),
+
+                        CONSTRAINT unique_pattern_email UNIQUE (pattern_id, gmail_id)
+                    );
+
+                    CREATE INDEX IF NOT EXISTS idx_pattern_emails_gmail
+                        ON pattern_emails(gmail_id);
+                    CREATE INDEX IF NOT EXISTS idx_pattern_emails_pattern
+                        ON pattern_emails(pattern_id);
                 """
             )
             conn.commit()
-        logger.info("classifications schema ensured")
+        logger.info("triage schema ensured (classifications + patterns)")
 
     def _claim_jobs(self, batch_size: int) -> list[dict[str, Any]]:
         """Claim a batch of pending triage jobs.
