@@ -370,6 +370,10 @@ def _recalculate_next_expected(
 ) -> date | None:
     """Recalculate next expected date for a pattern.
 
+    When decaying a pattern, the prediction should be based on the missed
+    next_expected date, not just the last received email date. This ensures
+    the next_expected advances even when emails are missed.
+
     Args:
         conn: Database connection
         pattern: Pattern to recalculate for
@@ -384,6 +388,10 @@ def _recalculate_next_expected(
         return None
 
     dates = _get_pattern_dates(conn, pattern.id)
+    # Include the missed next_expected date in predictions for decay scenarios
+    if pattern.next_expected:
+        dates.append(pattern.next_expected)
+
     if not dates:
         return None
 

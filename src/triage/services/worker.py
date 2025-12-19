@@ -12,7 +12,7 @@ import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import date
+from datetime import UTC, datetime
 from typing import Any
 
 import httpx
@@ -773,7 +773,7 @@ class TriageWorker:
         try:
             with self._get_conn() as conn:
                 report = run_lifecycle_maintenance(
-                    conn, LifecycleConfig(), date.today()
+                    conn, LifecycleConfig(), datetime.now(UTC).date()
                 )
                 logger.info(
                     f"Lifecycle maintenance complete: "
