@@ -304,7 +304,7 @@ def run_lifecycle_maintenance(
         except Exception as e:
             conn.rollback()
             error_msg = f"Error decaying pattern {pattern.id}: {e}"
-            logger.error(error_msg)
+            logger.error(error_msg, exc_info=True)
             report.errors.append(error_msg)
 
     # Update maintenance timestamp only if no errors occurred
