@@ -151,8 +151,8 @@ def update_pattern(
     """Update pattern fields.
 
     Allowed fields: interval_type, interval_params, next_expected, confidence,
-    occurrence_count, last_seen, status, typical_amount, typical_currency,
-    amount_varies, pattern_label, subject_template, body_signature
+    occurrence_count, last_seen, status, consecutive_misses, typical_amount,
+    typical_currency, amount_varies, pattern_label, subject_template, body_signature
     """
     allowed = {
         "interval_type",
@@ -162,6 +162,7 @@ def update_pattern(
         "occurrence_count",
         "last_seen",
         "status",
+        "consecutive_misses",
         "typical_amount",
         "typical_currency",
         "amount_varies",
@@ -353,6 +354,7 @@ def _row_to_pattern(row: dict[str, Any]) -> EmailPattern:
         first_seen=row["first_seen"],
         last_seen=row["last_seen"],
         status=PatternStatus(row["status"]),
+        consecutive_misses=row.get("consecutive_misses", 0),
         typical_amount=row.get("typical_amount"),
         typical_currency=row.get("typical_currency"),
         amount_varies=row.get("amount_varies", False),

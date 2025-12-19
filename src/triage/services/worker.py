@@ -12,6 +12,7 @@ import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
+from datetime import date
 from typing import Any
 
 import httpx
@@ -32,6 +33,11 @@ from psycopg2.pool import SimpleConnectionPool
 from triage.engine.matcher import evaluate
 from triage.engine.rules import load_rules, validate_rules
 from triage.models.rules import Email, EvaluationResult, RulesConfig
+from triage.services.lifecycle import (
+    LifecycleConfig,
+    check_maintenance_needed,
+    run_lifecycle_maintenance,
+)
 
 
 class LLMError(Exception):
@@ -753,6 +759,35 @@ class TriageWorker:
             self._pool = None
             logger.info("Database connection pool closed")
 
+    def _should_run_maintenance(self) -> bool:
+        """Check if lifecycle maintenance should run (24h since last run)."""
+        try:
+            with self._get_conn() as conn:
+                return check_maintenance_needed(conn, LifecycleConfig())
+        except Exception as e:
+            logger.warning(f"Error checking maintenance status: {e}")
+            return False
+
+    def _run_lifecycle_maintenance(self) -> None:
+        """Run pattern lifecycle maintenance (decay overdue patterns)."""
+        try:
+            with self._get_conn() as conn:
+                report = run_lifecycle_maintenance(
+                    conn, LifecycleConfig(), date.today()
+                )
+                logger.info(
+                    f"Lifecycle maintenance complete: "
+                    f"checked={report.patterns_checked}, "
+                    f"decayed={report.patterns_decayed}, "
+                    f"dormant={report.patterns_dormant}, "
+                    f"ended={report.patterns_ended}"
+                )
+                if report.errors:
+                    for error in report.errors:
+                        logger.error(f"Maintenance error: {error}")
+        except Exception as e:
+            logger.error(f"Lifecycle maintenance failed: {e}", exc_info=True)
+
     def _get_pool(self) -> SimpleConnectionPool:
         """Get or create connection pool."""
         if self._pool is None:
@@ -847,6 +882,7 @@ class TriageWorker:
                         first_seen TIMESTAMPTZ NOT NULL,
                         last_seen TIMESTAMPTZ NOT NULL,
                         status TEXT NOT NULL DEFAULT 'emerging',
+                        consecutive_misses INT NOT NULL DEFAULT 0,
 
                         -- Cached amount stats (computed from pattern_emails)
                         typical_amount NUMERIC(10,2),
@@ -875,10 +911,11 @@ class TriageWorker:
                         ON email_patterns(sender);
                     CREATE INDEX IF NOT EXISTS idx_patterns_status
                         ON email_patterns(status)
-                        WHERE status IN ('emerging', 'active');
+                        WHERE status IN ('emerging', 'active', 'dormant');
                     CREATE INDEX IF NOT EXISTS idx_patterns_next_expected
                         ON email_patterns(next_expected)
-                        WHERE next_expected IS NOT NULL;
+                        WHERE next_expected IS NOT NULL
+                        AND status IN ('emerging', 'active', 'dormant');
 
                     -- Junction table: which emails belong to which pattern
                     CREATE TABLE IF NOT EXISTS pattern_emails (
@@ -1254,6 +1291,10 @@ class TriageWorker:
 
     def _process_batch(self) -> tuple[int, int]:
         """Process a single batch of jobs. Returns (processed, failed)."""
+        # Check if lifecycle maintenance is needed (lazy check - runs daily)
+        if self._should_run_maintenance():
+            self._run_lifecycle_maintenance()
+
         jobs = self._claim_jobs(self.config.batch_size)
 
         if not jobs:
