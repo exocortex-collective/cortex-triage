@@ -1090,24 +1090,22 @@ class TriageWorker:
                     # Get amount if available (lists are parallel with gmail_ids)
                     amount = None
                     currency = None
-                    if i < len(target_group.amounts):
-                        amt = target_group.amounts[i]
-                        if amt is not None:
-                            amount = amt.amount
-                            currency = amt.currency
+                    amt = target_group.amounts[i]
+                    if amt is not None:
+                        amount = amt.amount
+                        currency = amt.currency
 
                     # Get email date if available
                     email_date = None
-                    if i < len(target_group.dates):
-                        date_str = target_group.dates[i]
-                        if date_str is not None:
-                            try:
-                                parsed_date = date.fromisoformat(date_str)
-                                email_date = datetime.combine(
-                                    parsed_date, datetime.min.time()
-                                ).replace(tzinfo=UTC)
-                            except (ValueError, TypeError):
-                                pass
+                    date_str = target_group.dates[i]
+                    if date_str is not None:
+                        try:
+                            parsed_date = date.fromisoformat(date_str)
+                            email_date = datetime.combine(
+                                parsed_date, datetime.min.time()
+                            ).replace(tzinfo=UTC)
+                        except (ValueError, TypeError):
+                            pass
 
                     add_email_to_pattern(
                         conn, existing.id, gid, amount, currency, email_date
@@ -1158,11 +1156,10 @@ class TriageWorker:
             for i, gid in enumerate(target_group.gmail_ids):
                 amount = None
                 currency = None
-                if i < len(target_group.amounts):
-                    amt = target_group.amounts[i]
-                    if amt is not None:
-                        amount = amt.amount
-                        currency = amt.currency
+                amt = target_group.amounts[i]
+                if amt is not None:
+                    amount = amt.amount
+                    currency = amt.currency
 
                 # Reuse already-parsed date
                 email_date = None
