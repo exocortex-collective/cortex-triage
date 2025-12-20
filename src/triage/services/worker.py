@@ -32,13 +32,22 @@ from psycopg2.pool import SimpleConnectionPool
 
 from triage.engine.matcher import evaluate
 from triage.engine.rules import load_rules, validate_rules
+from triage.models.patterns import EmailPattern
 from triage.models.rules import Email, EvaluationResult, PatternInfo, RulesConfig
 from triage.services.lifecycle import (
     LifecycleConfig,
     check_maintenance_needed,
     run_lifecycle_maintenance,
 )
-from triage.services.patterns import get_pattern_for_email
+from triage.services.patterns import (
+    PATTERN_ACTIVATION_COUNT,
+    add_email_to_pattern,
+    create_pattern,
+    get_pattern_by_sender_merchant,
+    get_pattern_for_email,
+)
+from triage.services.similarity import analyze_sender
+from triage.services.temporal import detect_pattern
 
 
 class LLMError(Exception):
@@ -1029,6 +1038,147 @@ class TriageWorker:
                 conn.commit()
             return jobs
 
+    def _detect_or_create_pattern(
+        self,
+        conn: psycopg2.extensions.connection,
+        gmail_id: str,
+        from_addr: str,
+    ) -> EmailPattern | None:
+        """Detect patterns from sender's emails and create if threshold met.
+
+        Analyzes the sender's email history to find similarity groups.
+        If the current email belongs to a group with enough occurrences,
+        detects temporal patterns and creates/updates the pattern.
+
+        Args:
+            conn: Database connection
+            gmail_id: Gmail ID of current email
+            from_addr: Sender email address
+
+        Returns:
+            Created or updated EmailPattern, or None if no pattern detected
+        """
+        from datetime import date as date_type
+
+        try:
+            # Analyze sender's emails for similarity groups
+            groups = analyze_sender(conn, from_addr, limit=100)
+
+            if not groups:
+                return None
+
+            # Find which group contains this email
+            target_group = None
+            for group in groups:
+                if gmail_id in group.gmail_ids:
+                    target_group = group
+                    break
+
+            if not target_group:
+                # Email not in any group (shouldn't happen, but handle gracefully)
+                return None
+
+            # Need at least PATTERN_ACTIVATION_COUNT emails to create/activate pattern
+            if len(target_group.gmail_ids) < PATTERN_ACTIVATION_COUNT:
+                return None
+
+            # Determine merchant name (use template_name as fallback)
+            merchant = target_group.merchant or target_group.template_name
+
+            # Check if pattern already exists for this sender+merchant
+            existing = get_pattern_by_sender_merchant(conn, from_addr, merchant)
+            if existing and existing.id is not None:
+                # Pattern exists - just link this email to it
+                # Get the email date from the group
+                email_idx = target_group.gmail_ids.index(gmail_id)
+
+                # Get amount if available
+                amount = None
+                currency = None
+                if email_idx < len(target_group.amounts):
+                    amt = target_group.amounts[email_idx]
+                    amount = amt.amount
+                    currency = amt.currency
+
+                add_email_to_pattern(conn, existing.id, gmail_id, amount, currency)
+                conn.commit()
+                return existing
+
+            # No existing pattern - detect temporal pattern and create
+            # Convert date strings to date objects
+            dates: list[date_type] = []
+            for date_str in target_group.dates:
+                try:
+                    dates.append(date_type.fromisoformat(date_str))
+                except (ValueError, TypeError):
+                    continue
+
+            if len(dates) < 2:
+                return None
+
+            # Detect temporal pattern
+            temporal = detect_pattern(dates)
+            if not temporal:
+                return None
+
+            # Create the pattern
+            from datetime import UTC, datetime
+
+            first_seen = datetime.combine(min(dates), datetime.min.time()).replace(
+                tzinfo=UTC
+            )
+
+            pattern = create_pattern(
+                conn,
+                sender=from_addr,
+                merchant=merchant,
+                first_seen=first_seen,
+                subject_template=target_group.template_pattern,
+                interval_type=temporal.interval_type,
+                interval_params=temporal.interval_params,
+            )
+
+            if not pattern.id:
+                return None
+
+            # Link all emails in the group to this pattern
+            for i, gid in enumerate(target_group.gmail_ids):
+                amount = None
+                currency = None
+                if i < len(target_group.amounts):
+                    amt = target_group.amounts[i]
+                    amount = amt.amount
+                    currency = amt.currency
+
+                email_date = None
+                if i < len(target_group.dates):
+                    try:
+                        parsed_date = date_type.fromisoformat(target_group.dates[i])
+                        email_date = datetime.combine(
+                            parsed_date, datetime.min.time()
+                        ).replace(tzinfo=UTC)
+                    except (ValueError, TypeError):
+                        pass
+
+                add_email_to_pattern(
+                    conn, pattern.id, gid, amount, currency, email_date
+                )
+
+            conn.commit()
+
+            logger.info(
+                f"Created pattern for {from_addr}/{merchant}: "
+                f"{temporal.interval_type.value}, {len(target_group.gmail_ids)} emails"
+            )
+
+            # Refresh pattern to get updated stats
+            return get_pattern_by_sender_merchant(conn, from_addr, merchant)
+
+        except Exception as e:
+            logger.warning(f"Pattern detection failed for {gmail_id}: {e}")
+            conn.rollback()
+            return None
+
     def _get_email_data(self, gmail_id: str) -> Email | None:
         """Fetch email data from emails_parsed and headers from emails_raw."""
         with self._get_conn() as conn, conn.cursor() as cur:
@@ -1087,8 +1237,15 @@ class TriageWorker:
                                 headers_dict[lower_name] = value
 
                 # Look up pattern info if email is linked to a pattern
+                # If not linked, try to detect and create a pattern
                 pattern_info: PatternInfo | None = None
+                from_addr = row[2] or ""
                 pattern = get_pattern_for_email(conn, gmail_id)
+
+                # If no existing pattern, try to detect one from sender's emails
+                if not pattern and from_addr:
+                    pattern = self._detect_or_create_pattern(conn, gmail_id, from_addr)
+
                 if pattern and pattern.id is not None:
                     pattern_info = PatternInfo(
                         pattern_id=pattern.id,
@@ -1103,7 +1260,7 @@ class TriageWorker:
                 return Email(
                     id=row[0],
                     gmail_id=row[1],
-                    from_addr=row[2] or "",
+                    from_addr=from_addr,
                     to_addrs=to_addrs,
                     cc_addrs=cc_addrs,
                     bcc_addrs=bcc_addrs,
