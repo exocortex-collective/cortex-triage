@@ -13,6 +13,20 @@ if TYPE_CHECKING:
 class TestGetEmailDataPatternInfo:
     """Tests for pattern_info population in _get_email_data."""
 
+    def setup_method(self) -> None:
+        """Set up the worker and mock DB connection for each test."""
+        self.worker = self._make_worker()
+
+        # Mock the connection pool and cursor
+        self.mock_conn = MagicMock()
+        self.mock_cursor = MagicMock()
+        self.mock_conn.cursor.return_value.__enter__.return_value = self.mock_cursor
+
+        # Mock worker._get_pool().getconn() to return our mock connection
+        mock_pool = MagicMock()
+        mock_pool.getconn.return_value = self.mock_conn
+        self.worker._pool = mock_pool
+
     def _make_worker(self) -> "TriageWorker":
         """Create a minimal worker mock for testing _get_email_data."""
         # We need to import here to avoid import-time issues with mocking
@@ -34,20 +48,8 @@ class TestGetEmailDataPatternInfo:
         """pattern_info should be None when email is not linked to a pattern."""
         mock_get_pattern.return_value = None
 
-        worker = self._make_worker()
-
-        # Mock the connection pool and cursor
-        mock_conn = MagicMock()
-        mock_cursor = MagicMock()
-        mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
-
-        # Mock worker._get_pool().getconn() to return our mock connection
-        mock_pool = MagicMock()
-        mock_pool.getconn.return_value = mock_conn
-        worker._pool = mock_pool
-
         # Mock database row for email data
-        mock_cursor.fetchone.return_value = (
+        self.mock_cursor.fetchone.return_value = (
             1,  # id
             "gmail123",  # gmail_id
             "test@example.com",  # from_addr
@@ -65,11 +67,11 @@ class TestGetEmailDataPatternInfo:
             [],  # attachment_mime_types
         )
 
-        email = worker._get_email_data("gmail123")
+        email = self.worker._get_email_data("gmail123")
 
         assert email is not None
         assert email.pattern_info is None
-        mock_get_pattern.assert_called_once_with(mock_conn, "gmail123")
+        mock_get_pattern.assert_called_once_with(self.mock_conn, "gmail123")
 
     @patch("triage.services.worker.get_pattern_for_email")
     def test_pattern_info_populated_when_pattern_exists(
@@ -90,19 +92,8 @@ class TestGetEmailDataPatternInfo:
         )
         mock_get_pattern.return_value = mock_pattern
 
-        worker = self._make_worker()
-
-        # Mock the connection pool and cursor
-        mock_conn = MagicMock()
-        mock_cursor = MagicMock()
-        mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
-
-        mock_pool = MagicMock()
-        mock_pool.getconn.return_value = mock_conn
-        worker._pool = mock_pool
-
         # Mock database row for email data
-        mock_cursor.fetchone.return_value = (
+        self.mock_cursor.fetchone.return_value = (
             1,  # id
             "gmail123",  # gmail_id
             "service@paypal.com",  # from_addr
@@ -120,7 +111,7 @@ class TestGetEmailDataPatternInfo:
             [],  # attachment_mime_types
         )
 
-        email = worker._get_email_data("gmail123")
+        email = self.worker._get_email_data("gmail123")
 
         assert email is not None
         assert email.pattern_info is not None
@@ -150,17 +141,7 @@ class TestGetEmailDataPatternInfo:
         )
         mock_get_pattern.return_value = mock_pattern
 
-        worker = self._make_worker()
-
-        mock_conn = MagicMock()
-        mock_cursor = MagicMock()
-        mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
-
-        mock_pool = MagicMock()
-        mock_pool.getconn.return_value = mock_conn
-        worker._pool = mock_pool
-
-        mock_cursor.fetchone.return_value = (
+        self.mock_cursor.fetchone.return_value = (
             1,
             "gmail456",
             "newsletter@example.com",
@@ -178,7 +159,7 @@ class TestGetEmailDataPatternInfo:
             [],
         )
 
-        email = worker._get_email_data("gmail456")
+        email = self.worker._get_email_data("gmail456")
 
         assert email is not None
         assert email.pattern_info is not None
@@ -199,17 +180,7 @@ class TestGetEmailDataPatternInfo:
         )
         mock_get_pattern.return_value = mock_pattern
 
-        worker = self._make_worker()
-
-        mock_conn = MagicMock()
-        mock_cursor = MagicMock()
-        mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
-
-        mock_pool = MagicMock()
-        mock_pool.getconn.return_value = mock_conn
-        worker._pool = mock_pool
-
-        mock_cursor.fetchone.return_value = (
+        self.mock_cursor.fetchone.return_value = (
             1,
             "gmail789",
             "test@example.com",
@@ -227,7 +198,7 @@ class TestGetEmailDataPatternInfo:
             [],
         )
 
-        email = worker._get_email_data("gmail789")
+        email = self.worker._get_email_data("gmail789")
 
         assert email is not None
         # pattern_info should be None because pattern.id was None
