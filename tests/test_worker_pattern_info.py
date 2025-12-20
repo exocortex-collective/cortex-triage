@@ -1,15 +1,19 @@
 """Tests for pattern_info population in worker's _get_email_data()."""
 
 from datetime import datetime
+from typing import TYPE_CHECKING
 from unittest.mock import MagicMock, patch
 
 from triage.models.patterns import EmailPattern, IntervalType, PatternStatus
+
+if TYPE_CHECKING:
+    from triage.services.worker import TriageWorker
 
 
 class TestGetEmailDataPatternInfo:
     """Tests for pattern_info population in _get_email_data."""
 
-    def _make_worker(self) -> MagicMock:
+    def _make_worker(self) -> "TriageWorker":
         """Create a minimal worker mock for testing _get_email_data."""
         # We need to import here to avoid import-time issues with mocking
         from triage.services.worker import TriageWorker
