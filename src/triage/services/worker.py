@@ -1087,7 +1087,6 @@ class TriageWorker:
             existing = get_pattern_by_sender_merchant(conn, from_addr, merchant)
             if existing and existing.id is not None:
                 # Pattern exists - just link this email to it
-                # Get the email date from the group
                 email_idx = target_group.gmail_ids.index(gmail_id)
 
                 # Get amount if available
@@ -1098,28 +1097,42 @@ class TriageWorker:
                     amount = amt.amount
                     currency = amt.currency
 
-                add_email_to_pattern(conn, existing.id, gmail_id, amount, currency)
+                # Get email date if available
+                email_date = None
+                if email_idx < len(target_group.dates):
+                    try:
+                        parsed_date = date.fromisoformat(target_group.dates[email_idx])
+                        email_date = datetime.combine(
+                            parsed_date, datetime.min.time()
+                        ).replace(tzinfo=UTC)
+                    except (ValueError, TypeError):
+                        pass
+
+                add_email_to_pattern(
+                    conn, existing.id, gmail_id, amount, currency, email_date
+                )
                 return existing
 
             # No existing pattern - detect temporal pattern and create
-            # Convert date strings to date objects
-            dates: list[date] = []
-            for date_str in target_group.dates:
+            # Parse dates once and index by position for reuse
+            parsed_dates: dict[int, date] = {}
+            for i, date_str in enumerate(target_group.dates):
                 try:
-                    dates.append(date.fromisoformat(date_str))
+                    parsed_dates[i] = date.fromisoformat(date_str)
                 except (ValueError, TypeError):
                     continue
 
-            if len(dates) < 2:
+            if len(parsed_dates) < 2:
                 return None
 
             # Detect temporal pattern
-            temporal = detect_pattern(dates)
+            dates_list = list(parsed_dates.values())
+            temporal = detect_pattern(dates_list)
             if not temporal:
                 return None
 
             # Create the pattern
-            first_seen = datetime.combine(min(dates), datetime.min.time()).replace(
+            first_seen = datetime.combine(min(dates_list), datetime.min.time()).replace(
                 tzinfo=UTC
             )
 
@@ -1145,15 +1158,12 @@ class TriageWorker:
                     amount = amt.amount
                     currency = amt.currency
 
+                # Reuse already-parsed date
                 email_date = None
-                if i < len(target_group.dates):
-                    try:
-                        parsed_date = date.fromisoformat(target_group.dates[i])
-                        email_date = datetime.combine(
-                            parsed_date, datetime.min.time()
-                        ).replace(tzinfo=UTC)
-                    except (ValueError, TypeError):
-                        pass
+                if i in parsed_dates:
+                    email_date = datetime.combine(
+                        parsed_dates[i], datetime.min.time()
+                    ).replace(tzinfo=UTC)
 
                 add_email_to_pattern(
                     conn, pattern.id, gid, amount, currency, email_date
