@@ -203,3 +203,231 @@ class TestGetEmailDataPatternInfo:
         assert email is not None
         # pattern_info should be None because pattern.id was None
         assert email.pattern_info is None
+
+
+class TestDetectOrCreatePattern:
+    """Tests for _detect_or_create_pattern method."""
+
+    def setup_method(self) -> None:
+        """Set up the worker and mock DB connection for each test."""
+        self.worker = self._make_worker()
+        self.mock_conn = MagicMock()
+
+    def _make_worker(self) -> "TriageWorker":
+        """Create a minimal worker mock for testing."""
+        from triage.services.worker import TriageWorker
+
+        config = MagicMock()
+        rules = MagicMock()
+        ollama = MagicMock()
+        gmail = MagicMock()
+        return TriageWorker(config, rules, ollama, gmail)
+
+    @patch("triage.services.worker.get_pattern_by_sender_merchant")
+    @patch("triage.services.worker.add_email_to_pattern")
+    @patch("triage.services.worker.create_pattern")
+    @patch("triage.services.worker.detect_pattern")
+    @patch("triage.services.worker.analyze_sender")
+    def test_creates_new_pattern_when_threshold_met(
+        self,
+        mock_analyze: MagicMock,
+        mock_detect: MagicMock,
+        mock_create: MagicMock,
+        mock_add_email: MagicMock,
+        mock_get_pattern: MagicMock,
+    ) -> None:
+        """Should create a new pattern when threshold is met and temporal detected."""
+        from triage.models.patterns import EmailPattern, IntervalType
+        from triage.services.similarity import SimilarityGroup
+        from triage.services.temporal import TemporalPattern
+
+        # Setup: 3 emails in group (meets threshold of 3)
+        mock_analyze.return_value = [
+            SimilarityGroup(
+                sender="paypal@paypal.com",
+                template_name="paypal_receipt",
+                template_pattern="",
+                merchant="Host Havoc",
+                gmail_ids=["email1", "email2", "email3"],
+                amounts=[None, None, None],
+                dates=["2025-10-01", "2025-11-01", "2025-12-01"],
+            )
+        ]
+
+        # No existing pattern
+        mock_get_pattern.return_value = None
+
+        # Temporal pattern detected
+        mock_detect.return_value = TemporalPattern(
+            interval_type=IntervalType.MONTHLY,
+            interval_params={"day_of_month": 1},
+            confidence=0.9,
+            next_expected=None,
+        )
+
+        # Created pattern
+        created_pattern = EmailPattern(
+            id=1,
+            sender="paypal@paypal.com",
+            merchant="Host Havoc",
+            interval_type=IntervalType.MONTHLY,
+        )
+        mock_create.return_value = created_pattern
+        mock_get_pattern.side_effect = [None, created_pattern]
+
+        result = self.worker._detect_or_create_pattern(
+            self.mock_conn, "email1", "paypal@paypal.com"
+        )
+
+        assert result is not None
+        assert result.merchant == "Host Havoc"
+        mock_create.assert_called_once()
+        # Should link all 3 emails
+        assert mock_add_email.call_count == 3
+
+    @patch("triage.services.worker.get_pattern_by_sender_merchant")
+    @patch("triage.services.worker.add_email_to_pattern")
+    @patch("triage.services.worker.analyze_sender")
+    def test_links_emails_to_existing_pattern(
+        self,
+        mock_analyze: MagicMock,
+        mock_add_email: MagicMock,
+        mock_get_pattern: MagicMock,
+    ) -> None:
+        """Should link all emails in group to existing pattern."""
+        from triage.models.patterns import EmailPattern, IntervalType
+        from triage.services.similarity import SimilarityGroup
+
+        mock_analyze.return_value = [
+            SimilarityGroup(
+                sender="paypal@paypal.com",
+                template_name="paypal_receipt",
+                template_pattern="",
+                merchant="Host Havoc",
+                gmail_ids=["email1", "email2", "email3"],
+                amounts=[None, None, None],
+                dates=["2025-10-01", "2025-11-01", "2025-12-01"],
+            )
+        ]
+
+        existing_pattern = EmailPattern(
+            id=42,
+            sender="paypal@paypal.com",
+            merchant="Host Havoc",
+            interval_type=IntervalType.MONTHLY,
+        )
+        mock_get_pattern.return_value = existing_pattern
+
+        result = self.worker._detect_or_create_pattern(
+            self.mock_conn, "email1", "paypal@paypal.com"
+        )
+
+        assert result is not None
+        assert result.id == 42
+        # Should link all 3 emails
+        assert mock_add_email.call_count == 3
+
+    @patch("triage.services.worker.analyze_sender")
+    def test_returns_none_when_below_threshold(self, mock_analyze: MagicMock) -> None:
+        """Should return None when group has fewer than threshold emails."""
+        from triage.services.similarity import SimilarityGroup
+
+        # Only 2 emails - below threshold of 3
+        mock_analyze.return_value = [
+            SimilarityGroup(
+                sender="paypal@paypal.com",
+                template_name="paypal_receipt",
+                template_pattern="",
+                merchant="Host Havoc",
+                gmail_ids=["email1", "email2"],
+                amounts=[None, None],
+                dates=["2025-11-01", "2025-12-01"],
+            )
+        ]
+
+        result = self.worker._detect_or_create_pattern(
+            self.mock_conn, "email1", "paypal@paypal.com"
+        )
+
+        assert result is None
+
+    @patch("triage.services.worker.get_pattern_by_sender_merchant")
+    @patch("triage.services.worker.detect_pattern")
+    @patch("triage.services.worker.analyze_sender")
+    def test_returns_none_when_no_temporal_pattern(
+        self,
+        mock_analyze: MagicMock,
+        mock_detect: MagicMock,
+        mock_get_pattern: MagicMock,
+    ) -> None:
+        """Should return None when no temporal pattern can be detected."""
+        from triage.services.similarity import SimilarityGroup
+
+        mock_analyze.return_value = [
+            SimilarityGroup(
+                sender="random@example.com",
+                template_name="unknown",
+                template_pattern="",
+                merchant=None,
+                gmail_ids=["email1", "email2", "email3"],
+                amounts=[None, None, None],
+                dates=["2025-01-15", "2025-06-22", "2025-12-03"],  # Irregular
+            )
+        ]
+
+        mock_get_pattern.return_value = None
+        mock_detect.return_value = None  # No temporal pattern
+
+        result = self.worker._detect_or_create_pattern(
+            self.mock_conn, "email1", "random@example.com"
+        )
+
+        assert result is None
+
+    @patch("triage.services.worker.analyze_sender")
+    def test_returns_none_when_email_not_in_any_group(
+        self, mock_analyze: MagicMock
+    ) -> None:
+        """Should return None when email is not in any similarity group."""
+        from triage.services.similarity import SimilarityGroup
+
+        # Group exists but doesn't contain the email we're checking
+        mock_analyze.return_value = [
+            SimilarityGroup(
+                sender="paypal@paypal.com",
+                template_name="paypal_receipt",
+                template_pattern="",
+                merchant="Host Havoc",
+                gmail_ids=["other1", "other2", "other3"],
+                amounts=[None, None, None],
+                dates=["2025-10-01", "2025-11-01", "2025-12-01"],
+            )
+        ]
+
+        result = self.worker._detect_or_create_pattern(
+            self.mock_conn, "email_not_in_group", "paypal@paypal.com"
+        )
+
+        assert result is None
+
+    @patch("triage.services.worker.analyze_sender")
+    def test_returns_none_when_no_groups(self, mock_analyze: MagicMock) -> None:
+        """Should return None when sender has no similarity groups."""
+        mock_analyze.return_value = []
+
+        result = self.worker._detect_or_create_pattern(
+            self.mock_conn, "email1", "unknown@example.com"
+        )
+
+        assert result is None
+
+    @patch("triage.services.worker.analyze_sender")
+    def test_handles_exception_gracefully(self, mock_analyze: MagicMock) -> None:
+        """Should return None and log error on exception."""
+        mock_analyze.side_effect = Exception("Database error")
+
+        result = self.worker._detect_or_create_pattern(
+            self.mock_conn, "email1", "test@example.com"
+        )
+
+        assert result is None
