@@ -1084,34 +1084,35 @@ class TriageWorker:
             # Check if pattern already exists for this sender+merchant
             existing = get_pattern_by_sender_merchant(conn, from_addr, merchant)
             if existing and existing.id is not None:
-                # Pattern exists - just link this email to it
-                email_idx = target_group.gmail_ids.index(gmail_id)
+                # Pattern exists - link all emails in the group to it
+                # (add_email_to_pattern is idempotent, safe for already-linked emails)
+                for i, gid in enumerate(target_group.gmail_ids):
+                    # Get amount if available (lists are parallel with gmail_ids)
+                    amount = None
+                    currency = None
+                    if i < len(target_group.amounts):
+                        amt = target_group.amounts[i]
+                        if amt is not None:
+                            amount = amt.amount
+                            currency = amt.currency
 
-                # Get amount if available (lists are now parallel with gmail_ids)
-                amount = None
-                currency = None
-                if email_idx < len(target_group.amounts):
-                    amt = target_group.amounts[email_idx]
-                    if amt is not None:
-                        amount = amt.amount
-                        currency = amt.currency
+                    # Get email date if available
+                    email_date = None
+                    if i < len(target_group.dates):
+                        date_str = target_group.dates[i]
+                        if date_str is not None:
+                            try:
+                                parsed_date = date.fromisoformat(date_str)
+                                email_date = datetime.combine(
+                                    parsed_date, datetime.min.time()
+                                ).replace(tzinfo=UTC)
+                            except (ValueError, TypeError):
+                                pass
 
-                # Get email date if available
-                email_date = None
-                if email_idx < len(target_group.dates):
-                    date_str = target_group.dates[email_idx]
-                    if date_str is not None:
-                        try:
-                            parsed_date = date.fromisoformat(date_str)
-                            email_date = datetime.combine(
-                                parsed_date, datetime.min.time()
-                            ).replace(tzinfo=UTC)
-                        except (ValueError, TypeError):
-                            pass
+                    add_email_to_pattern(
+                        conn, existing.id, gid, amount, currency, email_date
+                    )
 
-                add_email_to_pattern(
-                    conn, existing.id, gmail_id, amount, currency, email_date
-                )
                 # Re-fetch to get updated stats (occurrence_count, last_seen, etc.)
                 return get_pattern_by_sender_merchant(conn, from_addr, merchant)
 
