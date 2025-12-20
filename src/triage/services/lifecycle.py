@@ -341,7 +341,7 @@ def check_maintenance_needed(
     with conn.cursor() as cur:
         cur.execute(
             """
-            SELECT value FROM sync_state
+            SELECT value FROM system_state
             WHERE key = 'lifecycle_last_check'
             """
         )
@@ -363,14 +363,14 @@ def check_maintenance_needed(
 def _update_maintenance_timestamp(
     conn: psycopg2.extensions.connection,
 ) -> None:
-    """Update the last maintenance timestamp in sync_state."""
+    """Update the last maintenance timestamp in system_state."""
     now = datetime.now(UTC).isoformat()
     with conn.cursor() as cur:
         cur.execute(
             """
-            INSERT INTO sync_state (key, value)
-            VALUES ('lifecycle_last_check', %s)
-            ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value
+            INSERT INTO system_state (key, value, updated_at)
+            VALUES ('lifecycle_last_check', %s, NOW())
+            ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()
             """,
             (now,),
         )

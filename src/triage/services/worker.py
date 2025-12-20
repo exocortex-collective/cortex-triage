@@ -941,10 +941,19 @@ class TriageWorker:
                         ON pattern_emails(gmail_id);
                     CREATE INDEX IF NOT EXISTS idx_pattern_emails_pattern
                         ON pattern_emails(pattern_id);
+
+                    -- ==============================================
+                    -- System State (key-value for lifecycle, etc.)
+                    -- ==============================================
+                    CREATE TABLE IF NOT EXISTS system_state (
+                        key TEXT PRIMARY KEY,
+                        value TEXT NOT NULL,
+                        updated_at TIMESTAMPTZ DEFAULT NOW()
+                    );
                 """
             )
             conn.commit()
-        logger.info("triage schema ensured (classifications + patterns)")
+        logger.info("triage schema ensured (classifications + patterns + system_state)")
 
     def _claim_jobs(self, batch_size: int) -> list[dict[str, Any]]:
         """Claim a batch of pending triage jobs.
