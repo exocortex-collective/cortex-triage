@@ -1066,11 +1066,9 @@ class TriageWorker:
                 return None
 
             # Find which group contains this email
-            target_group = None
-            for group in groups:
-                if gmail_id in group.gmail_ids:
-                    target_group = group
-                    break
+            target_group = next(
+                (group for group in groups if gmail_id in group.gmail_ids), None
+            )
 
             if not target_group:
                 # Email not in any group (shouldn't happen, but handle gracefully)
@@ -1111,7 +1109,8 @@ class TriageWorker:
                 add_email_to_pattern(
                     conn, existing.id, gmail_id, amount, currency, email_date
                 )
-                return existing
+                # Re-fetch to get updated stats (occurrence_count, last_seen, etc.)
+                return get_pattern_by_sender_merchant(conn, from_addr, merchant)
 
             # No existing pattern - detect temporal pattern and create
             # Parse dates once and index by position for reuse
