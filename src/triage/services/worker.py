@@ -32,12 +32,13 @@ from psycopg2.pool import SimpleConnectionPool
 
 from triage.engine.matcher import evaluate
 from triage.engine.rules import load_rules, validate_rules
-from triage.models.rules import Email, EvaluationResult, RulesConfig
+from triage.models.rules import Email, EvaluationResult, PatternInfo, RulesConfig
 from triage.services.lifecycle import (
     LifecycleConfig,
     check_maintenance_needed,
     run_lifecycle_maintenance,
 )
+from triage.services.patterns import get_pattern_for_email
 
 
 class LLMError(Exception):
@@ -1076,6 +1077,20 @@ class TriageWorker:
                             else:
                                 headers_dict[lower_name] = value
 
+                # Look up pattern info if email is linked to a pattern
+                pattern_info: PatternInfo | None = None
+                pattern = get_pattern_for_email(conn, gmail_id)
+                if pattern and pattern.id is not None:
+                    pattern_info = PatternInfo(
+                        pattern_id=pattern.id,
+                        sender=pattern.sender,
+                        merchant=pattern.merchant,
+                        interval_type=pattern.interval_type.value,
+                        confidence=pattern.confidence,
+                        occurrence_count=pattern.occurrence_count,
+                        status=pattern.status.value,
+                    )
+
                 return Email(
                     id=row[0],
                     gmail_id=row[1],
@@ -1092,6 +1107,7 @@ class TriageWorker:
                     internal_date=internal_date,
                     attachment_filenames=attachment_filenames,
                     attachment_mime_types=attachment_mime_types,
+                    pattern_info=pattern_info,
                 )
         return None
 
