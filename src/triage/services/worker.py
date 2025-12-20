@@ -1087,24 +1087,27 @@ class TriageWorker:
                 # Pattern exists - just link this email to it
                 email_idx = target_group.gmail_ids.index(gmail_id)
 
-                # Get amount if available
+                # Get amount if available (lists are now parallel with gmail_ids)
                 amount = None
                 currency = None
                 if email_idx < len(target_group.amounts):
                     amt = target_group.amounts[email_idx]
-                    amount = amt.amount
-                    currency = amt.currency
+                    if amt is not None:
+                        amount = amt.amount
+                        currency = amt.currency
 
                 # Get email date if available
                 email_date = None
                 if email_idx < len(target_group.dates):
-                    try:
-                        parsed_date = date.fromisoformat(target_group.dates[email_idx])
-                        email_date = datetime.combine(
-                            parsed_date, datetime.min.time()
-                        ).replace(tzinfo=UTC)
-                    except (ValueError, TypeError):
-                        pass
+                    date_str = target_group.dates[email_idx]
+                    if date_str is not None:
+                        try:
+                            parsed_date = date.fromisoformat(date_str)
+                            email_date = datetime.combine(
+                                parsed_date, datetime.min.time()
+                            ).replace(tzinfo=UTC)
+                        except (ValueError, TypeError):
+                            pass
 
                 add_email_to_pattern(
                     conn, existing.id, gmail_id, amount, currency, email_date
@@ -1113,9 +1116,11 @@ class TriageWorker:
                 return get_pattern_by_sender_merchant(conn, from_addr, merchant)
 
             # No existing pattern - detect temporal pattern and create
-            # Parse dates once and index by position for reuse
+            # Parse dates once and index by position for reuse (skip None values)
             parsed_dates: dict[int, date] = {}
             for i, date_str in enumerate(target_group.dates):
+                if date_str is None:
+                    continue
                 try:
                     parsed_dates[i] = date.fromisoformat(date_str)
                 except (ValueError, TypeError):
@@ -1154,8 +1159,9 @@ class TriageWorker:
                 currency = None
                 if i < len(target_group.amounts):
                     amt = target_group.amounts[i]
-                    amount = amt.amount
-                    currency = amt.currency
+                    if amt is not None:
+                        amount = amt.amount
+                        currency = amt.currency
 
                 # Reuse already-parsed date
                 email_date = None
@@ -1177,7 +1183,7 @@ class TriageWorker:
             return get_pattern_by_sender_merchant(conn, from_addr, merchant)
 
         except Exception:
-            logger.warning(f"Pattern detection failed for {gmail_id}", exc_info=True)
+            logger.error(f"Pattern detection failed for {gmail_id}", exc_info=True)
             return None
 
     def _get_email_data(self, gmail_id: str) -> Email | None:

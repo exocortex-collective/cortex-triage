@@ -35,15 +35,19 @@ class SubjectMatch:
 
 @dataclass
 class SimilarityGroup:
-    """A group of similar emails from the same sender."""
+    """A group of similar emails from the same sender.
+
+    Note: gmail_ids, amounts, and dates lists are parallel - they have the same
+    length and corresponding indices refer to the same email.
+    """
 
     sender: str
     template_name: str
     template_pattern: str  # The regex or pattern used
     merchant: str | None  # Extracted merchant (if applicable)
     gmail_ids: list[str] = field(default_factory=list)
-    amounts: list[ExtractedAmount] = field(default_factory=list)
-    dates: list[str] = field(default_factory=list)  # ISO date strings
+    amounts: list[ExtractedAmount | None] = field(default_factory=list)
+    dates: list[str | None] = field(default_factory=list)  # ISO date strings or None
 
 
 @dataclass
@@ -241,16 +245,18 @@ def group_by_similarity(
         group = groups[key]
         group.gmail_ids.append(email["gmail_id"])
 
-        if amount:
-            group.amounts.append(amount)
+        # Always append to keep lists parallel with gmail_ids
+        group.amounts.append(amount)
 
+        date_str: str | None = None
         if date_obj := email.get("date_header"):
             if isinstance(date_obj, datetime):
-                group.dates.append(date_obj.date().isoformat())
+                date_str = date_obj.date().isoformat()
             elif isinstance(date_obj, date):
-                group.dates.append(date_obj.isoformat())
+                date_str = date_obj.isoformat()
             else:
-                group.dates.append(str(date_obj))
+                date_str = str(date_obj)
+        group.dates.append(date_str)
 
     return list(groups.values())
 
