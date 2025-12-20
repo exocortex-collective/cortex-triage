@@ -12,7 +12,7 @@ import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from typing import Any
 
 import httpx
@@ -1058,8 +1058,6 @@ class TriageWorker:
         Returns:
             Created or updated EmailPattern, or None if no pattern detected
         """
-        from datetime import date as date_type
-
         try:
             # Analyze sender's emails for similarity groups
             groups = analyze_sender(conn, from_addr, limit=100)
@@ -1101,15 +1099,14 @@ class TriageWorker:
                     currency = amt.currency
 
                 add_email_to_pattern(conn, existing.id, gmail_id, amount, currency)
-                conn.commit()
                 return existing
 
             # No existing pattern - detect temporal pattern and create
             # Convert date strings to date objects
-            dates: list[date_type] = []
+            dates: list[date] = []
             for date_str in target_group.dates:
                 try:
-                    dates.append(date_type.fromisoformat(date_str))
+                    dates.append(date.fromisoformat(date_str))
                 except (ValueError, TypeError):
                     continue
 
@@ -1122,8 +1119,6 @@ class TriageWorker:
                 return None
 
             # Create the pattern
-            from datetime import UTC, datetime
-
             first_seen = datetime.combine(min(dates), datetime.min.time()).replace(
                 tzinfo=UTC
             )
@@ -1153,7 +1148,7 @@ class TriageWorker:
                 email_date = None
                 if i < len(target_group.dates):
                     try:
-                        parsed_date = date_type.fromisoformat(target_group.dates[i])
+                        parsed_date = date.fromisoformat(target_group.dates[i])
                         email_date = datetime.combine(
                             parsed_date, datetime.min.time()
                         ).replace(tzinfo=UTC)
@@ -1164,8 +1159,6 @@ class TriageWorker:
                     conn, pattern.id, gid, amount, currency, email_date
                 )
 
-            conn.commit()
-
             logger.info(
                 f"Created pattern for {from_addr}/{merchant}: "
                 f"{temporal.interval_type.value}, {len(target_group.gmail_ids)} emails"
@@ -1174,9 +1167,8 @@ class TriageWorker:
             # Refresh pattern to get updated stats
             return get_pattern_by_sender_merchant(conn, from_addr, merchant)
 
-        except Exception as e:
-            logger.warning(f"Pattern detection failed for {gmail_id}: {e}")
-            conn.rollback()
+        except Exception:
+            logger.warning(f"Pattern detection failed for {gmail_id}", exc_info=True)
             return None
 
     def _get_email_data(self, gmail_id: str) -> Email | None:
