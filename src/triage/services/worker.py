@@ -1250,6 +1250,10 @@ class TriageWorker:
                 # If no existing pattern, try to detect one from sender's emails
                 if not pattern and from_addr:
                     pattern = self._detect_or_create_pattern(conn, gmail_id, from_addr)
+                    # Commit pattern creation immediately so it persists
+                    # regardless of what happens during triage evaluation
+                    if pattern:
+                        conn.commit()
 
                 if pattern and pattern.id is not None:
                     pattern_info = PatternInfo(
