@@ -4,7 +4,14 @@ from datetime import datetime
 from typing import TYPE_CHECKING
 from unittest.mock import MagicMock, patch
 
-from triage.models.patterns import EmailPattern, IntervalType, PatternStatus
+from triage.models.patterns import (
+    EmailPattern,
+    IntervalParams,
+    IntervalType,
+    PatternStatus,
+)
+from triage.services.similarity import SimilarityGroup
+from triage.services.temporal import TemporalPattern
 
 if TYPE_CHECKING:
     from triage.services.worker import TriageWorker
@@ -237,10 +244,6 @@ class TestDetectOrCreatePattern:
         mock_get_pattern: MagicMock,
     ) -> None:
         """Should create a new pattern when threshold is met and temporal detected."""
-        from triage.models.patterns import EmailPattern, IntervalType
-        from triage.services.similarity import SimilarityGroup
-        from triage.services.temporal import TemporalPattern
-
         # Setup: 3 emails in group (meets threshold of 3)
         mock_analyze.return_value = [
             SimilarityGroup(
@@ -260,7 +263,7 @@ class TestDetectOrCreatePattern:
         # Temporal pattern detected
         mock_detect.return_value = TemporalPattern(
             interval_type=IntervalType.MONTHLY,
-            interval_params={"day_of_month": 1},
+            interval_params=IntervalParams(day=1),
             confidence=0.9,
             next_expected=None,
         )
@@ -295,9 +298,6 @@ class TestDetectOrCreatePattern:
         mock_get_pattern: MagicMock,
     ) -> None:
         """Should link all emails in group to existing pattern."""
-        from triage.models.patterns import EmailPattern, IntervalType
-        from triage.services.similarity import SimilarityGroup
-
         mock_analyze.return_value = [
             SimilarityGroup(
                 sender="paypal@paypal.com",
@@ -330,8 +330,6 @@ class TestDetectOrCreatePattern:
     @patch("triage.services.worker.analyze_sender")
     def test_returns_none_when_below_threshold(self, mock_analyze: MagicMock) -> None:
         """Should return None when group has fewer than threshold emails."""
-        from triage.services.similarity import SimilarityGroup
-
         # Only 2 emails - below threshold of 3
         mock_analyze.return_value = [
             SimilarityGroup(
@@ -361,8 +359,6 @@ class TestDetectOrCreatePattern:
         mock_get_pattern: MagicMock,
     ) -> None:
         """Should return None when no temporal pattern can be detected."""
-        from triage.services.similarity import SimilarityGroup
-
         mock_analyze.return_value = [
             SimilarityGroup(
                 sender="random@example.com",
@@ -389,8 +385,6 @@ class TestDetectOrCreatePattern:
         self, mock_analyze: MagicMock
     ) -> None:
         """Should return None when email is not in any similarity group."""
-        from triage.services.similarity import SimilarityGroup
-
         # Group exists but doesn't contain the email we're checking
         mock_analyze.return_value = [
             SimilarityGroup(
@@ -430,4 +424,321 @@ class TestDetectOrCreatePattern:
             self.mock_conn, "email1", "test@example.com"
         )
 
+        assert result is None
+
+    # Pattern Quality Filter Tests
+
+    @patch("triage.services.worker.get_pattern_by_sender_merchant")
+    @patch("triage.services.worker.detect_pattern")
+    @patch("triage.services.worker.analyze_sender")
+    def test_filters_irregular_unknown_pattern(
+        self,
+        mock_analyze: MagicMock,
+        mock_detect: MagicMock,
+        mock_get_pattern: MagicMock,
+    ) -> None:
+        """Should filter out irregular patterns with unknown merchant."""
+        # 3 emails with unknown merchant
+        mock_analyze.return_value = [
+            SimilarityGroup(
+                sender="newsletter@example.com",
+                template_name="unknown",
+                template_pattern="",
+                merchant="unknown",
+                gmail_ids=["email1", "email2", "email3"],
+                amounts=[None, None, None],
+                dates=["2025-10-15", "2025-11-02", "2025-12-10"],
+            )
+        ]
+
+        mock_get_pattern.return_value = None
+
+        # Irregular pattern with low confidence
+        mock_detect.return_value = TemporalPattern(
+            interval_type=IntervalType.IRREGULAR,
+            interval_params=IntervalParams(),
+            confidence=0.25,  # Below 0.5 threshold
+            next_expected=None,
+        )
+
+        result = self.worker._detect_or_create_pattern(
+            self.mock_conn, "email1", "newsletter@example.com"
+        )
+
+        # Should be filtered (return None)
+        assert result is None
+
+    @patch("triage.services.worker.get_pattern_by_sender_merchant")
+    @patch("triage.services.worker.create_pattern")
+    @patch("triage.services.worker.add_email_to_pattern")
+    @patch("triage.services.worker.detect_pattern")
+    @patch("triage.services.worker.analyze_sender")
+    def test_allows_irregular_with_known_merchant(
+        self,
+        mock_analyze: MagicMock,
+        mock_detect: MagicMock,
+        mock_add_email: MagicMock,
+        mock_create: MagicMock,
+        mock_get_pattern: MagicMock,
+    ) -> None:
+        """Should allow irregular patterns when merchant is known."""
+        mock_analyze.return_value = [
+            SimilarityGroup(
+                sender="orders@amazon.com",
+                template_name="amazon_order",
+                template_pattern="",
+                merchant="Amazon",
+                gmail_ids=["email1", "email2", "email3"],
+                amounts=[None, None, None],
+                dates=["2025-10-15", "2025-11-02", "2025-12-10"],
+            )
+        ]
+
+        mock_get_pattern.return_value = None
+
+        # Irregular pattern but with known merchant
+        mock_detect.return_value = TemporalPattern(
+            interval_type=IntervalType.IRREGULAR,
+            interval_params=IntervalParams(),
+            confidence=0.25,
+            next_expected=None,
+        )
+
+        created_pattern = EmailPattern(
+            id=1,
+            sender="orders@amazon.com",
+            merchant="Amazon",
+            interval_type=IntervalType.IRREGULAR,
+        )
+        mock_create.return_value = created_pattern
+        mock_get_pattern.side_effect = [None, created_pattern]
+
+        result = self.worker._detect_or_create_pattern(
+            self.mock_conn, "email1", "orders@amazon.com"
+        )
+
+        # Should be created (merchant is known)
+        assert result is not None
+        assert result.merchant == "Amazon"
+        mock_create.assert_called_once()
+
+    @patch("triage.services.worker.get_pattern_by_sender_merchant")
+    @patch("triage.services.worker.create_pattern")
+    @patch("triage.services.worker.add_email_to_pattern")
+    @patch("triage.services.worker.detect_pattern")
+    @patch("triage.services.worker.analyze_sender")
+    def test_allows_monthly_with_unknown_merchant(
+        self,
+        mock_analyze: MagicMock,
+        mock_detect: MagicMock,
+        mock_add_email: MagicMock,
+        mock_create: MagicMock,
+        mock_get_pattern: MagicMock,
+    ) -> None:
+        """Should allow monthly patterns even with unknown merchant."""
+        mock_analyze.return_value = [
+            SimilarityGroup(
+                sender="noreply@glassdoor.com",
+                template_name="unknown",
+                template_pattern="",
+                merchant="unknown",
+                gmail_ids=["email1", "email2", "email3"],
+                amounts=[None, None, None],
+                dates=["2025-10-15", "2025-11-15", "2025-12-15"],
+            )
+        ]
+
+        mock_get_pattern.return_value = None
+
+        # Monthly pattern with high confidence
+        mock_detect.return_value = TemporalPattern(
+            interval_type=IntervalType.MONTHLY,
+            interval_params=IntervalParams(day=15),
+            confidence=0.9,  # High confidence
+            next_expected=None,
+        )
+
+        created_pattern = EmailPattern(
+            id=1,
+            sender="noreply@glassdoor.com",
+            merchant="unknown",
+            interval_type=IntervalType.MONTHLY,
+        )
+        mock_create.return_value = created_pattern
+        mock_get_pattern.side_effect = [None, created_pattern]
+
+        result = self.worker._detect_or_create_pattern(
+            self.mock_conn, "email1", "noreply@glassdoor.com"
+        )
+
+        # Should be created (monthly pattern with confidence >= 0.5)
+        assert result is not None
+        mock_create.assert_called_once()
+
+    @patch("triage.services.worker.get_pattern_by_sender_merchant")
+    @patch("triage.services.worker.create_pattern")
+    @patch("triage.services.worker.add_email_to_pattern")
+    @patch("triage.services.worker.detect_pattern")
+    @patch("triage.services.worker.analyze_sender")
+    def test_allows_weekly_with_unknown_merchant(
+        self,
+        mock_analyze: MagicMock,
+        mock_detect: MagicMock,
+        mock_add_email: MagicMock,
+        mock_create: MagicMock,
+        mock_get_pattern: MagicMock,
+    ) -> None:
+        """Should allow weekly patterns even with unknown merchant."""
+        mock_analyze.return_value = [
+            SimilarityGroup(
+                sender="steve@theweekendwoodworker.com",
+                template_name="unknown",
+                template_pattern="",
+                merchant="unknown",
+                gmail_ids=["email1", "email2", "email3"],
+                amounts=[None, None, None],
+                dates=["2025-12-01", "2025-12-08", "2025-12-15"],
+            )
+        ]
+
+        mock_get_pattern.return_value = None
+
+        # Weekly pattern with high confidence
+        mock_detect.return_value = TemporalPattern(
+            interval_type=IntervalType.WEEKLY,
+            interval_params=IntervalParams(day_of_week=0),
+            confidence=0.85,
+            next_expected=None,
+        )
+
+        created_pattern = EmailPattern(
+            id=1,
+            sender="steve@theweekendwoodworker.com",
+            merchant="unknown",
+            interval_type=IntervalType.WEEKLY,
+        )
+        mock_create.return_value = created_pattern
+        mock_get_pattern.side_effect = [None, created_pattern]
+
+        result = self.worker._detect_or_create_pattern(
+            self.mock_conn, "email1", "steve@theweekendwoodworker.com"
+        )
+
+        # Should be created (weekly pattern with confidence >= 0.5)
+        assert result is not None
+        mock_create.assert_called_once()
+
+    @patch("triage.services.worker.get_pattern_by_sender_merchant")
+    @patch("triage.services.worker.add_email_to_pattern")
+    @patch("triage.services.worker.analyze_sender")
+    def test_filter_bypassed_for_existing_pattern(
+        self,
+        mock_analyze: MagicMock,
+        mock_add_email: MagicMock,
+        mock_get_pattern: MagicMock,
+    ) -> None:
+        """Filter should be bypassed when pattern already exists."""
+        mock_analyze.return_value = [
+            SimilarityGroup(
+                sender="newsletter@example.com",
+                template_name="unknown",
+                template_pattern="",
+                merchant="unknown",
+                gmail_ids=["email1", "email2", "email3"],
+                amounts=[None, None, None],
+                dates=["2025-10-15", "2025-11-02", "2025-12-10"],
+            )
+        ]
+
+        # Existing pattern (even if irregular + unknown)
+        existing_pattern = EmailPattern(
+            id=42,
+            sender="newsletter@example.com",
+            merchant="unknown",
+            interval_type=IntervalType.IRREGULAR,
+        )
+        mock_get_pattern.return_value = existing_pattern
+
+        result = self.worker._detect_or_create_pattern(
+            self.mock_conn, "email1", "newsletter@example.com"
+        )
+
+        # Should link to existing pattern (filter bypassed)
+        assert result is not None
+        assert result.id == 42
+
+    @patch("triage.services.worker.get_pattern_by_sender_merchant")
+    @patch("triage.services.worker.detect_pattern")
+    @patch("triage.services.worker.analyze_sender")
+    def test_filters_empty_string_merchant(
+        self,
+        mock_analyze: MagicMock,
+        mock_detect: MagicMock,
+        mock_get_pattern: MagicMock,
+    ) -> None:
+        """Should filter patterns with empty string merchant."""
+        mock_analyze.return_value = [
+            SimilarityGroup(
+                sender="test@example.com",
+                template_name="unknown",
+                template_pattern="",
+                merchant="",  # Empty string
+                gmail_ids=["email1", "email2", "email3"],
+                amounts=[None, None, None],
+                dates=["2025-10-15", "2025-11-02", "2025-12-10"],
+            )
+        ]
+
+        mock_get_pattern.return_value = None
+
+        mock_detect.return_value = TemporalPattern(
+            interval_type=IntervalType.IRREGULAR,
+            interval_params=IntervalParams(),
+            confidence=0.25,
+            next_expected=None,
+        )
+
+        result = self.worker._detect_or_create_pattern(
+            self.mock_conn, "email1", "test@example.com"
+        )
+
+        # Should be filtered (empty merchant treated as unknown)
+        assert result is None
+
+    @patch("triage.services.worker.get_pattern_by_sender_merchant")
+    @patch("triage.services.worker.detect_pattern")
+    @patch("triage.services.worker.analyze_sender")
+    def test_filters_none_merchant(
+        self,
+        mock_analyze: MagicMock,
+        mock_detect: MagicMock,
+        mock_get_pattern: MagicMock,
+    ) -> None:
+        """Should filter patterns with None merchant (becomes 'unknown')."""
+        mock_analyze.return_value = [
+            SimilarityGroup(
+                sender="test@example.com",
+                template_name="unknown",
+                template_pattern="",
+                merchant=None,  # Will become "unknown" in worker
+                gmail_ids=["email1", "email2", "email3"],
+                amounts=[None, None, None],
+                dates=["2025-10-15", "2025-11-02", "2025-12-10"],
+            )
+        ]
+
+        mock_get_pattern.return_value = None
+
+        mock_detect.return_value = TemporalPattern(
+            interval_type=IntervalType.IRREGULAR,
+            interval_params=IntervalParams(),
+            confidence=0.25,
+            next_expected=None,
+        )
+
+        result = self.worker._detect_or_create_pattern(
+            self.mock_conn, "email1", "test@example.com"
+        )
+
+        # Should be filtered (None merchant becomes "unknown")
         assert result is None
