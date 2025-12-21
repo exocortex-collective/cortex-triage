@@ -97,6 +97,11 @@ VISIBILITY_TIMEOUT_MINUTES = 5
 # Maximum retry attempts before a job is considered dead letter
 MAX_ATTEMPTS = 3
 
+# Pattern quality filter: confidence threshold for irregular patterns
+# Irregular patterns with confidence below this threshold are only created
+# if the merchant is known (not "unknown")
+PATTERN_QUALITY_CONFIDENCE_THRESHOLD = 0.5
+
 
 class OllamaClient:
     """Client for Ollama LLM calls."""
@@ -1141,7 +1146,9 @@ class TriageWorker:
             # - Can't identify the sender's purpose (unknown merchant)
             # - Can't detect anomalies (no baseline to compare against)
             merchant_known = merchant and merchant != "unknown"
-            high_confidence_interval = temporal.confidence >= 0.5
+            high_confidence_interval = (
+                temporal.confidence >= PATTERN_QUALITY_CONFIDENCE_THRESHOLD
+            )
 
             if not merchant_known and not high_confidence_interval:
                 logger.debug(
