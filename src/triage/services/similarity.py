@@ -19,8 +19,8 @@ from psycopg2.extras import RealDictCursor
 
 logger = logging.getLogger(__name__)
 
-# DuckDB API URL for fetching email bodies
-DUCKDB_API_URL = os.environ.get("DUCKDB_API_URL", "http://10.5.2.21:8081")
+# DuckDB API URL for fetching email bodies (required for body extraction)
+DUCKDB_API_URL = os.environ.get("DUCKDB_API_URL")
 
 
 @dataclass
@@ -218,8 +218,10 @@ def fetch_body_text(gmail_id: str) -> str | None:
         gmail_id: Gmail message ID
 
     Returns:
-        Plain text body content, or None if not available
+        Plain text body content, or None if not available or API not configured
     """
+    if not DUCKDB_API_URL:
+        return None
     try:
         response = requests.get(
             f"{DUCKDB_API_URL}/mail_text",
