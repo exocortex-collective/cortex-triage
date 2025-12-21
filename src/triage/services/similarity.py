@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from decimal import Decimal
@@ -88,6 +89,8 @@ class BodyPattern:
     amount_group: int = 1  # Capture group for amount
     currency_regex: str | None = None  # Regex to extract currency from body
     currency_group: int = 1  # Capture group for currency
+    # Custom extractor function (takes body text, returns merchant name)
+    merchant_extractor: Callable[[str], str | None] | None = None
 
 
 # =============================================================================
@@ -203,10 +206,9 @@ BODY_PATTERNS: list[BodyPattern] = [
         name="apple_receipt",
         sender_regex=r"no_reply@email\.apple\.com",
         subject_regex=r"Your receipt from Apple\.",
-        # merchant_regex not used - we use custom extraction
-        # Amount is in format "| $X.XX"
         amount_regex=r"\|\s*\$(\d+\.?\d*)",
         amount_group=1,
+        merchant_extractor=_extract_apple_merchant,
     ),
 ]
 
@@ -274,9 +276,9 @@ def match_body(
         # Pattern matches - try to extract from body
         result = SubjectMatch(template_name=p.name)
 
-        # Use custom extractors for specific patterns
-        if p.name == "apple_receipt":
-            result.merchant = _extract_apple_merchant(body_text)
+        # Use custom extractor if provided, otherwise use regex
+        if p.merchant_extractor:
+            result.merchant = p.merchant_extractor(body_text)
         elif p.merchant_regex:
             match = re.search(p.merchant_regex, body_text, re.IGNORECASE)
             if match and p.merchant_group > 0:
