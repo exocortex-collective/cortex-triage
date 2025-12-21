@@ -13,6 +13,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from decimal import Decimal
+from typing import Any
 
 import psycopg2
 import requests
@@ -24,7 +25,10 @@ logger = logging.getLogger(__name__)
 DUCKDB_API_URL = os.environ.get("DUCKDB_API_URL")
 
 # Ollama URL for LLM-based extraction
-OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://10.5.2.12:11434")
+OLLAMA_URL = os.environ.get("OLLAMA_URL")
+
+# Ollama model for extraction (default: qwen2.5:3b - fast and good at extraction)
+OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "qwen2.5:3b")
 
 
 @dataclass
@@ -195,7 +199,7 @@ Product name:"""
             response = requests.post(
                 f"{OLLAMA_URL}/api/generate",
                 json={
-                    "model": "qwen2.5:3b",
+                    "model": OLLAMA_MODEL,
                     "prompt": prompt,
                     "stream": False,
                     "options": {"temperature": 0.1},
@@ -204,15 +208,18 @@ Product name:"""
             )
 
             if response.status_code == 200:
-                result: dict[str, str] = response.json()
-                merchant = result.get("response", "").strip()
+                result: dict[str, Any] = response.json()
+                merchant_raw = result.get("response", "")
+                if not isinstance(merchant_raw, str):
+                    return None
+                merchant = merchant_raw.strip()
                 # Clean up common LLM artifacts
                 merchant = merchant.strip('"').strip("'").strip()
                 if merchant and len(merchant) > 2 and len(merchant) < 100:
                     logger.debug(f"LLM extracted Apple merchant: {merchant}")
                     return merchant
 
-        except Exception as e:
+        except requests.RequestException as e:
             logger.warning(f"LLM extraction failed for Apple receipt: {e}")
 
     # Fallback to regex patterns
