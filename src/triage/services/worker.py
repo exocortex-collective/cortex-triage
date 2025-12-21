@@ -1146,11 +1146,11 @@ class TriageWorker:
             # - Can't identify the sender's purpose (unknown merchant)
             # - Can't detect anomalies (no baseline to compare against)
             merchant_known = bool(merchant) and merchant != "unknown"
-            high_confidence_interval = (
+            has_high_confidence = (
                 temporal.confidence >= PATTERN_QUALITY_CONFIDENCE_THRESHOLD
             )
 
-            if not merchant_known and not high_confidence_interval:
+            if not merchant_known and not has_high_confidence:
                 logger.debug(
                     f"Skipping pattern creation for {from_addr}: "
                     f"merchant='{merchant}', interval={temporal.interval_type.value}, "
