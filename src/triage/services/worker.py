@@ -97,6 +97,11 @@ VISIBILITY_TIMEOUT_MINUTES = 5
 # Maximum retry attempts before a job is considered dead letter
 MAX_ATTEMPTS = 3
 
+# Pattern quality filter: confidence threshold for irregular patterns
+# Irregular patterns with confidence below this threshold are only created
+# if the merchant is known (not "unknown")
+PATTERN_QUALITY_CONFIDENCE_THRESHOLD = 0.5
+
 
 class OllamaClient:
     """Client for Ollama LLM calls."""
@@ -1132,6 +1137,26 @@ class TriageWorker:
             dates_list = list(parsed_dates.values())
             temporal = detect_pattern(dates_list)
             if not temporal:
+                return None
+
+            # Pattern Quality Filter
+            # Only create patterns that provide value for prediction.
+            # Irregular patterns with unknown merchants are noise:
+            # - Can't predict when next email will arrive (irregular timing)
+            # - Can't identify the sender's purpose (unknown merchant)
+            # - Can't detect anomalies (no baseline to compare against)
+            merchant_known = merchant and merchant != "unknown"
+            has_high_confidence = (
+                temporal.confidence >= PATTERN_QUALITY_CONFIDENCE_THRESHOLD
+            )
+
+            if not merchant_known and not has_high_confidence:
+                logger.debug(
+                    f"Skipping pattern creation for {from_addr}: "
+                    f"merchant='{merchant}', interval={temporal.interval_type.value}, "
+                    f"confidence={temporal.confidence:.2f} "
+                    f"(pattern would provide no value)"
+                )
                 return None
 
             # Create the pattern
