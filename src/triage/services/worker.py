@@ -1145,7 +1145,7 @@ class TriageWorker:
             # - Can't predict when next email will arrive (irregular timing)
             # - Can't identify the sender's purpose (unknown merchant)
             # - Can't detect anomalies (no baseline to compare against)
-            merchant_known = merchant != "unknown"
+            merchant_known = bool(merchant) and merchant != "unknown"
             high_confidence_interval = (
                 temporal.confidence >= PATTERN_QUALITY_CONFIDENCE_THRESHOLD
             )
