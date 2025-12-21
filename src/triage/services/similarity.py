@@ -188,45 +188,50 @@ def _extract_apple_merchant(body_text: str) -> str | None:
             product_match = re.search(
                 r"\|\s*(.+?)(?:Renews|\n|$)", body_text, re.IGNORECASE
             )
-            if product_match:
-                product_line = product_match.group(1).strip()
+            if not product_match:
+                # No clean product line found - skip LLM and use regex fallback
+                logger.debug(
+                    "Could not find product line for LLM extraction, "
+                    "falling back to regex."
+                )
             else:
-                # Fallback to first 500 chars if no table marker found
-                product_line = body_text[:500]
+                product_line = product_match.group(1).strip()
 
-            # Format prompt from built-in template
-            prompt = APPLE_MERCHANT_PROMPT_TEMPLATE.format(product_line=product_line)
-            # Remove indentation from prompt
-            prompt = textwrap.dedent(prompt).strip()
+                # Format prompt from built-in template
+                prompt = APPLE_MERCHANT_PROMPT_TEMPLATE.format(
+                    product_line=product_line
+                )
+                # Remove indentation from prompt
+                prompt = textwrap.dedent(prompt).strip()
 
-            response = requests.post(
-                f"{OLLAMA_URL.rstrip('/')}/api/generate",
-                json={
-                    "model": OLLAMA_MODEL,
-                    "prompt": prompt,
-                    "stream": False,
-                    "options": {"temperature": 0.1},
-                },
-                timeout=5,
-            )
+                response = requests.post(
+                    f"{OLLAMA_URL.rstrip('/')}/api/generate",
+                    json={
+                        "model": OLLAMA_MODEL,
+                        "prompt": prompt,
+                        "stream": False,
+                        "options": {"temperature": 0.1},
+                    },
+                    timeout=15,
+                )
 
-            if response.status_code == 200:
-                result: dict[str, Any] = response.json()
-                merchant_raw = result.get("response", "")
-                if not isinstance(merchant_raw, str):
-                    return None
-                merchant = merchant_raw.strip()
-                # Clean up common LLM artifacts
-                merchant = merchant.strip('"').strip("'").strip()
-                if (
-                    merchant
-                    and len(merchant) > MIN_MERCHANT_LENGTH
-                    and len(merchant) < MAX_MERCHANT_LENGTH
-                ):
-                    logger.debug(f"LLM extracted Apple merchant: {merchant}")
-                    return merchant
+                if response.status_code == 200:
+                    result: dict[str, Any] = response.json()
+                    merchant_raw = result.get("response", "")
+                    if not isinstance(merchant_raw, str):
+                        return None
+                    merchant = merchant_raw.strip()
+                    # Clean up common LLM artifacts
+                    merchant = merchant.strip('"').strip("'").strip()
+                    if (
+                        merchant
+                        and len(merchant) > MIN_MERCHANT_LENGTH
+                        and len(merchant) < MAX_MERCHANT_LENGTH
+                    ):
+                        logger.debug(f"LLM extracted Apple merchant: {merchant}")
+                        return merchant
 
-        except requests.RequestException as e:
+        except (requests.RequestException, ValueError) as e:
             logger.warning(f"LLM extraction failed for Apple receipt: {e}")
 
     # Fallback to regex patterns
