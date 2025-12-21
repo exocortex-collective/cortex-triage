@@ -23,6 +23,9 @@ logger = logging.getLogger(__name__)
 # DuckDB API URL for fetching email bodies (required for body extraction)
 DUCKDB_API_URL = os.environ.get("DUCKDB_API_URL")
 
+# Ollama URL for LLM-based extraction
+OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://10.5.2.12:11434")
+
 
 @dataclass
 class ExtractedAmount:
@@ -152,13 +155,67 @@ STATUS_PATTERNS: list[tuple[str, str]] = [
 
 
 def _extract_apple_merchant(body_text: str) -> str | None:
-    """Extract product name from Apple receipt body.
+    """Extract product name from Apple receipt body using LLM.
+
+    Uses Qwen to parse varied Apple receipt formats for subscriptions and purchases.
+    Falls back to regex patterns if LLM extraction fails.
 
     Examples:
-        "| iCloudiCloud+ with 200 GB (Monthly)" -> "iCloud+ 200GB"
-        "| Plex: Stream Live TV ChannelsMonthly Plex Pass" -> "Plex Pass"
-        "| AppleCare+...IPAD MINI 5..." -> "AppleCare+ iPad Mini"
+        "TIDAL Music: HiFi Sound" -> "TIDAL Music"
+        "iCloud+ with 200 GB" -> "iCloud+ 200GB"
+        "Plex: Stream Live TV Channels" -> "Plex Pass"
     """
+    # Try LLM extraction first
+    if OLLAMA_URL:
+        try:
+            # Extract just the product line from the receipt table
+            product_match = re.search(
+                r"\|\s*(.+?)(?:Renews|\n|$)", body_text, re.IGNORECASE
+            )
+            if product_match:
+                product_line = product_match.group(1).strip()
+            else:
+                # Fallback to first 500 chars if no table marker found
+                product_line = body_text[:500]
+
+            prompt = f"""Extract the product/service name from this Apple receipt line.
+Return ONLY the product name, nothing else. Be concise.
+
+Examples:
+"TIDAL Music: HiFi SoundTIDAL Family (Monthly)" -> "TIDAL Music"
+"iCloud+ with 200 GB (Monthly)" -> "iCloud+ 200GB"
+"Plex: Stream Live TV ChannelsMonthly Plex Pass" -> "Plex Pass"
+"AppleCare+IPAD MINI 5,WIFI,64GB" -> "AppleCare+ iPad Mini"
+
+Receipt line:
+{product_line}
+
+Product name:"""
+
+            response = requests.post(
+                f"{OLLAMA_URL}/api/generate",
+                json={
+                    "model": "qwen2.5:3b",
+                    "prompt": prompt,
+                    "stream": False,
+                    "options": {"temperature": 0.1},
+                },
+                timeout=5,
+            )
+
+            if response.status_code == 200:
+                result: dict[str, str] = response.json()
+                merchant = result.get("response", "").strip()
+                # Clean up common LLM artifacts
+                merchant = merchant.strip('"').strip("'").strip()
+                if merchant and len(merchant) > 2 and len(merchant) < 100:
+                    logger.debug(f"LLM extracted Apple merchant: {merchant}")
+                    return merchant
+
+        except Exception as e:
+            logger.warning(f"LLM extraction failed for Apple receipt: {e}")
+
+    # Fallback to regex patterns
     # Try iCloud+ with storage size
     match = re.search(r"iCloud\+\s*with\s+(\d+)\s*GB", body_text, re.IGNORECASE)
     if match:
@@ -170,7 +227,6 @@ def _extract_apple_merchant(body_text: str) -> str | None:
 
     # Try AppleCare+ with device type
     if re.search(r"AppleCare\+", body_text, re.IGNORECASE):
-        # Look for device info: "IPAD MINI 5,WIFI..." or "IPAD PRO,11,CELL..."
         device_match = re.search(
             r"(IPAD\s+(?:MINI|PRO|AIR)|IPHONE|MACBOOK|APPLE\s+WATCH|MAC\s+\w+)",
             body_text,
@@ -178,16 +234,14 @@ def _extract_apple_merchant(body_text: str) -> str | None:
         )
         if device_match:
             device = device_match.group(1).title()
-            # Normalize spacing
             device = re.sub(r"\s+", " ", device).strip()
             return f"AppleCare+ {device}"
         return "AppleCare+"
 
-    # Fallback: try to extract first product after table marker
+    # Generic fallback: first product after table marker
     match = re.search(r"\|\s*([A-Za-z][A-Za-z0-9 \+]+)", body_text)
     if match:
         product = match.group(1).strip()
-        # Clean up: take first word(s) before common suffixes
         product = re.sub(
             r"\s*\(?(?:Monthly|Yearly|Technical|with)\b.*",
             "",
