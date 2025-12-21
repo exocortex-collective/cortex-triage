@@ -181,7 +181,7 @@ def _extract_apple_merchant(body_text: str) -> str | None:
         return "AppleCare+"
 
     # Fallback: try to extract first product after table marker
-    match = re.search(r"\|\s*([A-Za-z][A-Za-z0-9\s\+]+)", body_text)
+    match = re.search(r"\|\s*([A-Za-z][A-Za-z0-9 \+]+)", body_text)
     if match:
         product = match.group(1).strip()
         # Clean up: take first word(s) before common suffixes
@@ -229,8 +229,12 @@ def fetch_body_text(gmail_id: str) -> str | None:
             timeout=5,
         )
         if response.status_code == 200:
-            data: dict[str, str | None] = response.json()
-            return data.get("text")
+            try:
+                data: dict[str, str | None] = response.json()
+                return data.get("text")
+            except requests.exceptions.JSONDecodeError:
+                logger.warning("Failed to decode JSON from DuckDB API for %s", gmail_id)
+                return None
         elif response.status_code == 404:
             return None
         else:
@@ -241,7 +245,7 @@ def fetch_body_text(gmail_id: str) -> str | None:
             )
             return None
     except requests.RequestException as e:
-        logger.warning("Failed to fetch body from DuckDB API: %s", e)
+        logger.warning("Failed to fetch body from DuckDB API for %s: %s", gmail_id, e)
         return None
 
 
