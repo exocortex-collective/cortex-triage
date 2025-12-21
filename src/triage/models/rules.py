@@ -424,6 +424,13 @@ class ClassificationPrompt(BaseModel):
     model: str = "qwen2.5:7b"
 
 
+class BodyExtractionPrompt(BaseModel):
+    """A prompt template for extracting structured data from email bodies."""
+
+    template: str
+    model: str = "qwen2.5:3b"
+
+
 # Built-in classification prompts as raw dicts (single source of truth)
 # Used by both _default_prompts() and load_rules() for merging
 BUILTIN_PROMPTS_DATA: dict[str, dict[str, Any]] = {
@@ -458,6 +465,35 @@ def _default_prompts() -> dict[str, ClassificationPrompt]:
     return {
         version: ClassificationPrompt.model_validate(data)
         for version, data in BUILTIN_PROMPTS_DATA.items()
+    }
+
+
+# Built-in body extraction prompts
+BUILTIN_BODY_EXTRACTION_PROMPTS_DATA: dict[str, dict[str, Any]] = {
+    "apple_merchant_v1": {
+        "template": """Extract the product/service name from this Apple receipt line.
+Return ONLY the product name, nothing else. Be concise.
+
+Examples:
+"TIDAL Music: HiFi SoundTIDAL Family (Monthly)" -> "TIDAL Music"
+"iCloud+ with 200 GB (Monthly)" -> "iCloud+ 200GB"
+"Plex: Stream Live TV ChannelsMonthly Plex Pass" -> "Plex Pass"
+"AppleCare+IPAD MINI 5,WIFI,64GB" -> "AppleCare+ iPad Mini"
+
+Receipt line:
+{product_line}
+
+Product name:""",
+        "model": "qwen2.5:3b",
+    },
+}
+
+
+def _default_body_extraction_prompts() -> dict[str, BodyExtractionPrompt]:
+    """Return default body extraction prompts dict."""
+    return {
+        version: BodyExtractionPrompt.model_validate(data)
+        for version, data in BUILTIN_BODY_EXTRACTION_PROMPTS_DATA.items()
     }
 
 
@@ -560,6 +596,9 @@ class RulesConfig(BaseModel):
     intents: dict[str, IntentConfig] = Field(default_factory=dict)
     email_categories: dict[str, EmailCategoryConfig] = Field(default_factory=dict)
     prompts: dict[str, ClassificationPrompt] = Field(default_factory=_default_prompts)
+    body_extraction_prompts: dict[str, BodyExtractionPrompt] = Field(
+        default_factory=_default_body_extraction_prompts
+    )
     chains: dict[str, list[Rule]] = Field(default_factory=dict)
 
 

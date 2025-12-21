@@ -9,19 +9,38 @@ from __future__ import annotations
 import logging
 import os
 import re
+import textwrap
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from decimal import Decimal
+from typing import Any
 
 import psycopg2
 import requests
 from psycopg2.extras import RealDictCursor
 
+from triage.models.rules import BUILTIN_BODY_EXTRACTION_PROMPTS_DATA
+
 logger = logging.getLogger(__name__)
 
 # DuckDB API URL for fetching email bodies (required for body extraction)
 DUCKDB_API_URL = os.environ.get("DUCKDB_API_URL")
+
+# Ollama URL for LLM-based extraction (required for LLM features)
+OLLAMA_URL = os.environ.get("OLLAMA_URL")
+
+# Ollama model for extraction (default: qwen2.5:3b - fast and good at extraction)
+OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "qwen2.5:3b")
+
+# Merchant name validation bounds
+MIN_MERCHANT_LENGTH = 2  # Minimum chars for valid merchant name
+MAX_MERCHANT_LENGTH = 100  # Maximum chars for valid merchant name
+
+# Get built-in Apple merchant extraction prompt
+APPLE_MERCHANT_PROMPT_TEMPLATE = BUILTIN_BODY_EXTRACTION_PROMPTS_DATA[
+    "apple_merchant_v1"
+]["template"]
 
 
 @dataclass
@@ -152,13 +171,70 @@ STATUS_PATTERNS: list[tuple[str, str]] = [
 
 
 def _extract_apple_merchant(body_text: str) -> str | None:
-    """Extract product name from Apple receipt body.
+    """Extract product name from Apple receipt body using LLM.
+
+    Uses Qwen to parse varied Apple receipt formats for subscriptions and purchases.
+    Falls back to regex patterns if LLM extraction fails.
 
     Examples:
-        "| iCloudiCloud+ with 200 GB (Monthly)" -> "iCloud+ 200GB"
-        "| Plex: Stream Live TV ChannelsMonthly Plex Pass" -> "Plex Pass"
-        "| AppleCare+...IPAD MINI 5..." -> "AppleCare+ iPad Mini"
+        "TIDAL Music: HiFi Sound" -> "TIDAL Music"
+        "iCloud+ with 200 GB" -> "iCloud+ 200GB"
+        "Plex: Stream Live TV Channels" -> "Plex Pass"
     """
+    # Try LLM extraction first
+    if OLLAMA_URL:
+        try:
+            # Extract just the product line from the receipt table
+            product_match = re.search(
+                r"\|\s*(.+?)(?:Renews|\n|$)", body_text, re.IGNORECASE
+            )
+            if not product_match:
+                # No clean product line found - skip LLM and use regex fallback
+                logger.debug(
+                    "Could not find product line for LLM extraction, "
+                    "falling back to regex."
+                )
+            else:
+                product_line = product_match.group(1).strip()
+
+                # Format prompt from built-in template
+                prompt = APPLE_MERCHANT_PROMPT_TEMPLATE.format(
+                    product_line=product_line
+                )
+                # Remove indentation from prompt
+                prompt = textwrap.dedent(prompt).strip()
+
+                response = requests.post(
+                    f"{OLLAMA_URL.rstrip('/')}/api/generate",
+                    json={
+                        "model": OLLAMA_MODEL,
+                        "prompt": prompt,
+                        "stream": False,
+                        "options": {"temperature": 0.1},
+                    },
+                    timeout=15,
+                )
+
+                if response.status_code == 200:
+                    result: dict[str, Any] = response.json()
+                    merchant_raw = result.get("response", "")
+                    if not isinstance(merchant_raw, str):
+                        return None
+                    merchant = merchant_raw.strip()
+                    # Clean up common LLM artifacts
+                    merchant = merchant.strip('"').strip("'").strip()
+                    if (
+                        merchant
+                        and len(merchant) > MIN_MERCHANT_LENGTH
+                        and len(merchant) < MAX_MERCHANT_LENGTH
+                    ):
+                        logger.debug(f"LLM extracted Apple merchant: {merchant}")
+                        return merchant
+
+        except (requests.RequestException, ValueError) as e:
+            logger.warning(f"LLM extraction failed for Apple receipt: {e}")
+
+    # Fallback to regex patterns
     # Try iCloud+ with storage size
     match = re.search(r"iCloud\+\s*with\s+(\d+)\s*GB", body_text, re.IGNORECASE)
     if match:
@@ -170,7 +246,6 @@ def _extract_apple_merchant(body_text: str) -> str | None:
 
     # Try AppleCare+ with device type
     if re.search(r"AppleCare\+", body_text, re.IGNORECASE):
-        # Look for device info: "IPAD MINI 5,WIFI..." or "IPAD PRO,11,CELL..."
         device_match = re.search(
             r"(IPAD\s+(?:MINI|PRO|AIR)|IPHONE|MACBOOK|APPLE\s+WATCH|MAC\s+\w+)",
             body_text,
@@ -178,16 +253,14 @@ def _extract_apple_merchant(body_text: str) -> str | None:
         )
         if device_match:
             device = device_match.group(1).title()
-            # Normalize spacing
             device = re.sub(r"\s+", " ", device).strip()
             return f"AppleCare+ {device}"
         return "AppleCare+"
 
-    # Fallback: try to extract first product after table marker
+    # Generic fallback: first product after table marker
     match = re.search(r"\|\s*([A-Za-z][A-Za-z0-9 \+]+)", body_text)
     if match:
         product = match.group(1).strip()
-        # Clean up: take first word(s) before common suffixes
         product = re.sub(
             r"\s*\(?(?:Monthly|Yearly|Technical|with)\b.*",
             "",
