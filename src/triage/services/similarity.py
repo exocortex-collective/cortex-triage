@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import textwrap
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import date, datetime
@@ -19,16 +20,27 @@ import psycopg2
 import requests
 from psycopg2.extras import RealDictCursor
 
+from triage.models.rules import BUILTIN_BODY_EXTRACTION_PROMPTS_DATA
+
 logger = logging.getLogger(__name__)
 
 # DuckDB API URL for fetching email bodies (required for body extraction)
 DUCKDB_API_URL = os.environ.get("DUCKDB_API_URL")
 
-# Ollama URL for LLM-based extraction
+# Ollama URL for LLM-based extraction (required for LLM features)
 OLLAMA_URL = os.environ.get("OLLAMA_URL")
 
 # Ollama model for extraction (default: qwen2.5:3b - fast and good at extraction)
 OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "qwen2.5:3b")
+
+# Merchant name validation bounds
+MIN_MERCHANT_LENGTH = 2  # Minimum chars for valid merchant name
+MAX_MERCHANT_LENGTH = 100  # Maximum chars for valid merchant name
+
+# Get built-in Apple merchant extraction prompt
+APPLE_MERCHANT_PROMPT_TEMPLATE = BUILTIN_BODY_EXTRACTION_PROMPTS_DATA[
+    "apple_merchant_v1"
+]["template"]
 
 
 @dataclass
@@ -182,22 +194,13 @@ def _extract_apple_merchant(body_text: str) -> str | None:
                 # Fallback to first 500 chars if no table marker found
                 product_line = body_text[:500]
 
-            prompt = f"""Extract the product/service name from this Apple receipt line.
-Return ONLY the product name, nothing else. Be concise.
-
-Examples:
-"TIDAL Music: HiFi SoundTIDAL Family (Monthly)" -> "TIDAL Music"
-"iCloud+ with 200 GB (Monthly)" -> "iCloud+ 200GB"
-"Plex: Stream Live TV ChannelsMonthly Plex Pass" -> "Plex Pass"
-"AppleCare+IPAD MINI 5,WIFI,64GB" -> "AppleCare+ iPad Mini"
-
-Receipt line:
-{product_line}
-
-Product name:"""
+            # Format prompt from built-in template
+            prompt = APPLE_MERCHANT_PROMPT_TEMPLATE.format(product_line=product_line)
+            # Remove indentation from prompt
+            prompt = textwrap.dedent(prompt).strip()
 
             response = requests.post(
-                f"{OLLAMA_URL}/api/generate",
+                f"{OLLAMA_URL.rstrip('/')}/api/generate",
                 json={
                     "model": OLLAMA_MODEL,
                     "prompt": prompt,
@@ -215,7 +218,11 @@ Product name:"""
                 merchant = merchant_raw.strip()
                 # Clean up common LLM artifacts
                 merchant = merchant.strip('"').strip("'").strip()
-                if merchant and len(merchant) > 2 and len(merchant) < 100:
+                if (
+                    merchant
+                    and len(merchant) > MIN_MERCHANT_LENGTH
+                    and len(merchant) < MAX_MERCHANT_LENGTH
+                ):
                     logger.debug(f"LLM extracted Apple merchant: {merchant}")
                     return merchant
 
