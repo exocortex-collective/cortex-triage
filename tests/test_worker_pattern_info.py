@@ -4,7 +4,12 @@ from datetime import datetime
 from typing import TYPE_CHECKING
 from unittest.mock import MagicMock, patch
 
-from triage.models.patterns import EmailPattern, IntervalType, PatternStatus
+from triage.models.patterns import (
+    EmailPattern,
+    IntervalParams,
+    IntervalType,
+    PatternStatus,
+)
 from triage.services.similarity import SimilarityGroup
 from triage.services.temporal import TemporalPattern
 
@@ -258,7 +263,7 @@ class TestDetectOrCreatePattern:
         # Temporal pattern detected
         mock_detect.return_value = TemporalPattern(
             interval_type=IntervalType.MONTHLY,
-            interval_params={"day_of_month": 1},
+            interval_params=IntervalParams(day=1),
             confidence=0.9,
             next_expected=None,
         )
@@ -451,7 +456,7 @@ class TestDetectOrCreatePattern:
         # Irregular pattern with low confidence
         mock_detect.return_value = TemporalPattern(
             interval_type=IntervalType.IRREGULAR,
-            interval_params={},
+            interval_params=IntervalParams(),
             confidence=0.25,  # Below 0.5 threshold
             next_expected=None,
         )
@@ -494,7 +499,7 @@ class TestDetectOrCreatePattern:
         # Irregular pattern but with known merchant
         mock_detect.return_value = TemporalPattern(
             interval_type=IntervalType.IRREGULAR,
-            interval_params={},
+            interval_params=IntervalParams(),
             confidence=0.25,
             next_expected=None,
         )
@@ -548,7 +553,7 @@ class TestDetectOrCreatePattern:
         # Monthly pattern with high confidence
         mock_detect.return_value = TemporalPattern(
             interval_type=IntervalType.MONTHLY,
-            interval_params={"day_of_month": 15},
+            interval_params=IntervalParams(day=15),
             confidence=0.9,  # High confidence
             next_expected=None,
         )
@@ -601,7 +606,7 @@ class TestDetectOrCreatePattern:
         # Weekly pattern with high confidence
         mock_detect.return_value = TemporalPattern(
             interval_type=IntervalType.WEEKLY,
-            interval_params={"day_of_week": 0},
+            interval_params=IntervalParams(day_of_week=0),
             confidence=0.85,
             next_expected=None,
         )
@@ -688,7 +693,7 @@ class TestDetectOrCreatePattern:
 
         mock_detect.return_value = TemporalPattern(
             interval_type=IntervalType.IRREGULAR,
-            interval_params={},
+            interval_params=IntervalParams(),
             confidence=0.25,
             next_expected=None,
         )
@@ -726,7 +731,7 @@ class TestDetectOrCreatePattern:
 
         mock_detect.return_value = TemporalPattern(
             interval_type=IntervalType.IRREGULAR,
-            interval_params={},
+            interval_params=IntervalParams(),
             confidence=0.25,
             next_expected=None,
         )
