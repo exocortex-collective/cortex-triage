@@ -6,13 +6,22 @@ variable parts (merchant names, amounts, order IDs, etc.).
 
 from __future__ import annotations
 
+import logging
+import os
 import re
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from decimal import Decimal
 
 import psycopg2
+import requests
 from psycopg2.extras import RealDictCursor
+
+logger = logging.getLogger(__name__)
+
+# DuckDB API URL for fetching email bodies (required for body extraction)
+DUCKDB_API_URL = os.environ.get("DUCKDB_API_URL")
 
 
 @dataclass
@@ -59,6 +68,29 @@ class SubjectPattern:
     merchant_group: int = 0  # Capture group for merchant (1-indexed, 0 = none)
     amount_group: int = 0  # Capture group for amount (1-indexed, 0 = none)
     currency_group: int = 0  # Capture group for currency (1-indexed, 0 = none)
+
+
+@dataclass
+class BodyPattern:
+    """A body pattern for extracting merchant/amount from email bodies.
+
+    Used when the subject line doesn't contain the merchant info but the body does.
+    Matches are determined by sender and/or subject, then extraction happens from body.
+    """
+
+    name: str
+    # Match criteria (to determine when to apply this pattern)
+    sender_regex: str | None = None  # Regex to match sender address
+    subject_regex: str | None = None  # Regex to match subject line
+    # Extraction from body
+    merchant_regex: str | None = None  # Regex to extract merchant from body
+    merchant_group: int = 1  # Capture group for merchant (1-indexed)
+    amount_regex: str | None = None  # Regex to extract amount from body
+    amount_group: int = 1  # Capture group for amount
+    currency_regex: str | None = None  # Regex to extract currency from body
+    currency_group: int = 1  # Capture group for currency
+    # Custom extractor function (takes body text, returns merchant name)
+    merchant_extractor: Callable[[str], str | None] | None = None
 
 
 # =============================================================================
@@ -113,6 +145,165 @@ STATUS_PATTERNS: list[tuple[str, str]] = [
 ]
 
 
+# =============================================================================
+# Body Template Patterns
+# =============================================================================
+# Used when merchant info is in the body, not the subject
+
+
+def _extract_apple_merchant(body_text: str) -> str | None:
+    """Extract product name from Apple receipt body.
+
+    Examples:
+        "| iCloudiCloud+ with 200 GB (Monthly)" -> "iCloud+ 200GB"
+        "| Plex: Stream Live TV ChannelsMonthly Plex Pass" -> "Plex Pass"
+        "| AppleCare+...IPAD MINI 5..." -> "AppleCare+ iPad Mini"
+    """
+    # Try iCloud+ with storage size
+    match = re.search(r"iCloud\+\s*with\s+(\d+)\s*GB", body_text, re.IGNORECASE)
+    if match:
+        return f"iCloud+ {match.group(1)}GB"
+
+    # Try Plex Pass
+    if re.search(r"Plex\s+Pass", body_text, re.IGNORECASE):
+        return "Plex Pass"
+
+    # Try AppleCare+ with device type
+    if re.search(r"AppleCare\+", body_text, re.IGNORECASE):
+        # Look for device info: "IPAD MINI 5,WIFI..." or "IPAD PRO,11,CELL..."
+        device_match = re.search(
+            r"(IPAD\s+(?:MINI|PRO|AIR)|IPHONE|MACBOOK|APPLE\s+WATCH|MAC\s+\w+)",
+            body_text,
+            re.IGNORECASE,
+        )
+        if device_match:
+            device = device_match.group(1).title()
+            # Normalize spacing
+            device = re.sub(r"\s+", " ", device).strip()
+            return f"AppleCare+ {device}"
+        return "AppleCare+"
+
+    # Fallback: try to extract first product after table marker
+    match = re.search(r"\|\s*([A-Za-z][A-Za-z0-9 \+]+)", body_text)
+    if match:
+        product = match.group(1).strip()
+        # Clean up: take first word(s) before common suffixes
+        product = re.sub(
+            r"\s*\(?(?:Monthly|Yearly|Technical|with)\b.*",
+            "",
+            product,
+            flags=re.IGNORECASE,
+        ).strip()
+        if product and len(product) > 2:
+            return product
+
+    return None
+
+
+BODY_PATTERNS: list[BodyPattern] = [
+    # Apple receipt - uses custom extraction via _extract_apple_merchant()
+    BodyPattern(
+        name="apple_receipt",
+        sender_regex=r"no_reply@email\.apple\.com",
+        subject_regex=r"Your receipt from Apple\.",
+        amount_regex=r"\|\s*\$(\d+\.?\d*)",
+        amount_group=1,
+        merchant_extractor=_extract_apple_merchant,
+    ),
+]
+
+
+def fetch_body_text(gmail_id: str) -> str | None:
+    """Fetch email body text from DuckDB API.
+
+    Args:
+        gmail_id: Gmail message ID
+
+    Returns:
+        Plain text body content, or None if not available or API not configured
+    """
+    if not DUCKDB_API_URL:
+        return None
+    try:
+        response = requests.get(
+            f"{DUCKDB_API_URL}/mail_text",
+            params={"gmail_id": gmail_id},
+            timeout=5,
+        )
+        if response.status_code == 200:
+            try:
+                data: dict[str, str | None] = response.json()
+                return data.get("text")
+            except requests.exceptions.JSONDecodeError:
+                logger.warning("Failed to decode JSON from DuckDB API for %s", gmail_id)
+                return None
+        elif response.status_code == 404:
+            return None
+        else:
+            logger.warning(
+                "DuckDB API error fetching body for %s: %s",
+                gmail_id,
+                response.status_code,
+            )
+            return None
+    except requests.RequestException as e:
+        logger.warning("Failed to fetch body from DuckDB API for %s: %s", gmail_id, e)
+        return None
+
+
+def match_body(
+    sender: str,
+    subject: str,
+    body_text: str,
+) -> SubjectMatch | None:
+    """Match email body against known patterns and extract variables.
+
+    Args:
+        sender: Email sender address
+        subject: Email subject line
+        body_text: Plain text body content
+
+    Returns:
+        SubjectMatch with extracted merchant/amount, or None if no match
+    """
+    for p in BODY_PATTERNS:
+        # Check if this pattern applies to this email
+        if p.sender_regex and not re.search(p.sender_regex, sender, re.IGNORECASE):
+            continue
+        if p.subject_regex and not re.search(p.subject_regex, subject, re.IGNORECASE):
+            continue
+
+        # Pattern matches - try to extract from body
+        result = SubjectMatch(template_name=p.name)
+
+        # Use custom extractor if provided, otherwise use regex
+        if p.merchant_extractor:
+            result.merchant = p.merchant_extractor(body_text)
+        elif p.merchant_regex:
+            match = re.search(p.merchant_regex, body_text, re.IGNORECASE)
+            if match and p.merchant_group > 0:
+                merchant = match.group(p.merchant_group).strip()
+                # Normalize whitespace
+                merchant = re.sub(r"\s+", " ", merchant)
+                result.merchant = merchant
+
+        if p.amount_regex:
+            match = re.search(p.amount_regex, body_text)
+            if match and p.amount_group > 0:
+                try:
+                    amount_str = match.group(p.amount_group).replace(",", "")
+                    result.amount = ExtractedAmount(
+                        amount=Decimal(amount_str),
+                        currency="USD",  # Default, could extract if needed
+                    )
+                except (ValueError, IndexError):
+                    pass
+
+        return result
+
+    return None
+
+
 def match_subject(subject: str) -> SubjectMatch | None:
     """Match a subject against known patterns and extract variables.
 
@@ -140,9 +331,10 @@ def match_subject(subject: str) -> SubjectMatch | None:
                 except (ValueError, IndexError):
                     pass
 
-            # Special case: apple_receipt always has merchant "Apple"
+            # Generic merchant for patterns that need body extraction
+            # These will be enriched by match_body() in group_by_similarity()
             if p.name == "apple_receipt":
-                result.merchant = "Apple"
+                result.merchant = "Apple"  # Will be refined by body extraction
 
             return result
 
@@ -200,6 +392,10 @@ def get_sender_emails(
         return [dict(row) for row in cur.fetchall()]
 
 
+# Merchants that are too generic - try body extraction for these
+GENERIC_MERCHANTS = {"Apple"}
+
+
 def group_by_similarity(
     emails: list[dict],
     sender: str,
@@ -207,6 +403,8 @@ def group_by_similarity(
     """Group emails by subject similarity.
 
     Emails with the same template and merchant are grouped together.
+    For emails with generic merchants (like "Apple"), attempts to extract
+    more specific merchant from email body.
 
     Args:
         emails: List of email dicts with gmail_id, subject, date_header
@@ -220,6 +418,7 @@ def group_by_similarity(
 
     for email in emails:
         subject = email.get("subject", "")
+        gmail_id = email.get("gmail_id", "")
         result = match_subject(subject)
 
         if result is None:
@@ -231,6 +430,17 @@ def group_by_similarity(
             template_name = result.template_name
             merchant = result.merchant
             amount = result.amount
+
+            # If merchant is generic, try to extract from body
+            if merchant in GENERIC_MERCHANTS:
+                body_text = fetch_body_text(gmail_id)
+                if body_text:
+                    body_result = match_body(sender, subject, body_text)
+                    if body_result and body_result.merchant:
+                        merchant = body_result.merchant
+                        # Also use body amount if available
+                        if body_result.amount:
+                            amount = body_result.amount
 
         key = (template_name, merchant)
 
