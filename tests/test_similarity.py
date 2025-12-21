@@ -3,8 +3,10 @@
 from decimal import Decimal
 
 from triage.services.similarity import (
+    _extract_apple_merchant,
     extract_merchant_from_subject,
     group_by_similarity,
+    match_body,
     match_subject,
 )
 
@@ -383,3 +385,106 @@ class TestRealWorldExamples:
         # Launch Pad: 1 occurrence
         launch_pad = [g for g in groups if g.merchant and "Launch Pad" in g.merchant]
         assert len(launch_pad) == 1
+
+
+class TestExtractAppleMerchant:
+    """Tests for Apple merchant extraction from email bodies."""
+
+    def test_icloud_200gb(self) -> None:
+        """Test iCloud+ 200GB extraction."""
+        body = "| iCloudiCloud+ with 200 GB (Monthly) | $2.99"
+        result = _extract_apple_merchant(body)
+        assert result == "iCloud+ 200GB"
+
+    def test_icloud_50gb(self) -> None:
+        """Test iCloud+ 50GB extraction."""
+        body = "Your subscription to iCloud+ with 50 GB has been renewed."
+        result = _extract_apple_merchant(body)
+        assert result == "iCloud+ 50GB"
+
+    def test_plex_pass(self) -> None:
+        """Test Plex Pass extraction."""
+        body = "| Plex: Stream Live TV ChannelsMonthly Plex Pass | $6.99"
+        result = _extract_apple_merchant(body)
+        assert result == "Plex Pass"
+
+    def test_applecare_ipad_mini(self) -> None:
+        """Test AppleCare+ iPad Mini extraction."""
+        body = "AppleCare+ for IPAD MINI 5,WIFI,64GB | $3.49"
+        result = _extract_apple_merchant(body)
+        assert result == "AppleCare+ Ipad Mini"
+
+    def test_applecare_ipad_pro(self) -> None:
+        """Test AppleCare+ iPad Pro extraction."""
+        body = "AppleCare+ coverage for IPAD PRO,11,CELL | $5.99"
+        result = _extract_apple_merchant(body)
+        assert result == "AppleCare+ Ipad Pro"
+
+    def test_applecare_without_device(self) -> None:
+        """Test AppleCare+ without device info falls back to generic."""
+        body = "Your AppleCare+ coverage has been renewed."
+        result = _extract_apple_merchant(body)
+        assert result == "AppleCare+"
+
+    def test_fallback_extraction(self) -> None:
+        """Test fallback extraction from table marker."""
+        body = "| SomeApp Premium | $4.99"
+        result = _extract_apple_merchant(body)
+        assert result == "SomeApp Premium"
+
+    def test_no_match_returns_none(self) -> None:
+        """Test that non-matching body returns None."""
+        body = "Thank you for your purchase."
+        result = _extract_apple_merchant(body)
+        assert result is None
+
+
+class TestMatchBody:
+    """Tests for body pattern matching."""
+
+    def test_apple_receipt_match(self) -> None:
+        """Test matching Apple receipt email."""
+        body = "| iCloudiCloud+ with 200 GB (Monthly) | $2.99"
+        result = match_body(
+            sender="no_reply@email.apple.com",
+            subject="Your receipt from Apple.",
+            body_text=body,
+        )
+        assert result is not None
+        assert result.template_name == "apple_receipt"
+        assert result.merchant == "iCloud+ 200GB"
+        assert result.amount is not None
+        assert result.amount.amount == Decimal("2.99")
+
+    def test_apple_receipt_with_applecare(self) -> None:
+        """Test Apple receipt with AppleCare+ product."""
+        body = "AppleCare+ for IPAD MINI 5 | $3.49"
+        result = match_body(
+            sender="no_reply@email.apple.com",
+            subject="Your receipt from Apple.",
+            body_text=body,
+        )
+        assert result is not None
+        assert result.merchant == "AppleCare+ Ipad Mini"
+        assert result.amount is not None
+        assert result.amount.amount == Decimal("3.49")
+
+    def test_wrong_sender_no_match(self) -> None:
+        """Test that wrong sender doesn't match Apple pattern."""
+        body = "| iCloud+ with 200 GB | $2.99"
+        result = match_body(
+            sender="other@example.com",
+            subject="Your receipt from Apple.",
+            body_text=body,
+        )
+        assert result is None
+
+    def test_wrong_subject_no_match(self) -> None:
+        """Test that wrong subject doesn't match Apple pattern."""
+        body = "| iCloud+ with 200 GB | $2.99"
+        result = match_body(
+            sender="no_reply@email.apple.com",
+            subject="Different subject line",
+            body_text=body,
+        )
+        assert result is None
