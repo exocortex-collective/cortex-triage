@@ -5,6 +5,8 @@ from typing import TYPE_CHECKING
 from unittest.mock import MagicMock, patch
 
 from triage.models.patterns import EmailPattern, IntervalType, PatternStatus
+from triage.services.similarity import SimilarityGroup
+from triage.services.temporal import TemporalPattern
 
 if TYPE_CHECKING:
     from triage.services.worker import TriageWorker
@@ -237,10 +239,6 @@ class TestDetectOrCreatePattern:
         mock_get_pattern: MagicMock,
     ) -> None:
         """Should create a new pattern when threshold is met and temporal detected."""
-        from triage.models.patterns import EmailPattern, IntervalType
-        from triage.services.similarity import SimilarityGroup
-        from triage.services.temporal import TemporalPattern
-
         # Setup: 3 emails in group (meets threshold of 3)
         mock_analyze.return_value = [
             SimilarityGroup(
@@ -295,9 +293,6 @@ class TestDetectOrCreatePattern:
         mock_get_pattern: MagicMock,
     ) -> None:
         """Should link all emails in group to existing pattern."""
-        from triage.models.patterns import EmailPattern, IntervalType
-        from triage.services.similarity import SimilarityGroup
-
         mock_analyze.return_value = [
             SimilarityGroup(
                 sender="paypal@paypal.com",
@@ -330,8 +325,6 @@ class TestDetectOrCreatePattern:
     @patch("triage.services.worker.analyze_sender")
     def test_returns_none_when_below_threshold(self, mock_analyze: MagicMock) -> None:
         """Should return None when group has fewer than threshold emails."""
-        from triage.services.similarity import SimilarityGroup
-
         # Only 2 emails - below threshold of 3
         mock_analyze.return_value = [
             SimilarityGroup(
@@ -361,8 +354,6 @@ class TestDetectOrCreatePattern:
         mock_get_pattern: MagicMock,
     ) -> None:
         """Should return None when no temporal pattern can be detected."""
-        from triage.services.similarity import SimilarityGroup
-
         mock_analyze.return_value = [
             SimilarityGroup(
                 sender="random@example.com",
@@ -389,8 +380,6 @@ class TestDetectOrCreatePattern:
         self, mock_analyze: MagicMock
     ) -> None:
         """Should return None when email is not in any similarity group."""
-        from triage.services.similarity import SimilarityGroup
-
         # Group exists but doesn't contain the email we're checking
         mock_analyze.return_value = [
             SimilarityGroup(
@@ -444,10 +433,6 @@ class TestDetectOrCreatePattern:
         mock_get_pattern: MagicMock,
     ) -> None:
         """Should filter out irregular patterns with unknown merchant."""
-        from triage.models.patterns import IntervalType
-        from triage.services.similarity import SimilarityGroup
-        from triage.services.temporal import TemporalPattern
-
         # 3 emails with unknown merchant
         mock_analyze.return_value = [
             SimilarityGroup(
@@ -492,10 +477,6 @@ class TestDetectOrCreatePattern:
         mock_get_pattern: MagicMock,
     ) -> None:
         """Should allow irregular patterns when merchant is known."""
-        from triage.models.patterns import EmailPattern, IntervalType
-        from triage.services.similarity import SimilarityGroup
-        from triage.services.temporal import TemporalPattern
-
         mock_analyze.return_value = [
             SimilarityGroup(
                 sender="orders@amazon.com",
@@ -550,10 +531,6 @@ class TestDetectOrCreatePattern:
         mock_get_pattern: MagicMock,
     ) -> None:
         """Should allow monthly patterns even with unknown merchant."""
-        from triage.models.patterns import EmailPattern, IntervalType
-        from triage.services.similarity import SimilarityGroup
-        from triage.services.temporal import TemporalPattern
-
         mock_analyze.return_value = [
             SimilarityGroup(
                 sender="noreply@glassdoor.com",
@@ -607,10 +584,6 @@ class TestDetectOrCreatePattern:
         mock_get_pattern: MagicMock,
     ) -> None:
         """Should allow weekly patterns even with unknown merchant."""
-        from triage.models.patterns import EmailPattern, IntervalType
-        from triage.services.similarity import SimilarityGroup
-        from triage.services.temporal import TemporalPattern
-
         mock_analyze.return_value = [
             SimilarityGroup(
                 sender="steve@theweekendwoodworker.com",
@@ -660,9 +633,6 @@ class TestDetectOrCreatePattern:
         mock_get_pattern: MagicMock,
     ) -> None:
         """Filter should be bypassed when pattern already exists."""
-        from triage.models.patterns import EmailPattern, IntervalType
-        from triage.services.similarity import SimilarityGroup
-
         mock_analyze.return_value = [
             SimilarityGroup(
                 sender="newsletter@example.com",
@@ -702,10 +672,6 @@ class TestDetectOrCreatePattern:
         mock_get_pattern: MagicMock,
     ) -> None:
         """Should filter patterns with empty string merchant."""
-        from triage.models.patterns import IntervalType
-        from triage.services.similarity import SimilarityGroup
-        from triage.services.temporal import TemporalPattern
-
         mock_analyze.return_value = [
             SimilarityGroup(
                 sender="test@example.com",
@@ -744,10 +710,6 @@ class TestDetectOrCreatePattern:
         mock_get_pattern: MagicMock,
     ) -> None:
         """Should filter patterns with None merchant (becomes 'unknown')."""
-        from triage.models.patterns import IntervalType
-        from triage.services.similarity import SimilarityGroup
-        from triage.services.temporal import TemporalPattern
-
         mock_analyze.return_value = [
             SimilarityGroup(
                 sender="test@example.com",
