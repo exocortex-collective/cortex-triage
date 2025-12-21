@@ -185,7 +185,12 @@ def _extract_apple_merchant(body_text: str) -> str | None:
     if match:
         product = match.group(1).strip()
         # Clean up: take first word(s) before common suffixes
-        product = re.sub(r"(Monthly|Yearly|Technical|with).*", "", product).strip()
+        product = re.sub(
+            r"\s*\(?(?:Monthly|Yearly|Technical|with)\b.*",
+            "",
+            product,
+            flags=re.IGNORECASE,
+        ).strip()
         if product and len(product) > 2:
             return product
 
