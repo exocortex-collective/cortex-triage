@@ -102,28 +102,22 @@ def _validate_no_duplicate_mappings(
         )
 
 
-def load_rules(path: str | Path) -> RulesConfig:
-    """Load rules from a YAML file.
+def load_rules_from_string(yaml_content: str) -> RulesConfig:
+    """Load rules from a YAML string.
 
     Args:
-        path: Path to the rules YAML file.
+        yaml_content: YAML content as string.
 
     Returns:
         Parsed RulesConfig object.
 
     Raises:
-        FileNotFoundError: If the rules file doesn't exist.
-        ValueError: If the rules file is invalid.
+        ValueError: If the YAML is invalid.
     """
-    path = Path(path)
-    if not path.exists():
-        raise FileNotFoundError(f"Rules file not found: {path}")
-
-    with open(path, encoding="utf-8") as f:
-        data = yaml.safe_load(f)
+    data = yaml.safe_load(yaml_content)
 
     if data is None:
-        raise ValueError(f"Empty rules file: {path}")
+        raise ValueError("Empty YAML content")
 
     # Merge built-in intents with user-defined ones
     # User intents override built-ins
@@ -163,6 +157,29 @@ def load_rules(path: str | Path) -> RulesConfig:
     data["fallback_email_mappings"] = fallback_mappings
 
     return RulesConfig.model_validate(data)
+
+
+def load_rules(path: str | Path) -> RulesConfig:
+    """Load rules from a YAML file.
+
+    Args:
+        path: Path to the rules YAML file.
+
+    Returns:
+        Parsed RulesConfig object.
+
+    Raises:
+        FileNotFoundError: If the rules file doesn't exist.
+        ValueError: If the rules file is invalid.
+    """
+    path = Path(path)
+    if not path.exists():
+        raise FileNotFoundError(f"Rules file not found: {path}")
+
+    with open(path, encoding="utf-8") as f:
+        yaml_content = f.read()
+
+    return load_rules_from_string(yaml_content)
 
 
 def lookup_email_mapping(

@@ -45,7 +45,7 @@ def test_load_rules_empty_file() -> None:
         f.write("")
         f.flush()
 
-        with pytest.raises(ValueError, match="Empty rules file"):
+        with pytest.raises(ValueError, match="Empty YAML content"):
             load_rules(f.name)
 
 
