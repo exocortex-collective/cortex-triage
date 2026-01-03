@@ -33,6 +33,7 @@ from psycopg2.pool import SimpleConnectionPool
 from triage.db.config_loader import ConfigLoadError, load_config_from_db
 from triage.db.worker_signals import poll_signals
 from triage.db.worker_status import (
+    cleanup_stale_workers,
     deregister_worker,
     register_worker,
     update_config_version,
@@ -752,6 +753,7 @@ class TriageWorker:
         self._pool: SimpleConnectionPool | None = None
         self.worker_id = worker_id or f"triage-{os.getpid()}"
         self.last_signal_poll = time.time()
+        self.last_cleanup = time.time()  # Track when we last cleaned up stale workers
         self.config_version = config_version  # Track which DB config version is loaded
         self.jobs_processed = 0  # Track cumulative job count for status updates
 
@@ -913,6 +915,26 @@ class TriageWorker:
                         logger.error(f"Maintenance error: {error}")
         except Exception as e:
             logger.error(f"Lifecycle maintenance failed: {e}", exc_info=True)
+
+    def _cleanup_stale_workers(self) -> None:
+        """Clean up stale worker entries (>5 minutes without heartbeat).
+
+        Runs every 5 minutes to prevent accumulation of dead worker entries.
+        """
+        # Only run cleanup every 5 minutes
+        now = time.time()
+        if now - self.last_cleanup < 300:  # 300 seconds = 5 minutes
+            return
+
+        self.last_cleanup = now
+
+        try:
+            with self._get_conn() as conn:
+                removed = cleanup_stale_workers(conn, stale_threshold_minutes=5)
+                if removed > 0:
+                    logger.info(f"Cleaned up {removed} stale worker(s)")
+        except Exception as e:
+            logger.error(f"Stale worker cleanup failed: {e}", exc_info=True)
 
     def _get_pool(self) -> SimpleConnectionPool:
         """Get or create connection pool."""
@@ -1660,6 +1682,9 @@ class TriageWorker:
                 # Check for control signals (config reload, shutdown, etc.)
                 # Also updates heartbeat
                 self._check_and_process_signals()
+
+                # Cleanup stale worker entries periodically (every 5 minutes)
+                self._cleanup_stale_workers()
 
                 processed, failed = self._process_batch()
 
