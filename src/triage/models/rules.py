@@ -416,6 +416,23 @@ class Action(BaseModel):
     star: bool | None = None
 
 
+class EmailMappingAction(BaseModel):
+    """Action for email address to label mapping.
+
+    Used for O(1) hash-based lookups (priority_email_mappings, fallback_email_mappings).
+
+    Three-state semantics for optional fields:
+    - archive: true = archive if not already archived
+    - archive: false = unarchive if archived (rarely needed)
+    - archive: omitted = leave archive state alone (default)
+    - Same logic applies to mark_read
+    """
+
+    label: str  # Required - the Cortex/* label to apply
+    archive: bool | None = None  # Optional - three-state (true/false/omit)
+    mark_read: bool | None = None  # Optional - three-state (true/false/omit)
+
+
 class ClassificationPrompt(BaseModel):
     """A versioned classification prompt template."""
 
@@ -600,6 +617,9 @@ class RulesConfig(BaseModel):
         default_factory=_default_body_extraction_prompts
     )
     chains: dict[str, list[Rule]] = Field(default_factory=dict)
+    # Email mappings for O(1) hash-based lookup by sender address (normalized lowercase)
+    priority_email_mappings: dict[str, EmailMappingAction] = Field(default_factory=dict)
+    fallback_email_mappings: dict[str, EmailMappingAction] = Field(default_factory=dict)
 
 
 class PatternInfo(BaseModel):

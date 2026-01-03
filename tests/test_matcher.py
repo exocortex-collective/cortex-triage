@@ -9,6 +9,7 @@ from triage.engine.matcher import (
 from triage.models.rules import (
     Action,
     Email,
+    EmailMappingAction,
     IntentConfig,
     LLMConfig,
     MatchCondition,
@@ -2705,3 +2706,192 @@ class TestPatternFieldVariables:
             "merchant": "Host Havoc Ltd.",
             "status": "active",
         }
+
+
+class TestEmailMappings:
+    """Tests for priority and fallback email mappings."""
+
+    def test_priority_mappings_match(self) -> None:
+        """Test priority email mappings match before rules."""
+        email = Email(
+            id=1,
+            gmail_id="abc123",
+            from_addr="notifications@github.com",
+            to_addrs=["me@example.com"],
+            subject="Test",
+        )
+        config = RulesConfig(
+            priority_email_mappings={
+                "notifications@github.com": EmailMappingAction(
+                    label="Tech/GitHub", archive=True
+                )
+            },
+            chains={
+                "main": [
+                    # This rule would match but should be skipped
+                    Rule(match=MatchCondition(), action=Action(label="Fallback"))
+                ]
+            },
+        )
+
+        result = evaluate(config, email)
+
+        assert result.matched
+        assert result.chain == "priority_email_mappings"
+        assert result.action is not None
+        assert result.action.label == "Cortex/Tech/GitHub"
+        assert result.action.archive is True
+
+    def test_priority_mappings_case_insensitive(self) -> None:
+        """Test priority mappings are case-insensitive."""
+        email = Email(
+            id=1,
+            gmail_id="abc123",
+            from_addr="Notifications@GitHub.COM",
+            to_addrs=["me@example.com"],
+            subject="Test",
+        )
+        config = RulesConfig(
+            priority_email_mappings={
+                "notifications@github.com": EmailMappingAction(label="Tech/GitHub")
+            },
+            chains={"main": []},
+        )
+
+        result = evaluate(config, email)
+
+        assert result.matched
+        assert result.action is not None
+        assert result.action.label == "Cortex/Tech/GitHub"
+
+    def test_fallback_mappings_match_after_rules(self) -> None:
+        """Test fallback mappings only match if no rules matched."""
+        email = Email(
+            id=1,
+            gmail_id="abc123",
+            from_addr="newsletter@example.com",
+            to_addrs=["me@example.com"],
+            subject="Test",
+        )
+        config = RulesConfig(
+            fallback_email_mappings={
+                "newsletter@example.com": EmailMappingAction(
+                    label="Marketing/Newsletter", mark_read=True
+                )
+            },
+            chains={
+                "main": [
+                    # Non-matching rule
+                    Rule(
+                        match=MatchCondition(from_addr="other@example.com"),
+                        action=Action(label="Other"),
+                    )
+                ]
+            },
+        )
+
+        result = evaluate(config, email)
+
+        assert result.matched
+        assert result.chain == "fallback_email_mappings"
+        assert result.action is not None
+        assert result.action.label == "Cortex/Marketing/Newsletter"
+        assert result.action.mark_read is True
+
+    def test_fallback_mappings_skipped_if_rule_matches(self) -> None:
+        """Test fallback mappings are skipped if a rule matched."""
+        email = Email(
+            id=1,
+            gmail_id="abc123",
+            from_addr="test@example.com",
+            to_addrs=["me@example.com"],
+            subject="Test",
+        )
+        config = RulesConfig(
+            fallback_email_mappings={
+                "test@example.com": EmailMappingAction(label="Fallback")
+            },
+            chains={
+                "main": [
+                    # Matching rule
+                    Rule(match=MatchCondition(), action=Action(label="Matched"))
+                ]
+            },
+        )
+
+        result = evaluate(config, email)
+
+        assert result.matched
+        assert result.chain == "main"
+        assert result.action is not None
+        assert result.action.label == "Cortex/Matched"
+
+    def test_priority_and_fallback_together(self) -> None:
+        """Test priority takes precedence over fallback."""
+        email = Email(
+            id=1,
+            gmail_id="abc123",
+            from_addr="test@example.com",
+            to_addrs=["me@example.com"],
+            subject="Test",
+        )
+        config = RulesConfig(
+            priority_email_mappings={
+                "test@example.com": EmailMappingAction(label="Priority")
+            },
+            fallback_email_mappings={
+                "test@example.com": EmailMappingAction(label="Fallback")
+            },
+            chains={"main": []},
+        )
+
+        result = evaluate(config, email)
+
+        assert result.matched
+        assert result.chain == "priority_email_mappings"
+        assert result.action is not None
+        assert result.action.label == "Cortex/Priority"
+
+    def test_email_mappings_no_match(self) -> None:
+        """Test no match when email not in mappings or rules."""
+        email = Email(
+            id=1,
+            gmail_id="abc123",
+            from_addr="unknown@example.com",
+            to_addrs=["me@example.com"],
+            subject="Test",
+        )
+        config = RulesConfig(
+            priority_email_mappings={
+                "known@example.com": EmailMappingAction(label="Known")
+            },
+            chains={"main": []},
+        )
+
+        result = evaluate(config, email)
+
+        assert not result.matched
+
+    def test_email_mappings_optional_fields(self) -> None:
+        """Test email mappings with only required label field."""
+        email = Email(
+            id=1,
+            gmail_id="abc123",
+            from_addr="test@example.com",
+            to_addrs=["me@example.com"],
+            subject="Test",
+        )
+        config = RulesConfig(
+            priority_email_mappings={
+                "test@example.com": EmailMappingAction(label="Test")
+            },
+            chains={"main": []},
+        )
+
+        result = evaluate(config, email)
+
+        assert result.matched
+        assert result.action is not None
+        assert result.action.label == "Cortex/Test"
+        assert result.action.archive is None
+        assert result.action.mark_read is None
