@@ -194,7 +194,7 @@ def expire_old_signals(conn: psycopg2.extensions.connection, days: int = 7) -> i
             UPDATE worker_signals
             SET status = 'expired'
             WHERE status = 'processed'
-              AND processed_at < NOW() - INTERVAL '%s days'
+              AND processed_at < NOW() - INTERVAL '1 day' * %s
             """,
             (days,),
         )
