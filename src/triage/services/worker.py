@@ -30,6 +30,8 @@ from googleapiclient.errors import HttpError
 from psycopg2.extras import Json
 from psycopg2.pool import SimpleConnectionPool
 
+from triage.db.config_loader import ConfigLoadError, load_config_from_db
+from triage.db.worker_signals import poll_signals
 from triage.engine.matcher import evaluate
 from triage.engine.rules import load_rules, validate_rules
 from triage.models.patterns import EmailPattern
@@ -76,6 +78,9 @@ class Config:
     gmail_token_path: str
     batch_size: int = 100
     poll_interval: int = 5  # seconds between queue polls when empty
+    signal_poll_interval: int = (
+        30  # seconds between signal polls (check for control messages)
+    )
 
 
 # Max characters of email body to include in LLM prompts
@@ -730,6 +735,8 @@ class TriageWorker:
         rules: RulesConfig,
         ollama: OllamaClient,
         gmail: GmailClient,
+        worker_id: str | None = None,
+        config_version: int | None = None,
     ):
         self.config = config
         self.rules = rules
@@ -737,19 +744,51 @@ class TriageWorker:
         self.gmail = gmail
         self.running = True
         self._pool: SimpleConnectionPool | None = None
+        self.worker_id = worker_id or f"triage-{os.getpid()}"
+        self.last_signal_poll = time.time()
+        self.config_version = config_version  # Track which DB config version is loaded
 
     def stop(self) -> None:
         """Signal the worker to stop."""
         self.running = False
 
     def reload_rules(self) -> bool:
-        """Reload rules from config file.
+        """Reload rules from database (preferred) or config file (fallback).
 
         Returns True if reload succeeded, False otherwise.
         The old rules remain active if reload fails.
         """
         try:
-            new_rules = load_rules(self.config.rules_path)
+            # Try loading from database first (active version)
+            try:
+                with self._get_conn() as conn:
+                    new_rules = load_config_from_db(conn)
+
+                # Get the version number from database
+                with self._get_conn() as conn:
+                    cursor = conn.cursor()
+                    cursor.execute(
+                        """SELECT version FROM triage_config_versions
+                           WHERE is_active = TRUE"""
+                    )
+                    row = cursor.fetchone()
+                    new_config_version = row[0] if row else None
+                    cursor.close()
+
+                logger.info(
+                    f"Loaded config from database (version {new_config_version})"
+                )
+
+            except ConfigLoadError as e:
+                # Database load failed, fallback to file
+                logger.warning(
+                    f"Failed to load from database ({e}), falling back to file"
+                )
+                new_rules = load_rules(self.config.rules_path)
+                new_config_version = None
+                logger.info(f"Loaded config from file: {self.config.rules_path}")
+
+            # Validate the loaded config
             errors = validate_rules(new_rules)
             if errors:
                 for error in errors:
@@ -757,15 +796,63 @@ class TriageWorker:
                 logger.error("Rules reload failed - keeping existing rules")
                 return False
 
+            # Success - update worker state
+            old_version = self.config_version
             self.rules = new_rules
+            self.config_version = new_config_version
+
             logger.info(
-                f"Rules reloaded successfully from {self.config.rules_path} "
-                f"(version {new_rules.version})"
+                f"Rules reloaded successfully: "
+                f"version {old_version} → {new_config_version}"
             )
             return True
+
         except Exception as e:
             logger.error(f"Failed to reload rules: {e}", exc_info=True)
             return False
+
+    def _check_and_process_signals(self) -> None:
+        """Poll for and process worker signals (config reload, shutdown, etc.)."""
+        # Only poll at configured interval
+        now = time.time()
+        if now - self.last_signal_poll < self.config.signal_poll_interval:
+            return
+
+        self.last_signal_poll = now
+
+        try:
+            with self._get_conn() as conn:
+                signals = poll_signals(conn, "triage", self.worker_id)
+
+            for signal in signals:
+                logger.info(
+                    f"Processing signal: {signal.signal_type} (id={signal.signal_id})"
+                )
+
+                if signal.signal_type == "config_reload":
+                    success = self.reload_rules()
+                    if success:
+                        logger.info("Config reloaded successfully via signal")
+                    else:
+                        logger.error("Config reload failed")
+
+                elif signal.signal_type == "shutdown":
+                    logger.info("Received shutdown signal")
+                    self.stop()
+
+                elif signal.signal_type == "pause":
+                    logger.info("Pause signal not yet implemented")
+
+                elif signal.signal_type == "resume":
+                    logger.info("Resume signal not yet implemented")
+
+                elif signal.signal_type == "log_level":
+                    new_level = signal.payload.get("level", "INFO")
+                    logger.info(f"Changing log level to {new_level}")
+                    logging.getLogger().setLevel(getattr(logging, new_level))
+
+        except Exception as e:
+            logger.error(f"Error processing signals: {e}", exc_info=True)
 
     def close(self) -> None:
         """Close resources like the database connection pool."""
@@ -1537,12 +1624,15 @@ class TriageWorker:
         """Main processing loop."""
         self._ensure_schema()
 
-        logger.info("Triage worker started")
+        logger.info(f"Triage worker started (worker_id={self.worker_id})")
 
         total_processed = 0
         total_failed = 0
 
         while self.running:
+            # Check for control signals (config reload, shutdown, etc.)
+            self._check_and_process_signals()
+
             processed, failed = self._process_batch()
 
             if processed == 0 and failed == 0:
@@ -1590,6 +1680,62 @@ class TriageWorker:
             f"{total_failed} failed"
         )
         return total_processed, total_failed
+
+
+def load_initial_config(config: Config) -> tuple[RulesConfig, int | None]:
+    """Load config on startup: try database first, fallback to file.
+
+    Returns:
+        (rules, config_version) - config_version is None if loaded from file
+    """
+    # Try loading from database first (active version)
+    try:
+        conn = psycopg2.connect(
+            host=config.postgres_host,
+            port=config.postgres_port,
+            dbname=config.postgres_db,
+            user=config.postgres_user,
+            password=config.postgres_password,
+        )
+        try:
+            rules = load_config_from_db(conn)
+
+            # Get version number
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT version FROM triage_config_versions WHERE is_active = TRUE"
+            )
+            row = cursor.fetchone()
+            config_version = row[0] if row else None
+            cursor.close()
+
+            logger.info(f"✓ Loaded config from database (version {config_version})")
+            return rules, config_version
+
+        finally:
+            conn.close()
+
+    except ConfigLoadError as e:
+        # Database has no config, fallback to file
+        logger.warning(
+            f"No config in database ({e}), loading from file: {config.rules_path}"
+        )
+
+    except Exception as e:
+        # Database connection or other error, fallback to file
+        logger.warning(
+            f"Failed to connect to database ({e}), "
+            f"loading from file: {config.rules_path}"
+        )
+
+    # Fallback: load from file
+    try:
+        rules = load_rules(config.rules_path)
+        logger.info(f"✓ Loaded config from file: {config.rules_path}")
+        return rules, None
+    except Exception as e:
+        logger.error(f"Failed to load rules from file: {e}")
+        raise
 
 
 def main() -> None:
@@ -1643,15 +1789,14 @@ def main() -> None:
         batch_size=args.batch_size,
     )
 
-    # Load and validate rules
+    # Load and validate rules (DB first, file fallback)
     try:
-        rules = load_rules(config.rules_path)
+        rules, config_version = load_initial_config(config)
         errors = validate_rules(rules)
         if errors:
             for error in errors:
                 logger.error(f"Rules validation error: {error}")
             sys.exit(1)
-        logger.info(f"Loaded rules from {config.rules_path}")
     except Exception as e:
         logger.error(f"Failed to load rules: {e}")
         sys.exit(1)
@@ -1660,7 +1805,7 @@ def main() -> None:
     ollama = OllamaClient(config.ollama_url)
     gmail = GmailClient(config.gmail_token_path)
 
-    worker = TriageWorker(config, rules, ollama, gmail)
+    worker = TriageWorker(config, rules, ollama, gmail, config_version=config_version)
 
     # Handle signals for graceful shutdown and config reload
     def shutdown_handler(signum: int, frame: Any) -> None:
