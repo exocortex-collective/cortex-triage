@@ -9,7 +9,7 @@ from typing import Protocol
 
 import structlog
 
-from triage.engine.rules import format_classification_prompt
+from triage.engine.rules import format_classification_prompt, lookup_email_mapping
 from triage.engine.variables import (
     TEMPLATE_PATTERN,
     VariableContext,
@@ -19,6 +19,7 @@ from triage.engine.variables import (
 from triage.models.rules import (
     Action,
     Email,
+    EmailMappingAction,
     EvaluationResult,
     MatchCondition,
     RulesConfig,
@@ -1353,12 +1354,34 @@ def evaluate_chain(
     return EvaluationResult(matched=False, trace=_trace)
 
 
+def _email_mapping_to_action(mapping: EmailMappingAction, label_prefix: str) -> Action:
+    """Convert EmailMappingAction to Action with label prefix applied.
+
+    Args:
+        mapping: The email mapping action
+        label_prefix: Label prefix from config (e.g., "Cortex")
+
+    Returns:
+        Action with prefixed label
+    """
+    return Action(
+        label=f"{label_prefix}/{mapping.label}",
+        archive=mapping.archive,
+        mark_read=mapping.mark_read,
+    )
+
+
 def evaluate(
     config: RulesConfig,
     email: Email,
     llm_client: LLMClient | None = None,
 ) -> EvaluationResult:
     """Evaluate rules against an email, starting from 'main' chain.
+
+    Evaluation order:
+    1. Check priority_email_mappings (O(1) hash lookup)
+    2. Evaluate 'main' chain rules
+    3. Check fallback_email_mappings if no match
 
     Args:
         config: The rules configuration.
@@ -1368,9 +1391,62 @@ def evaluate(
     Returns:
         EvaluationResult with match details and action.
     """
+    trace: list[str] = []
+
+    # 1. Check priority email mappings first (O(1) lookup)
+    if config.priority_email_mappings:
+        priority_mapping = lookup_email_mapping(
+            email.from_addr, config.priority_email_mappings
+        )
+        if priority_mapping:
+            trace.append(
+                f"priority_email_mappings: matched {email.from_addr.lower()} -> "
+                f"{priority_mapping.label}"
+            )
+            action = _email_mapping_to_action(priority_mapping, config.label_prefix)
+            return EvaluationResult(
+                matched=True,
+                chain="priority_email_mappings",
+                rule_index=0,
+                action=action,
+                trace=trace,
+            )
+        trace.append("priority_email_mappings: no match")
+
+    # 2. Evaluate main chain
     # Pre-compute dicts once for all chain evaluations
     intents = {k: v.model_dump() for k, v in config.intents.items()}
     email_categories = {k: v.model_dump() for k, v in config.email_categories.items()}
-    return evaluate_chain(
-        config, "main", email, llm_client, None, intents, email_categories
+    result = evaluate_chain(
+        config, "main", email, llm_client, None, intents, email_categories, trace
     )
+
+    if result.matched:
+        return result
+
+    # If chain returned to parent (edge case - main has no parent), preserve that state
+    if result.returned:
+        return result
+
+    # 3. Check fallback email mappings if no match (O(1) lookup)
+    if config.fallback_email_mappings:
+        fallback_mapping = lookup_email_mapping(
+            email.from_addr, config.fallback_email_mappings
+        )
+        if fallback_mapping:
+            trace.append(
+                f"fallback_email_mappings: matched {email.from_addr.lower()} -> "
+                f"{fallback_mapping.label}"
+            )
+            action = _email_mapping_to_action(fallback_mapping, config.label_prefix)
+            return EvaluationResult(
+                matched=True,
+                chain="fallback_email_mappings",
+                rule_index=0,
+                action=action,
+                trace=trace,
+            )
+        trace.append("fallback_email_mappings: no match")
+
+    # No match at all
+    return EvaluationResult(matched=False, trace=trace)

@@ -1,12 +1,15 @@
 """Rules loading and configuration."""
 
+import logging
 import re
 from pathlib import Path
 
 import yaml
 
 from triage.engine.variables import TEMPLATE_PATTERN
-from triage.models.rules import BUILTIN_PROMPTS_DATA, RulesConfig
+from triage.models.rules import BUILTIN_PROMPTS_DATA, EmailMappingAction, RulesConfig
+
+logger = logging.getLogger(__name__)
 
 # Category descriptions for prompt generation
 CATEGORY_DESCRIPTIONS = {
@@ -41,6 +44,62 @@ Answer only: yes or no""",
         "model": "qwen2.5:0.5b",
     },
 }
+
+
+def _load_email_mappings(
+    mappings: dict[str, dict], section_name: str
+) -> dict[str, EmailMappingAction]:
+    """Load and normalize email mappings from config.
+
+    Args:
+        mappings: Raw mappings dict from YAML (email -> action config)
+        section_name: Name of the section (for error messages)
+
+    Returns:
+        Dict with lowercase email keys and validated EmailMappingAction values
+
+    Raises:
+        ValueError: If email address is empty or action config is invalid
+    """
+    normalized = {}
+    for email, action_config in mappings.items():
+        if not email or not email.strip():
+            raise ValueError(f"{section_name}: Empty email address not allowed")
+
+        normalized_email = email.lower().strip()
+        try:
+            action = EmailMappingAction.model_validate(action_config)
+            normalized[normalized_email] = action
+        except Exception as e:
+            raise ValueError(
+                f"{section_name}: Invalid action config for '{email}': {e}"
+            ) from e
+
+    if normalized:
+        logger.info(f"Loaded {len(normalized)} mappings from {section_name}")
+
+    return normalized
+
+
+def _validate_no_duplicate_mappings(
+    priority_mappings: dict[str, EmailMappingAction],
+    fallback_mappings: dict[str, EmailMappingAction],
+) -> None:
+    """Validate no duplicate email addresses across priority and fallback sections.
+
+    Args:
+        priority_mappings: Priority email mappings
+        fallback_mappings: Fallback email mappings
+
+    Raises:
+        ValueError: If duplicate email addresses found
+    """
+    duplicates = set(priority_mappings.keys()) & set(fallback_mappings.keys())
+    if duplicates:
+        raise ValueError(
+            f"Duplicate email addresses found in both priority_email_mappings "
+            f"and fallback_email_mappings: {sorted(duplicates)}"
+        )
 
 
 def load_rules(path: str | Path) -> RulesConfig:
@@ -89,7 +148,37 @@ def load_rules(path: str | Path) -> RulesConfig:
             prompts[version] = config
     data["prompts"] = prompts
 
+    # Load email mappings with normalized lowercase keys
+    priority_mappings = _load_email_mappings(
+        data.get("priority_email_mappings") or {}, "priority_email_mappings"
+    )
+    fallback_mappings = _load_email_mappings(
+        data.get("fallback_email_mappings") or {}, "fallback_email_mappings"
+    )
+
+    # Validate no duplicate keys across both sections
+    _validate_no_duplicate_mappings(priority_mappings, fallback_mappings)
+
+    data["priority_email_mappings"] = priority_mappings
+    data["fallback_email_mappings"] = fallback_mappings
+
     return RulesConfig.model_validate(data)
+
+
+def lookup_email_mapping(
+    from_addr: str, mappings: dict[str, EmailMappingAction]
+) -> EmailMappingAction | None:
+    """O(1) hash lookup for email mapping, case-insensitive.
+
+    Args:
+        from_addr: Sender email address to look up
+        mappings: Email mappings dict (already normalized to lowercase keys)
+
+    Returns:
+        EmailMappingAction if found, None otherwise
+    """
+    normalized = from_addr.lower().strip()
+    return mappings.get(normalized)
 
 
 def format_classification_prompt(
