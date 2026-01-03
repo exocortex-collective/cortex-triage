@@ -32,6 +32,12 @@ from psycopg2.pool import SimpleConnectionPool
 
 from triage.db.config_loader import ConfigLoadError, load_config_from_db
 from triage.db.worker_signals import poll_signals
+from triage.db.worker_status import (
+    deregister_worker,
+    register_worker,
+    update_config_version,
+    update_heartbeat,
+)
 from triage.engine.matcher import evaluate
 from triage.engine.rules import load_rules, validate_rules
 from triage.models.patterns import EmailPattern
@@ -747,6 +753,7 @@ class TriageWorker:
         self.worker_id = worker_id or f"triage-{os.getpid()}"
         self.last_signal_poll = time.time()
         self.config_version = config_version  # Track which DB config version is loaded
+        self.jobs_processed = 0  # Track cumulative job count for status updates
 
     def stop(self) -> None:
         """Signal the worker to stop."""
@@ -801,6 +808,13 @@ class TriageWorker:
             self.rules = new_rules
             self.config_version = new_config_version
 
+            # Update worker status in database
+            try:
+                with self._get_conn() as conn:
+                    update_config_version(conn, self.worker_id, new_config_version)
+            except Exception as e:
+                logger.warning(f"Failed to update config version in worker_status: {e}")
+
             logger.info(
                 f"Rules reloaded successfully: "
                 f"version {old_version} → {new_config_version}"
@@ -812,7 +826,10 @@ class TriageWorker:
             return False
 
     def _check_and_process_signals(self) -> None:
-        """Poll for and process worker signals (config reload, shutdown, etc.)."""
+        """Poll for and process worker signals (config reload, shutdown, etc.).
+
+        Also updates worker heartbeat and job count in database.
+        """
         # Only poll at configured interval
         now = time.time()
         if now - self.last_signal_poll < self.config.signal_poll_interval:
@@ -822,6 +839,10 @@ class TriageWorker:
 
         try:
             with self._get_conn() as conn:
+                # Update heartbeat and job count
+                update_heartbeat(conn, self.worker_id, self.jobs_processed)
+
+                # Poll for control signals
                 signals = poll_signals(conn, "triage", self.worker_id)
 
             for signal in signals:
@@ -1624,31 +1645,50 @@ class TriageWorker:
 
         logger.info(f"Triage worker started (worker_id={self.worker_id})")
 
+        # Register worker in database
+        try:
+            with self._get_conn() as conn:
+                register_worker(conn, self.worker_id, "triage", self.config_version)
+        except Exception as e:
+            logger.warning(f"Failed to register worker status: {e}")
+
         total_processed = 0
         total_failed = 0
 
-        while self.running:
-            # Check for control signals (config reload, shutdown, etc.)
-            self._check_and_process_signals()
+        try:
+            while self.running:
+                # Check for control signals (config reload, shutdown, etc.)
+                # Also updates heartbeat
+                self._check_and_process_signals()
 
-            processed, failed = self._process_batch()
+                processed, failed = self._process_batch()
 
-            if processed == 0 and failed == 0:
-                logger.debug(f"No jobs, sleeping {self.config.poll_interval}s")
-                time.sleep(self.config.poll_interval)
-                continue
+                if processed == 0 and failed == 0:
+                    logger.debug(f"No jobs, sleeping {self.config.poll_interval}s")
+                    time.sleep(self.config.poll_interval)
+                    continue
 
-            total_processed += processed
-            total_failed += failed
+                total_processed += processed
+                total_failed += failed
+                self.jobs_processed += processed  # Track for status updates
 
-            if (total_processed + total_failed) % 100 == 0:
-                logger.info(
-                    f"Progress: {total_processed} processed, {total_failed} failed"
-                )
+                if (total_processed + total_failed) % 100 == 0:
+                    logger.info(
+                        f"Progress: {total_processed} processed, {total_failed} failed"
+                    )
 
-        logger.info(
-            f"Triage worker stopped: {total_processed} processed, {total_failed} failed"
-        )
+        finally:
+            # Deregister worker on shutdown
+            try:
+                with self._get_conn() as conn:
+                    deregister_worker(conn, self.worker_id)
+            except Exception as e:
+                logger.warning(f"Failed to deregister worker: {e}")
+
+            logger.info(
+                f"Triage worker stopped: "
+                f"{total_processed} processed, {total_failed} failed"
+            )
 
     def run_once(self) -> tuple[int, int]:
         """Process all pending jobs once, then exit. Returns (processed, failed)."""
