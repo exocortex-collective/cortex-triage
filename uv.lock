@@ -213,7 +213,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "black", marker = "extra == 'dev'", specifier = ">=23.0.0" },
-    { name = "cortex-utils", git = "https://github.com/devonjones/cortex-utils.git?rev=7c3d796a1252e719217151b75f255f74a29a9fa3" },
+    { name = "cortex-utils", git = "https://github.com/devonjones/cortex-utils.git?rev=main" },
     { name = "duckdb", specifier = ">=0.9.0" },
     { name = "google-api-python-client", specifier = ">=2.100.0" },
     { name = "google-auth-oauthlib", specifier = ">=1.1.0" },
@@ -235,13 +235,14 @@ provides-extras = ["dev"]
 [[package]]
 name = "cortex-utils"
 version = "0.1.0"
-source = { git = "https://github.com/devonjones/cortex-utils.git?rev=7c3d796a1252e719217151b75f255f74a29a9fa3#7c3d796a1252e719217151b75f255f74a29a9fa3" }
+source = { git = "https://github.com/devonjones/cortex-utils.git?rev=main#1de9a8fb49f086c6b650d238a125a0d19a1315e6" }
 dependencies = [
     { name = "click" },
     { name = "docker" },
     { name = "httpx" },
     { name = "prometheus-client" },
     { name = "psycopg2-binary" },
+    { name = "pydantic" },
     { name = "pyyaml" },
     { name = "schedule" },
     { name = "structlog" },

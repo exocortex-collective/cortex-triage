@@ -1,12 +1,7 @@
 """Tests for match condition evaluation."""
 
 import pytest
-
-from triage.engine.matcher import (
-    evaluate,
-    matches_condition,
-)
-from triage.models.rules import (
+from cortex_utils.triage_config.models import (
     Action,
     Email,
     EmailMappingAction,
@@ -15,6 +10,11 @@ from triage.models.rules import (
     MatchCondition,
     Rule,
     RulesConfig,
+)
+
+from triage.engine.matcher import (
+    evaluate,
+    matches_condition,
 )
 
 
@@ -1750,7 +1750,7 @@ class TestDynamicLabels:
 
     def test_header_regex_variable_in_label(self) -> None:
         """Test extracting variable from header and using in label."""
-        from triage.models.rules import (
+        from cortex_utils.triage_config.models import (
             HeaderRegexVariable,
             Variable,
         )
@@ -1792,7 +1792,7 @@ class TestDynamicLabels:
 
     def test_subject_regex_variable_in_label(self) -> None:
         """Test extracting variable from subject and using in label."""
-        from triage.models.rules import (
+        from cortex_utils.triage_config.models import (
             SubjectRegexVariable,
             Variable,
         )
@@ -1832,7 +1832,7 @@ class TestDynamicLabels:
 
     def test_llm_variable_in_label(self) -> None:
         """Test extracting variable via LLM and using in label."""
-        from triage.models.rules import (
+        from cortex_utils.triage_config.models import (
             LLMVariable,
             Variable,
         )
@@ -1876,7 +1876,7 @@ class TestDynamicLabels:
 
     def test_variable_failure_falls_through(self) -> None:
         """Test that variable extraction failure causes rule to be skipped."""
-        from triage.models.rules import (
+        from cortex_utils.triage_config.models import (
             HeaderRegexVariable,
             Variable,
         )
@@ -1925,7 +1925,7 @@ class TestDynamicLabels:
 
     def test_multiple_variables_in_label(self) -> None:
         """Test using multiple variables in a label template."""
-        from triage.models.rules import (
+        from cortex_utils.triage_config.models import (
             HeaderRegexVariable,
             SubjectRegexVariable,
             Variable,
@@ -1974,7 +1974,7 @@ class TestDynamicLabels:
 
     def test_variable_with_archive_action(self) -> None:
         """Test variables work with other action fields like archive."""
-        from triage.models.rules import (
+        from cortex_utils.triage_config.models import (
             HeaderRegexVariable,
             Variable,
         )
@@ -2112,7 +2112,7 @@ class TestDynamicLabels:
 
     def test_nested_label_hierarchy(self) -> None:
         """Test that nested label paths are handled correctly."""
-        from triage.models.rules import (
+        from cortex_utils.triage_config.models import (
             HeaderRegexVariable,
             Variable,
         )
@@ -2161,7 +2161,7 @@ class TestPatternMatching:
 
     def test_matches_pattern_true_with_pattern_info(self) -> None:
         """Test matches_pattern=True when email has pattern_info."""
-        from triage.models.rules import PatternInfo
+        from cortex_utils.triage_config.models import PatternInfo
 
         email = Email(
             id=1,
@@ -2198,7 +2198,7 @@ class TestPatternMatching:
 
     def test_matches_pattern_false_with_pattern_info(self) -> None:
         """Test matches_pattern=False when email has pattern_info (negation)."""
-        from triage.models.rules import PatternInfo
+        from cortex_utils.triage_config.models import PatternInfo
 
         email = Email(
             id=1,
@@ -2235,7 +2235,7 @@ class TestPatternMatching:
 
     def test_pattern_confidence_min_above_threshold(self) -> None:
         """Test pattern_confidence_min passes when confidence is above threshold."""
-        from triage.models.rules import PatternInfo
+        from cortex_utils.triage_config.models import PatternInfo
 
         email = Email(
             id=1,
@@ -2259,7 +2259,7 @@ class TestPatternMatching:
 
     def test_pattern_confidence_min_below_threshold(self) -> None:
         """Test pattern_confidence_min fails when confidence is below threshold."""
-        from triage.models.rules import PatternInfo
+        from cortex_utils.triage_config.models import PatternInfo
 
         email = Email(
             id=1,
@@ -2296,7 +2296,7 @@ class TestPatternMatching:
 
     def test_pattern_interval_single_value_matches(self) -> None:
         """Test pattern_interval with single value matches."""
-        from triage.models.rules import PatternInfo
+        from cortex_utils.triage_config.models import PatternInfo
 
         email = Email(
             id=1,
@@ -2320,7 +2320,7 @@ class TestPatternMatching:
 
     def test_pattern_interval_list_matches_any(self) -> None:
         """Test pattern_interval with list matches any."""
-        from triage.models.rules import PatternInfo
+        from cortex_utils.triage_config.models import PatternInfo
 
         email = Email(
             id=1,
@@ -2344,7 +2344,7 @@ class TestPatternMatching:
 
     def test_pattern_interval_no_match(self) -> None:
         """Test pattern_interval fails when interval doesn't match."""
-        from triage.models.rules import PatternInfo
+        from cortex_utils.triage_config.models import PatternInfo
 
         email = Email(
             id=1,
@@ -2368,7 +2368,7 @@ class TestPatternMatching:
 
     def test_pattern_status_single_value(self) -> None:
         """Test pattern_status with single value."""
-        from triage.models.rules import PatternInfo
+        from cortex_utils.triage_config.models import PatternInfo
 
         email = Email(
             id=1,
@@ -2392,7 +2392,7 @@ class TestPatternMatching:
 
     def test_pattern_status_list_matches_any(self) -> None:
         """Test pattern_status with list matches any."""
-        from triage.models.rules import PatternInfo
+        from cortex_utils.triage_config.models import PatternInfo
 
         email = Email(
             id=1,
@@ -2416,7 +2416,7 @@ class TestPatternMatching:
 
     def test_pattern_status_no_match(self) -> None:
         """Test pattern_status fails when status doesn't match."""
-        from triage.models.rules import PatternInfo
+        from cortex_utils.triage_config.models import PatternInfo
 
         email = Email(
             id=1,
@@ -2440,7 +2440,7 @@ class TestPatternMatching:
 
     def test_combined_pattern_conditions(self) -> None:
         """Test combining multiple pattern conditions."""
-        from triage.models.rules import PatternInfo
+        from cortex_utils.triage_config.models import PatternInfo
 
         email = Email(
             id=1,
@@ -2478,7 +2478,7 @@ class TestPatternMatching:
 
     def test_pattern_with_regular_conditions(self) -> None:
         """Test pattern conditions combined with regular conditions."""
-        from triage.models.rules import PatternInfo
+        from cortex_utils.triage_config.models import PatternInfo
 
         email = Email(
             id=1,
@@ -2519,7 +2519,11 @@ class TestPatternFieldVariables:
 
     def test_pattern_field_variable_merchant(self) -> None:
         """Test extracting merchant from pattern_info."""
-        from triage.models.rules import PatternFieldVariable, PatternInfo, Variable
+        from cortex_utils.triage_config.models import (
+            PatternFieldVariable,
+            PatternInfo,
+            Variable,
+        )
 
         email = Email(
             id=1,
@@ -2562,7 +2566,11 @@ class TestPatternFieldVariables:
 
     def test_pattern_field_variable_interval_type(self) -> None:
         """Test extracting interval_type from pattern_info."""
-        from triage.models.rules import PatternFieldVariable, PatternInfo, Variable
+        from cortex_utils.triage_config.models import (
+            PatternFieldVariable,
+            PatternInfo,
+            Variable,
+        )
 
         email = Email(
             id=1,
@@ -2607,7 +2615,7 @@ class TestPatternFieldVariables:
 
     def test_pattern_field_variable_no_pattern_fails(self) -> None:
         """Test pattern_field variable fails when no pattern_info."""
-        from triage.models.rules import PatternFieldVariable, Variable
+        from cortex_utils.triage_config.models import PatternFieldVariable, Variable
 
         email = Email(
             id=1,
@@ -2647,9 +2655,8 @@ class TestPatternFieldVariables:
     def test_pattern_field_variable_invalid_field(self) -> None:
         """Test pattern_field with invalid field name raises validation error."""
         import pytest
+        from cortex_utils.triage_config.models import PatternFieldVariable
         from pydantic import ValidationError
-
-        from triage.models.rules import PatternFieldVariable
 
         # With Literal type, invalid field names are caught at construction
         with pytest.raises(ValidationError) as exc_info:
@@ -2660,7 +2667,11 @@ class TestPatternFieldVariables:
 
     def test_pattern_field_multiple_fields(self) -> None:
         """Test extracting multiple fields from pattern_info."""
-        from triage.models.rules import PatternFieldVariable, PatternInfo, Variable
+        from cortex_utils.triage_config.models import (
+            PatternFieldVariable,
+            PatternInfo,
+            Variable,
+        )
 
         email = Email(
             id=1,

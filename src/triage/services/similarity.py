@@ -18,9 +18,8 @@ from typing import Any
 
 import psycopg2
 import requests
+from cortex_utils.triage_config.models import BUILTIN_BODY_EXTRACTION_PROMPTS_DATA
 from psycopg2.extras import RealDictCursor
-
-from triage.models.rules import BUILTIN_BODY_EXTRACTION_PROMPTS_DATA
 
 logger = logging.getLogger(__name__)
 
