@@ -14,13 +14,12 @@ import sys
 from pathlib import Path
 
 import psycopg2
-
-from triage.db.config_loader import (
+from cortex_utils.triage_config import (
     ConfigImportError,
     export_config_to_yaml,
     import_yaml_to_db,
+    load_rules_from_string,
 )
-from triage.engine.rules import load_rules_from_string
 
 logging.basicConfig(
     level=logging.INFO,
