@@ -78,14 +78,6 @@ module = "cortex_utils.*"
 ignore_missing_imports = true
 follow_untyped_imports = true
 
-[[tool.mypy.overrides]]
-module = "triage.db.config_loader"
-ignore_missing_imports = true
-
-[[tool.mypy.overrides]]
-module = "triage.engine.rules"
-ignore_missing_imports = true
-
 [tool.ruff]
 line-length = 88
 target-version = "py311"
