@@ -8,6 +8,14 @@ from functools import lru_cache
 from typing import Protocol
 
 import structlog
+from cortex_utils.triage_config.models import (
+    Action,
+    Email,
+    EmailMappingAction,
+    EvaluationResult,
+    MatchCondition,
+    RulesConfig,
+)
 
 from triage.engine.rules import format_classification_prompt, lookup_email_mapping
 from triage.engine.variables import (
@@ -15,14 +23,6 @@ from triage.engine.variables import (
     VariableContext,
     VariableError,
     resolve_variables,
-)
-from triage.models.rules import (
-    Action,
-    Email,
-    EmailMappingAction,
-    EvaluationResult,
-    MatchCondition,
-    RulesConfig,
 )
 
 log = structlog.get_logger()

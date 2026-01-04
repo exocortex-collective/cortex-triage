@@ -4,9 +4,10 @@ import tempfile
 from pathlib import Path
 
 import pytest
+from cortex_utils.triage_config import validate_rules
+from cortex_utils.triage_config.models import RulesConfig
 
-from triage.engine.rules import load_rules, lookup_email_mapping, validate_rules
-from triage.models.rules import RulesConfig
+from triage.engine.rules import load_rules, lookup_email_mapping
 
 
 def test_load_rules_from_yaml() -> None:

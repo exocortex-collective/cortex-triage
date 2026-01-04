@@ -24,13 +24,23 @@ from cortex_utils.metrics import (
     QUEUE_PROCESSED,
     start_metrics_server,
 )
+from cortex_utils.triage_config import (
+    ConfigLoadError,
+    load_config_from_db,
+    validate_rules,
+)
+from cortex_utils.triage_config.models import (
+    Email,
+    EvaluationResult,
+    PatternInfo,
+    RulesConfig,
+)
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from psycopg2.extras import Json
 from psycopg2.pool import SimpleConnectionPool
 
-from triage.db.config_loader import ConfigLoadError, load_config_from_db
 from triage.db.worker_signals import poll_signals
 from triage.db.worker_status import (
     cleanup_stale_workers,
@@ -40,9 +50,8 @@ from triage.db.worker_status import (
     update_heartbeat,
 )
 from triage.engine.matcher import evaluate
-from triage.engine.rules import load_rules, validate_rules
+from triage.engine.rules import load_rules
 from triage.models.patterns import EmailPattern
-from triage.models.rules import Email, EvaluationResult, PatternInfo, RulesConfig
 from triage.services.lifecycle import (
     LifecycleConfig,
     check_maintenance_needed,

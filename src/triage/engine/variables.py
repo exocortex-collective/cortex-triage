@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING, Protocol
 import structlog
 
 if TYPE_CHECKING:
-    from triage.models.rules import (
+    from cortex_utils.triage_config.models import (
         AttachmentFilenameRegexVariable,
         BodyRegexVariable,
         CcRegexVariable,

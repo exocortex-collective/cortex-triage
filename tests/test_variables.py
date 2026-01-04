@@ -1,6 +1,13 @@
 """Tests for variable resolution in dynamic labels."""
 
 import pytest
+from cortex_utils.triage_config.models import (
+    Email,
+    HeaderRegexVariable,
+    LLMVariable,
+    SubjectRegexVariable,
+    Variable,
+)
 
 from triage.engine.variables import (
     VariableContext,
@@ -8,13 +15,6 @@ from triage.engine.variables import (
     resolve_header_regex,
     resolve_subject_regex,
     resolve_variables,
-)
-from triage.models.rules import (
-    Email,
-    HeaderRegexVariable,
-    LLMVariable,
-    SubjectRegexVariable,
-    Variable,
 )
 
 
