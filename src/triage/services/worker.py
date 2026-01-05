@@ -50,7 +50,6 @@ from triage.db.worker_status import (
     update_heartbeat,
 )
 from triage.engine.matcher import evaluate
-from triage.engine.rules import load_rules
 from triage.models.patterns import EmailPattern
 from triage.services.lifecycle import (
     LifecycleConfig,
@@ -88,7 +87,6 @@ class Config:
     postgres_db: str
     postgres_user: str
     postgres_password: str
-    rules_path: str
     duckdb_api_url: str
     ollama_url: str
     gmail_token_path: str
@@ -771,40 +769,28 @@ class TriageWorker:
         self.running = False
 
     def reload_rules(self) -> bool:
-        """Reload rules from database (preferred) or config file (fallback).
+        """Reload rules from database.
 
         Returns True if reload succeeded, False otherwise.
         The old rules remain active if reload fails.
         """
         try:
-            # Try loading from database first (active version)
-            try:
-                with self._get_conn() as conn:
-                    new_rules = load_config_from_db(conn)
+            # Load from database (active version)
+            with self._get_conn() as conn:
+                new_rules = load_config_from_db(conn)
 
-                # Get the version number from database
-                with self._get_conn() as conn:
-                    cursor = conn.cursor()
-                    cursor.execute(
-                        """SELECT version FROM triage_config_versions
-                           WHERE is_active = TRUE"""
-                    )
-                    row = cursor.fetchone()
-                    new_config_version = row[0] if row else None
-                    cursor.close()
-
-                logger.info(
-                    f"Loaded config from database (version {new_config_version})"
+            # Get the version number from database
+            with self._get_conn() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    """SELECT version FROM triage_config_versions
+                       WHERE is_active = TRUE"""
                 )
+                row = cursor.fetchone()
+                new_config_version = row[0] if row else None
+                cursor.close()
 
-            except ConfigLoadError as e:
-                # Database load failed, fallback to file
-                logger.warning(
-                    f"Failed to load from database ({e}), falling back to file"
-                )
-                new_rules = load_rules(self.config.rules_path)
-                new_config_version = None
-                logger.info(f"Loaded config from file: {self.config.rules_path}")
+            logger.info(f"Loaded config from database (version {new_config_version})")
 
             # Validate the loaded config
             errors = validate_rules(new_rules)
@@ -1754,60 +1740,42 @@ class TriageWorker:
         return total_processed, total_failed
 
 
-def load_initial_config(config: Config) -> tuple[RulesConfig, int | None]:
-    """Load config on startup: try database first, fallback to file.
+def load_initial_config(config: Config) -> tuple[RulesConfig, int]:
+    """Load config from database on startup.
 
     Returns:
-        (rules, config_version) - config_version is None if loaded from file
+        (rules, config_version)
+
+    Raises:
+        ConfigLoadError: If config cannot be loaded from database
     """
-    # Try loading from database first (active version)
+    conn = psycopg2.connect(
+        host=config.postgres_host,
+        port=config.postgres_port,
+        dbname=config.postgres_db,
+        user=config.postgres_user,
+        password=config.postgres_password,
+    )
     try:
-        conn = psycopg2.connect(
-            host=config.postgres_host,
-            port=config.postgres_port,
-            dbname=config.postgres_db,
-            user=config.postgres_user,
-            password=config.postgres_password,
+        rules = load_config_from_db(conn)
+
+        # Get version number
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT version FROM triage_config_versions WHERE is_active = TRUE"
         )
-        try:
-            rules = load_config_from_db(conn)
+        row = cursor.fetchone()
+        config_version = row[0] if row else None
+        cursor.close()
 
-            # Get version number
-            cursor = conn.cursor()
-            cursor.execute(
-                "SELECT version FROM triage_config_versions WHERE is_active = TRUE"
-            )
-            row = cursor.fetchone()
-            config_version = row[0] if row else None
-            cursor.close()
+        if config_version is None:
+            raise ConfigLoadError("No active config version found in database")
 
-            logger.info(f"✓ Loaded config from database (version {config_version})")
-            return rules, config_version
+        logger.info(f"✓ Loaded config from database (version {config_version})")
+        return rules, config_version
 
-        finally:
-            conn.close()
-
-    except ConfigLoadError as e:
-        # Database has no config, fallback to file
-        logger.warning(
-            f"No config in database ({e}), loading from file: {config.rules_path}"
-        )
-
-    except Exception as e:
-        # Database connection or other error, fallback to file
-        logger.warning(
-            f"Failed to connect to database ({e}), "
-            f"loading from file: {config.rules_path}"
-        )
-
-    # Fallback: load from file
-    try:
-        rules = load_rules(config.rules_path)
-        logger.info(f"✓ Loaded config from file: {config.rules_path}")
-        return rules, None
-    except Exception as e:
-        logger.error(f"Failed to load rules from file: {e}")
-        raise
+    finally:
+        conn.close()
 
 
 def main() -> None:
@@ -1854,14 +1822,13 @@ def main() -> None:
         postgres_db=os.environ["POSTGRES_DB"],
         postgres_user=os.environ["POSTGRES_USER"],
         postgres_password=os.environ["POSTGRES_PASSWORD"],
-        rules_path=os.environ["RULES_PATH"],
         duckdb_api_url=os.environ["DUCKDB_API_URL"],
         ollama_url=os.environ["OLLAMA_URL"],
         gmail_token_path=os.environ["GMAIL_TOKEN_PATH"],
         batch_size=args.batch_size,
     )
 
-    # Load and validate rules (DB first, file fallback)
+    # Load and validate rules from database
     try:
         rules, config_version = load_initial_config(config)
         errors = validate_rules(rules)
