@@ -843,9 +843,15 @@ class TriageWorker:
             with self._get_conn() as conn:
                 new_config = load_config_from_db(conn)
 
-            # Update just the mappings (keep existing rules, chains, intents, etc.)
-            self.rules.priority_email_mappings = new_config.priority_email_mappings
-            self.rules.fallback_email_mappings = new_config.fallback_email_mappings
+            # Create new RulesConfig with updated mappings (atomic update)
+            # Prevents race conditions from partial updates
+            new_rules = self.rules.model_copy(
+                update={
+                    "priority_email_mappings": new_config.priority_email_mappings,
+                    "fallback_email_mappings": new_config.fallback_email_mappings,
+                }
+            )
+            self.rules = new_rules
 
             logger.info(
                 f"Mappings reloaded successfully: "
