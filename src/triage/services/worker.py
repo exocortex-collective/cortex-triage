@@ -101,6 +101,9 @@ class Config:
     signal_poll_interval: int = (
         30  # seconds between signal polls (check for control messages)
     )
+    # Convergence settings (idle-time config updates)
+    enable_convergence: bool = True  # Enable/disable idle-time convergence
+    priority_convergence_interval: int = 300  # seconds between bulk priority updates
 
 
 # Max characters of email body to include in LLM prompts
@@ -767,6 +770,7 @@ class TriageWorker:
         self.worker_id = worker_id or f"triage-{os.getpid()}"
         self.last_signal_poll = time.time()
         self.last_cleanup = time.time()  # Track when we last cleaned up stale workers
+        self.last_priority_convergence = 0.0  # Track last bulk priority update
         self.config_version = config_version  # Track which DB config version is loaded
         self.jobs_processed = 0  # Track cumulative job count for status updates
 
@@ -829,6 +833,162 @@ class TriageWorker:
             logger.error(f"Failed to reload rules: {e}", exc_info=True)
             return False
 
+    def reload_mappings(self) -> bool:
+        """Reload email mappings from database (without changing rules).
+
+        This is lighter than reload_rules() - only mappings change, not rules/chains.
+
+        Returns True if reload succeeded, False otherwise.
+        """
+        try:
+            # Load fresh config from database
+            with self._get_conn() as conn:
+                new_config = load_config_from_db(conn)
+
+            # Create new RulesConfig with updated mappings (atomic update)
+            # Prevents race conditions from partial updates
+            new_rules = self.rules.model_copy(
+                update={
+                    "priority_email_mappings": new_config.priority_email_mappings,
+                    "fallback_email_mappings": new_config.fallback_email_mappings,
+                }
+            )
+            self.rules = new_rules
+
+            logger.info(
+                f"Mappings reloaded successfully: "
+                f"priority={len(self.rules.priority_email_mappings)}, "
+                f"fallback={len(self.rules.fallback_email_mappings)}"
+            )
+            return True
+
+        except Exception as e:
+            logger.error(f"Failed to reload mappings: {e}", exc_info=True)
+            return False
+
+    def _mark_convergence_failed(self, gmail_id: str) -> None:
+        """Mark a convergence email as processed (update to current version).
+
+        This prevents infinite retry loops for emails that fail convergence.
+        """
+        try:
+            with self._get_conn() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute(
+                        """
+                        UPDATE classifications
+                        SET config_version_id = (
+                            SELECT version FROM triage_config_versions
+                            WHERE is_active = TRUE LIMIT 1
+                        )
+                        WHERE gmail_id = %s
+                        """,
+                        (gmail_id,),
+                    )
+                conn.commit()
+        except Exception as e:
+            logger.error(
+                f"Failed to mark convergence failed for {gmail_id}: {e}",
+                exc_info=True,
+            )
+
+    def _converge_priority_and_get_next_email(self) -> dict[str, Any] | None:
+        """Converge priority emails and get next email for idle-time processing.
+
+        Two-step process:
+        1. Bulk-update priority sender emails (no re-processing needed)
+        2. Pick oldest non-priority email with outdated config version
+
+        Returns:
+            Dict with gmail_id, or None if nothing to converge
+        """
+        if not self.config.enable_convergence:
+            return None
+
+        try:
+            with self._get_conn() as conn:
+                with conn.cursor() as cursor:
+                    # Get current active config version
+                    cursor.execute(
+                        """
+                        SELECT version FROM triage_config_versions
+                        WHERE is_active = TRUE LIMIT 1
+                        """
+                    )
+                    row = cursor.fetchone()
+                    if not row:
+                        return None
+
+                    current_version = row[0]
+
+                    # Step 1: Bulk UPDATE priority sender emails (no re-processing)
+                    # These always match priority mapping regardless of rules
+                    # Only run this periodically to avoid DB load
+                    now = time.time()
+                    if (
+                        now - self.last_priority_convergence
+                        >= self.config.priority_convergence_interval
+                    ):
+                        cursor.execute(
+                            """
+                            UPDATE classifications c
+                            SET config_version_id = %s
+                            WHERE c.config_version_id < %s
+                              AND EXISTS (
+                                SELECT 1
+                                FROM emails_parsed ep
+                                JOIN triage_email_mappings tem
+                                  ON LOWER(ep.from_addr) = LOWER(tem.email_address)
+                                WHERE ep.gmail_id = c.gmail_id
+                                  AND tem.mapping_type = 'priority'
+                                  AND tem.deleted_at IS NULL
+                              )
+                            """,
+                            (current_version, current_version),
+                        )
+                        bulk_updated = cursor.rowcount
+
+                        if bulk_updated > 0:
+                            logger.info(
+                                f"Convergence: bulk updated {bulk_updated} priority "
+                                f"sender emails to version {current_version}"
+                            )
+                        self.last_priority_convergence = now
+
+                    # Step 2: Pick oldest non-priority email with old config version
+                    # Process it directly (not via queue) - true idle-time convergence
+                    cursor.execute(
+                        """
+                        SELECT er.id as email_id, er.gmail_id
+                        FROM classifications c
+                        JOIN emails_raw er ON er.gmail_id = c.gmail_id
+                        WHERE c.config_version_id < %s
+                          AND NOT EXISTS (
+                            SELECT 1
+                            FROM emails_parsed ep
+                            JOIN triage_email_mappings tem
+                              ON LOWER(ep.from_addr) = LOWER(tem.email_address)
+                            WHERE ep.gmail_id = c.gmail_id
+                              AND tem.mapping_type = 'priority'
+                              AND tem.deleted_at IS NULL
+                          )
+                        ORDER BY c.classified_at ASC
+                        LIMIT 1
+                        """,
+                        (current_version,),
+                    )
+                    row = cursor.fetchone()
+
+                conn.commit()
+
+                if row:
+                    return {"gmail_id": row[1]}
+                return None
+
+        except Exception as e:
+            logger.error(f"Failed to get convergence email: {e}", exc_info=True)
+            return None
+
     def _check_and_process_signals(self) -> None:
         """Poll for and process worker signals (config reload, shutdown, etc.).
 
@@ -860,6 +1020,10 @@ class TriageWorker:
                         logger.info("Config reloaded successfully via signal")
                     else:
                         logger.error("Config reload failed")
+
+                elif signal.signal_type == "mappings_reload":
+                    # reload_mappings() already logs success/failure details
+                    self.reload_mappings()
 
                 elif signal.signal_type == "shutdown":
                     logger.info("Received shutdown signal")
@@ -1691,6 +1855,106 @@ class TriageWorker:
                 processed, failed = self._process_batch()
 
                 if processed == 0 and failed == 0:
+                    # Queue is idle - try convergence (idle-time processing)
+                    convergence_job = self._converge_priority_and_get_next_email()
+                    if convergence_job:
+                        gmail_id = convergence_job["gmail_id"]
+                        start_time = time.time()
+                        processed_convergence = False
+                        try:
+                            email = self._get_email_data(gmail_id)
+                            if not email:
+                                logger.warning(
+                                    f"Convergence: Parsed email not found: {gmail_id}"
+                                )
+                                ERRORS.labels(
+                                    service="triage-worker",
+                                    error_type="email_not_found",
+                                ).inc()
+                            else:
+                                if not email.body:
+                                    email.body = self._get_body_from_api(gmail_id)
+
+                                result = evaluate(self.rules, email, self.ollama)
+
+                                action_executed = False
+                                if result.matched and result.action:
+                                    action_executed = self._execute_action(
+                                        gmail_id, priority=0
+                                    )
+                                    if action_executed:
+                                        logger.info(
+                                            f"Convergence processed {gmail_id}: "
+                                            f"chain={result.chain}, "
+                                            f"rule={result.rule_index}, "
+                                            f"action={result.action}"
+                                        )
+                                        QUEUE_PROCESSED.labels(
+                                            queue="labeling", status="enqueued"
+                                        ).inc()
+                                    else:
+                                        logger.warning(
+                                            f"Convergence action failed for "
+                                            f"{gmail_id}: {result.action}"
+                                        )
+                                else:
+                                    if not result.matched:
+                                        logger.info(
+                                            f"Convergence: No match for {gmail_id}"
+                                        )
+                                    else:
+                                        logger.info(
+                                            f"Convergence: Matched but no action "
+                                            f"for {gmail_id}"
+                                        )
+
+                                self._store_classification(
+                                    email, result, action_executed
+                                )
+                                method = "llm" if result.llm_category else "rule"
+                                EMAILS_CLASSIFIED.labels(method=method).inc()
+                                processed_convergence = True
+
+                        except LLMError as e:
+                            logger.error(
+                                f"Convergence LLM error processing {gmail_id}: {e}"
+                            )
+                            ERRORS.labels(
+                                service="triage-worker", error_type="llm_error"
+                            ).inc()
+                            # Mark as processed to prevent infinite retry
+                            self._mark_convergence_failed(gmail_id)
+                        except Exception as e:
+                            logger.error(
+                                f"Convergence failed to process {gmail_id}: {e}",
+                                exc_info=True,
+                            )
+                            ERRORS.labels(
+                                service="triage-worker", error_type="job_failed"
+                            ).inc()
+                            # Mark as processed to prevent infinite retry
+                            self._mark_convergence_failed(gmail_id)
+                        finally:
+                            PROCESSING_DURATION.labels(
+                                queue="convergence", operation="process"
+                            ).observe(time.time() - start_time)
+
+                        if processed_convergence:
+                            total_processed += 1
+                            self.jobs_processed += 1
+                            logger.debug("Processed 1 convergence email")
+                            QUEUE_PROCESSED.labels(
+                                queue="convergence", status="success"
+                            ).inc()
+                        else:
+                            total_failed += 1
+                            logger.error("Convergence processing failed")
+                            QUEUE_PROCESSED.labels(
+                                queue="convergence", status="error"
+                            ).inc()
+                        continue  # Check for more work immediately
+
+                    # No convergence work either, sleep
                     logger.debug(f"No jobs, sleeping {self.config.poll_interval}s")
                     time.sleep(self.config.poll_interval)
                     continue
@@ -1828,6 +2092,8 @@ def main() -> None:
         ollama_url=os.environ["OLLAMA_URL"],
         gmail_token_path=os.environ["GMAIL_TOKEN_PATH"],
         batch_size=args.batch_size,
+        enable_convergence=os.environ.get("ENABLE_CONVERGENCE", "true").lower()
+        == "true",
     )
 
     # Load and validate rules from database
