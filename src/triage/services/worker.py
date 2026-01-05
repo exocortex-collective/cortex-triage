@@ -892,11 +892,12 @@ class TriageWorker:
                 exc_info=True,
             )
 
-    def _get_next_convergence_email(self) -> dict[str, Any] | None:
-        """Get next email with outdated config version for idle-time processing.
+    def _converge_priority_and_get_next_email(self) -> dict[str, Any] | None:
+        """Converge priority emails and get next email for idle-time processing.
 
-        Optimization: Priority sender emails are bulk-updated first (no processing)
-        since priority mappings always win. Then picks oldest non-priority email.
+        Two-step process:
+        1. Bulk-update priority sender emails (no re-processing needed)
+        2. Pick oldest non-priority email with outdated config version
 
         Returns:
             Dict with gmail_id, or None if nothing to converge
@@ -1855,7 +1856,7 @@ class TriageWorker:
 
                 if processed == 0 and failed == 0:
                     # Queue is idle - try convergence (idle-time processing)
-                    convergence_job = self._get_next_convergence_email()
+                    convergence_job = self._converge_priority_and_get_next_email()
                     if convergence_job:
                         gmail_id = convergence_job["gmail_id"]
                         start_time = time.time()
