@@ -769,6 +769,7 @@ class TriageWorker:
         self.worker_id = worker_id or f"triage-{os.getpid()}"
         self.last_signal_poll = time.time()
         self.last_cleanup = time.time()  # Track when we last cleaned up stale workers
+        self.last_priority_convergence = 0.0  # Track last bulk priority update
         self.config_version = config_version  # Track which DB config version is loaded
         self.jobs_processed = 0  # Track cumulative job count for status updates
 
@@ -894,31 +895,34 @@ class TriageWorker:
 
                     # Step 1: Bulk UPDATE priority sender emails (no re-processing)
                     # These always match priority mapping regardless of rules
-                    # Only run this periodically (not on every idle check)
-                    cursor.execute(
-                        """
-                        UPDATE classifications c
-                        SET config_version_id = %s
-                        WHERE c.config_version_id < %s
-                          AND EXISTS (
-                            SELECT 1
-                            FROM emails_parsed ep
-                            JOIN triage_email_mappings tem
-                              ON LOWER(ep.from_addr) = LOWER(tem.email_address)
-                            WHERE ep.gmail_id = c.gmail_id
-                              AND tem.mapping_type = 'priority'
-                              AND tem.deleted_at IS NULL
-                          )
-                        """,
-                        (current_version, current_version),
-                    )
-                    bulk_updated = cursor.rowcount
-
-                    if bulk_updated > 0:
-                        logger.info(
-                            f"Convergence: bulk updated {bulk_updated} priority "
-                            f"sender emails to version {current_version}"
+                    # Only run this periodically (every 5 minutes) to avoid DB load
+                    now = time.time()
+                    if now - self.last_priority_convergence >= 300:  # 5 minutes
+                        cursor.execute(
+                            """
+                            UPDATE classifications c
+                            SET config_version_id = %s
+                            WHERE c.config_version_id < %s
+                              AND EXISTS (
+                                SELECT 1
+                                FROM emails_parsed ep
+                                JOIN triage_email_mappings tem
+                                  ON LOWER(ep.from_addr) = LOWER(tem.email_address)
+                                WHERE ep.gmail_id = c.gmail_id
+                                  AND tem.mapping_type = 'priority'
+                                  AND tem.deleted_at IS NULL
+                              )
+                            """,
+                            (current_version, current_version),
                         )
+                        bulk_updated = cursor.rowcount
+
+                        if bulk_updated > 0:
+                            logger.info(
+                                f"Convergence: bulk updated {bulk_updated} priority "
+                                f"sender emails to version {current_version}"
+                            )
+                        self.last_priority_convergence = now
 
                     # Step 2: Pick oldest non-priority email with old config version
                     # Process it directly (not via queue) - true idle-time convergence
@@ -978,11 +982,8 @@ class TriageWorker:
                         logger.error("Config reload failed")
 
                 elif signal.signal_type == "mappings_reload":
-                    success = self.reload_mappings()
-                    if success:
-                        logger.info("Mappings reloaded successfully via signal")
-                    else:
-                        logger.error("Mappings reload failed")
+                    # reload_mappings() already logs success/failure details
+                    self.reload_mappings()
 
                 elif signal.signal_type == "shutdown":
                     logger.info("Received shutdown signal")
