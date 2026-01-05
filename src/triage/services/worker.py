@@ -779,8 +779,7 @@ class TriageWorker:
             with self._get_conn() as conn:
                 new_rules = load_config_from_db(conn)
 
-            # Get the version number from database
-            with self._get_conn() as conn:
+                # Get the version number from database
                 cursor = conn.cursor()
                 cursor.execute(
                     """SELECT version FROM triage_config_versions
