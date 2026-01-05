@@ -103,6 +103,7 @@ class Config:
     )
     # Convergence settings (idle-time config updates)
     enable_convergence: bool = True  # Enable/disable idle-time convergence
+    priority_convergence_interval: int = 300  # seconds between bulk priority updates
 
 
 # Max characters of email body to include in LLM prompts
@@ -921,9 +922,12 @@ class TriageWorker:
 
                     # Step 1: Bulk UPDATE priority sender emails (no re-processing)
                     # These always match priority mapping regardless of rules
-                    # Only run this periodically (every 5 minutes) to avoid DB load
+                    # Only run this periodically to avoid DB load
                     now = time.time()
-                    if now - self.last_priority_convergence >= 300:  # 5 minutes
+                    if (
+                        now - self.last_priority_convergence
+                        >= self.config.priority_convergence_interval
+                    ):
                         cursor.execute(
                             """
                             UPDATE classifications c
