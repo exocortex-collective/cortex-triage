@@ -13,7 +13,7 @@ dependencies = [
     "pydantic>=2.0.0",
     "pyyaml>=6.0.0",
     "structlog>=23.0.0",
-    "cortex-utils @ git+https://github.com/devonjones/cortex-utils.git@1de9a8fb49f086c6b650d238a125a0d19a1315e6",
+    "cortex-utils @ git+https://github.com/devonjones/cortex-utils.git@26cb7d6",
 ]
 
 [project.optional-dependencies]
