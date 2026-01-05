@@ -788,6 +788,12 @@ class TriageWorker:
                     row = cursor.fetchone()
                     new_config_version = row[0] if row else None
 
+            if new_config_version is None:
+                logger.error(
+                    "Config reload failed: No active config version found in database."
+                )
+                return False
+
             logger.info(f"Loaded config from database (version {new_config_version})")
 
             # Validate the loaded config
@@ -1747,32 +1753,31 @@ def load_initial_config(config: Config) -> tuple[RulesConfig, int]:
     Raises:
         ConfigLoadError: If config cannot be loaded from database
     """
-    conn = psycopg2.connect(
-        host=config.postgres_host,
-        port=config.postgres_port,
-        dbname=config.postgres_db,
-        user=config.postgres_user,
-        password=config.postgres_password,
-    )
     try:
-        rules = load_config_from_db(conn)
+        with psycopg2.connect(
+            host=config.postgres_host,
+            port=config.postgres_port,
+            dbname=config.postgres_db,
+            user=config.postgres_user,
+            password=config.postgres_password,
+        ) as conn:
+            rules = load_config_from_db(conn)
 
-        # Get version number
-        with conn.cursor() as cursor:
-            cursor.execute(
-                "SELECT version FROM triage_config_versions WHERE is_active = TRUE"
-            )
-            row = cursor.fetchone()
-            config_version = row[0] if row else None
+            # Get version number
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    "SELECT version FROM triage_config_versions WHERE is_active = TRUE"
+                )
+                row = cursor.fetchone()
+                config_version = row[0] if row else None
 
-        if config_version is None:
-            raise ConfigLoadError("No active config version found in database")
+            if config_version is None:
+                raise ConfigLoadError("No active config version found in database")
 
-        logger.info(f"✓ Loaded config from database (version {config_version})")
-        return rules, config_version
-
-    finally:
-        conn.close()
+            logger.info(f"✓ Loaded config from database (version {config_version})")
+            return rules, config_version
+    except psycopg2.Error as e:
+        raise ConfigLoadError(f"Database error during initial config load: {e}") from e
 
 
 def main() -> None:
