@@ -73,6 +73,12 @@ class LLMError(Exception):
     pass
 
 
+# SQL queries
+_GET_ACTIVE_CONFIG_VERSION_SQL = """
+    SELECT version FROM triage_config_versions
+    WHERE is_active = TRUE
+"""
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -781,10 +787,7 @@ class TriageWorker:
 
                 # Get the version number from database
                 with conn.cursor() as cursor:
-                    cursor.execute(
-                        """SELECT version FROM triage_config_versions
-                           WHERE is_active = TRUE"""
-                    )
+                    cursor.execute(_GET_ACTIVE_CONFIG_VERSION_SQL)
                     row = cursor.fetchone()
                     new_config_version = row[0] if row else None
 
@@ -1765,9 +1768,7 @@ def load_initial_config(config: Config) -> tuple[RulesConfig, int]:
 
             # Get version number
             with conn.cursor() as cursor:
-                cursor.execute(
-                    "SELECT version FROM triage_config_versions WHERE is_active = TRUE"
-                )
+                cursor.execute(_GET_ACTIVE_CONFIG_VERSION_SQL)
                 row = cursor.fetchone()
                 config_version = row[0] if row else None
 
