@@ -780,14 +780,13 @@ class TriageWorker:
                 new_rules = load_config_from_db(conn)
 
                 # Get the version number from database
-                cursor = conn.cursor()
-                cursor.execute(
-                    """SELECT version FROM triage_config_versions
-                       WHERE is_active = TRUE"""
-                )
-                row = cursor.fetchone()
-                new_config_version = row[0] if row else None
-                cursor.close()
+                with conn.cursor() as cursor:
+                    cursor.execute(
+                        """SELECT version FROM triage_config_versions
+                           WHERE is_active = TRUE"""
+                    )
+                    row = cursor.fetchone()
+                    new_config_version = row[0] if row else None
 
             logger.info(f"Loaded config from database (version {new_config_version})")
 
@@ -1759,13 +1758,12 @@ def load_initial_config(config: Config) -> tuple[RulesConfig, int]:
         rules = load_config_from_db(conn)
 
         # Get version number
-        cursor = conn.cursor()
-        cursor.execute(
-            "SELECT version FROM triage_config_versions WHERE is_active = TRUE"
-        )
-        row = cursor.fetchone()
-        config_version = row[0] if row else None
-        cursor.close()
+        with conn.cursor() as cursor:
+            cursor.execute(
+                "SELECT version FROM triage_config_versions WHERE is_active = TRUE"
+            )
+            row = cursor.fetchone()
+            config_version = row[0] if row else None
 
         if config_version is None:
             raise ConfigLoadError("No active config version found in database")
@@ -1796,7 +1794,6 @@ def main() -> None:
         "POSTGRES_DB",
         "POSTGRES_USER",
         "POSTGRES_PASSWORD",
-        "RULES_PATH",
         "DUCKDB_API_URL",
         "OLLAMA_URL",
         "GMAIL_TOKEN_PATH",
