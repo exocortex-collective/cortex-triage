@@ -829,6 +829,33 @@ class TriageWorker:
             logger.error(f"Failed to reload rules: {e}", exc_info=True)
             return False
 
+    def reload_mappings(self) -> bool:
+        """Reload email mappings from database (without changing rules).
+
+        This is lighter than reload_rules() - only mappings change, not rules/chains.
+
+        Returns True if reload succeeded, False otherwise.
+        """
+        try:
+            # Load fresh config from database
+            with self._get_conn() as conn:
+                new_config = load_config_from_db(conn)
+
+            # Update just the mappings (keep existing rules, chains, intents, etc.)
+            self.rules.priority_email_mappings = new_config.priority_email_mappings
+            self.rules.fallback_email_mappings = new_config.fallback_email_mappings
+
+            logger.info(
+                f"Mappings reloaded successfully: "
+                f"priority={len(self.rules.priority_email_mappings)}, "
+                f"fallback={len(self.rules.fallback_email_mappings)}"
+            )
+            return True
+
+        except Exception as e:
+            logger.error(f"Failed to reload mappings: {e}", exc_info=True)
+            return False
+
     def _check_and_process_signals(self) -> None:
         """Poll for and process worker signals (config reload, shutdown, etc.).
 
@@ -860,6 +887,13 @@ class TriageWorker:
                         logger.info("Config reloaded successfully via signal")
                     else:
                         logger.error("Config reload failed")
+
+                elif signal.signal_type == "mappings_reload":
+                    success = self.reload_mappings()
+                    if success:
+                        logger.info("Mappings reloaded successfully via signal")
+                    else:
+                        logger.error("Mappings reload failed")
 
                 elif signal.signal_type == "shutdown":
                     logger.info("Received shutdown signal")
