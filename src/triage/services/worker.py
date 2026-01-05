@@ -871,75 +871,74 @@ class TriageWorker:
         since priority mappings always win. Then picks oldest non-priority email.
 
         Returns:
-            Job dict with email_id and gmail_id, or None if nothing to converge
+            Dict with gmail_id, or None if nothing to converge
         """
         if not self.config.enable_convergence:
             return None
 
         try:
             with self._get_conn() as conn:
-                cursor = conn.cursor()
-
-                # Get current active config version
-                cursor.execute(
-                    """
-                    SELECT version FROM triage_config_versions
-                    WHERE is_active = TRUE LIMIT 1
-                    """
-                )
-                row = cursor.fetchone()
-                if not row:
-                    return None
-
-                current_version = row[0]
-
-                # Step 1: Bulk UPDATE priority sender emails (no re-processing needed)
-                # These emails will always match priority mapping regardless of rules
-                # Only run this periodically (not on every idle check)
-                cursor.execute(
-                    """
-                    UPDATE classifications c
-                    SET config_version_id = %s
-                    WHERE c.config_version_id < %s
-                      AND EXISTS (
-                        SELECT 1
-                        FROM emails_parsed ep
-                        JOIN triage_email_mappings tem
-                          ON LOWER(ep.from_addr) = LOWER(tem.email_address)
-                        WHERE ep.gmail_id = c.gmail_id
-                          AND tem.mapping_type = 'priority'
-                          AND tem.deleted_at IS NULL
-                      )
-                    """,
-                    (current_version, current_version),
-                )
-                bulk_updated = cursor.rowcount
-
-                if bulk_updated > 0:
-                    logger.info(
-                        f"Convergence: bulk updated {bulk_updated} priority "
-                        f"sender emails to version {current_version}"
+                with conn.cursor() as cursor:
+                    # Get current active config version
+                    cursor.execute(
+                        """
+                        SELECT version FROM triage_config_versions
+                        WHERE is_active = TRUE LIMIT 1
+                        """
                     )
+                    row = cursor.fetchone()
+                    if not row:
+                        return None
 
-                # Step 2: Pick oldest non-priority email with old config version
-                # Process it directly (not via queue) - true idle-time convergence
-                cursor.execute(
-                    """
-                    SELECT er.id as email_id, er.gmail_id
-                    FROM classifications c
-                    JOIN emails_raw er ON er.gmail_id = c.gmail_id
-                    WHERE c.config_version_id < %s
-                    ORDER BY c.classified_at ASC
-                    LIMIT 1
-                    """,
-                    (current_version,),
-                )
-                row = cursor.fetchone()
+                    current_version = row[0]
+
+                    # Step 1: Bulk UPDATE priority sender emails (no re-processing)
+                    # These always match priority mapping regardless of rules
+                    # Only run this periodically (not on every idle check)
+                    cursor.execute(
+                        """
+                        UPDATE classifications c
+                        SET config_version_id = %s
+                        WHERE c.config_version_id < %s
+                          AND EXISTS (
+                            SELECT 1
+                            FROM emails_parsed ep
+                            JOIN triage_email_mappings tem
+                              ON LOWER(ep.from_addr) = LOWER(tem.email_address)
+                            WHERE ep.gmail_id = c.gmail_id
+                              AND tem.mapping_type = 'priority'
+                              AND tem.deleted_at IS NULL
+                          )
+                        """,
+                        (current_version, current_version),
+                    )
+                    bulk_updated = cursor.rowcount
+
+                    if bulk_updated > 0:
+                        logger.info(
+                            f"Convergence: bulk updated {bulk_updated} priority "
+                            f"sender emails to version {current_version}"
+                        )
+
+                    # Step 2: Pick oldest non-priority email with old config version
+                    # Process it directly (not via queue) - true idle-time convergence
+                    cursor.execute(
+                        """
+                        SELECT er.id as email_id, er.gmail_id
+                        FROM classifications c
+                        JOIN emails_raw er ON er.gmail_id = c.gmail_id
+                        WHERE c.config_version_id < %s
+                        ORDER BY c.classified_at ASC
+                        LIMIT 1
+                        """,
+                        (current_version,),
+                    )
+                    row = cursor.fetchone()
 
                 conn.commit()
 
                 if row:
-                    return {"email_id": row[0], "gmail_id": row[1], "rerun": True}
+                    return {"gmail_id": row[1]}
                 return None
 
         except Exception as e:
@@ -1818,8 +1817,84 @@ class TriageWorker:
                     # Queue is idle - try convergence (idle-time processing)
                     convergence_job = self._get_next_convergence_email()
                     if convergence_job:
-                        # Process convergence email directly (not via queue)
-                        if self.process_job(convergence_job):
+                        gmail_id = convergence_job["gmail_id"]
+                        start_time = time.time()
+                        processed_convergence = False
+                        try:
+                            email = self._get_email_data(gmail_id)
+                            if not email:
+                                logger.warning(
+                                    f"Convergence: Parsed email not found: {gmail_id}"
+                                )
+                                ERRORS.labels(
+                                    service="triage-worker",
+                                    error_type="email_not_found",
+                                ).inc()
+                            else:
+                                if not email.body:
+                                    email.body = self._get_body_from_api(gmail_id)
+
+                                result = evaluate(self.rules, email, self.ollama)
+
+                                action_executed = False
+                                if result.matched and result.action:
+                                    action_executed = self._execute_action(
+                                        gmail_id, priority=0
+                                    )
+                                    if action_executed:
+                                        logger.info(
+                                            f"Convergence processed {gmail_id}: "
+                                            f"chain={result.chain}, "
+                                            f"rule={result.rule_index}, "
+                                            f"action={result.action}"
+                                        )
+                                        QUEUE_PROCESSED.labels(
+                                            queue="labeling", status="enqueued"
+                                        ).inc()
+                                    else:
+                                        logger.warning(
+                                            f"Convergence action failed for "
+                                            f"{gmail_id}: {result.action}"
+                                        )
+                                else:
+                                    if not result.matched:
+                                        logger.info(
+                                            f"Convergence: No match for {gmail_id}"
+                                        )
+                                    else:
+                                        logger.info(
+                                            f"Convergence: Matched but no action "
+                                            f"for {gmail_id}"
+                                        )
+
+                                self._store_classification(
+                                    email, result, action_executed
+                                )
+                                method = "llm" if result.llm_category else "rule"
+                                EMAILS_CLASSIFIED.labels(method=method).inc()
+                                processed_convergence = True
+
+                        except LLMError as e:
+                            logger.error(
+                                f"Convergence LLM error processing {gmail_id}: {e}"
+                            )
+                            ERRORS.labels(
+                                service="triage-worker", error_type="llm_error"
+                            ).inc()
+                        except Exception as e:
+                            logger.error(
+                                f"Convergence failed to process {gmail_id}: {e}",
+                                exc_info=True,
+                            )
+                            ERRORS.labels(
+                                service="triage-worker", error_type="job_failed"
+                            ).inc()
+                        finally:
+                            PROCESSING_DURATION.labels(
+                                queue="convergence", operation="process"
+                            ).observe(time.time() - start_time)
+
+                        if processed_convergence:
                             total_processed += 1
                             self.jobs_processed += 1
                             logger.debug("Processed 1 convergence email")
