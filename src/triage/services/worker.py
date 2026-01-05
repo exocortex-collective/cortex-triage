@@ -865,6 +865,32 @@ class TriageWorker:
             logger.error(f"Failed to reload mappings: {e}", exc_info=True)
             return False
 
+    def _mark_convergence_failed(self, gmail_id: str) -> None:
+        """Mark a convergence email as processed (update to current version).
+
+        This prevents infinite retry loops for emails that fail convergence.
+        """
+        try:
+            with self._get_conn() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute(
+                        """
+                        UPDATE classifications
+                        SET config_version_id = (
+                            SELECT version FROM triage_config_versions
+                            WHERE is_active = TRUE LIMIT 1
+                        )
+                        WHERE gmail_id = %s
+                        """,
+                        (gmail_id,),
+                    )
+                conn.commit()
+        except Exception as e:
+            logger.error(
+                f"Failed to mark convergence failed for {gmail_id}: {e}",
+                exc_info=True,
+            )
+
     def _get_next_convergence_email(self) -> dict[str, Any] | None:
         """Get next email with outdated config version for idle-time processing.
 
@@ -932,6 +958,15 @@ class TriageWorker:
                         FROM classifications c
                         JOIN emails_raw er ON er.gmail_id = c.gmail_id
                         WHERE c.config_version_id < %s
+                          AND NOT EXISTS (
+                            SELECT 1
+                            FROM emails_parsed ep
+                            JOIN triage_email_mappings tem
+                              ON LOWER(ep.from_addr) = LOWER(tem.email_address)
+                            WHERE ep.gmail_id = c.gmail_id
+                              AND tem.mapping_type = 'priority'
+                              AND tem.deleted_at IS NULL
+                          )
                         ORDER BY c.classified_at ASC
                         LIMIT 1
                         """,
@@ -1882,6 +1917,8 @@ class TriageWorker:
                             ERRORS.labels(
                                 service="triage-worker", error_type="llm_error"
                             ).inc()
+                            # Mark as processed to prevent infinite retry
+                            self._mark_convergence_failed(gmail_id)
                         except Exception as e:
                             logger.error(
                                 f"Convergence failed to process {gmail_id}: {e}",
@@ -1890,6 +1927,8 @@ class TriageWorker:
                             ERRORS.labels(
                                 service="triage-worker", error_type="job_failed"
                             ).inc()
+                            # Mark as processed to prevent infinite retry
+                            self._mark_convergence_failed(gmail_id)
                         finally:
                             PROCESSING_DURATION.labels(
                                 queue="convergence", operation="process"
