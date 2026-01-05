@@ -102,9 +102,7 @@ class Config:
         30  # seconds between signal polls (check for control messages)
     )
     # Convergence settings (idle-time config updates)
-    enable_convergence: bool = True  # Enable/disable convergence
-    convergence_priority: int = -1000  # Queue priority (below everything else)
-    convergence_batch_size: int = 10  # Max emails to enqueue per idle cycle
+    enable_convergence: bool = True  # Enable/disable idle-time convergence
 
 
 # Max characters of email body to include in LLM prompts
@@ -860,19 +858,17 @@ class TriageWorker:
             logger.error(f"Failed to reload mappings: {e}", exc_info=True)
             return False
 
-    def _check_and_run_convergence(self) -> tuple[int, int]:
-        """Check for emails with outdated config versions and bring them current.
+    def _get_next_convergence_email(self) -> dict[str, Any] | None:
+        """Get next email with outdated config version for idle-time processing.
 
-        Optimization: Priority sender emails are bulk-updated (no re-processing)
-        since priority mappings always win. Only non-priority emails are enqueued
-        for actual re-triage.
+        Optimization: Priority sender emails are bulk-updated first (no processing)
+        since priority mappings always win. Then picks oldest non-priority email.
 
         Returns:
-            (bulk_updated, enqueued): Count of priority emails updated and
-                                      non-priority emails enqueued
+            Job dict with email_id and gmail_id, or None if nothing to converge
         """
         if not self.config.enable_convergence:
-            return (0, 0)
+            return None
 
         try:
             with self._get_conn() as conn:
@@ -887,15 +883,13 @@ class TriageWorker:
                 )
                 row = cursor.fetchone()
                 if not row:
-                    logger.warning(
-                        "No active config version found, skipping convergence"
-                    )
-                    return (0, 0)
+                    return None
 
                 current_version = row[0]
 
                 # Step 1: Bulk UPDATE priority sender emails (no re-processing needed)
                 # These emails will always match priority mapping regardless of rules
+                # Only run this periodically (not on every idle check)
                 cursor.execute(
                     """
                     UPDATE classifications c
@@ -921,54 +915,30 @@ class TriageWorker:
                         f"sender emails to version {current_version}"
                     )
 
-                # Step 2: Enqueue batch of non-priority emails for re-processing
+                # Step 2: Pick oldest non-priority email with old config version
+                # Process it directly (not via queue) - true idle-time convergence
                 cursor.execute(
                     """
-                    INSERT INTO queue (
-                        queue_name, payload, priority, status, created_at
-                    )
-                    SELECT DISTINCT ON (c.gmail_id)
-                        'triage',
-                        jsonb_build_object(
-                            'email_id', er.id,
-                            'gmail_id', c.gmail_id,
-                            'rerun', true,
-                            'reason', 'convergence'
-                        ),
-                        %s,
-                        'pending',
-                        NOW()
+                    SELECT er.id as email_id, er.gmail_id
                     FROM classifications c
                     JOIN emails_raw er ON er.gmail_id = c.gmail_id
                     WHERE c.config_version_id < %s
-                    ORDER BY c.gmail_id, c.classified_at DESC
-                    LIMIT %s
-                    ON CONFLICT (queue_name, (payload->>'gmail_id'), status)
-                    WHERE status IN ('pending', 'processing')
-                    DO NOTHING
+                    ORDER BY c.classified_at ASC
+                    LIMIT 1
                     """,
-                    (
-                        self.config.convergence_priority,
-                        current_version,
-                        self.config.convergence_batch_size,
-                    ),
+                    (current_version,),
                 )
-                enqueued = cursor.rowcount
-
-                if enqueued > 0:
-                    logger.info(
-                        f"Convergence: enqueued {enqueued} non-priority "
-                        f"emails for re-triage "
-                        f"(priority={self.config.convergence_priority})"
-                    )
+                row = cursor.fetchone()
 
                 conn.commit()
 
-                return (bulk_updated, enqueued)
+                if row:
+                    return {"email_id": row[0], "gmail_id": row[1], "rerun": True}
+                return None
 
         except Exception as e:
-            logger.error(f"Convergence failed: {e}", exc_info=True)
-            return (0, 0)
+            logger.error(f"Failed to get convergence email: {e}", exc_info=True)
+            return None
 
     def _check_and_process_signals(self) -> None:
         """Poll for and process worker signals (config reload, shutdown, etc.).
@@ -1839,14 +1809,26 @@ class TriageWorker:
                 processed, failed = self._process_batch()
 
                 if processed == 0 and failed == 0:
-                    # Queue is idle - run convergence to bring old emails current
-                    bulk_updated, enqueued = self._check_and_run_convergence()
-                    if bulk_updated > 0 or enqueued > 0:
-                        logger.info(
-                            f"Convergence: {bulk_updated} priority emails updated, "
-                            f"{enqueued} non-priority emails enqueued"
-                        )
+                    # Queue is idle - try convergence (idle-time processing)
+                    convergence_job = self._get_next_convergence_email()
+                    if convergence_job:
+                        # Process convergence email directly (not via queue)
+                        if self.process_job(convergence_job):
+                            total_processed += 1
+                            self.jobs_processed += 1
+                            logger.debug("Processed 1 convergence email")
+                            QUEUE_PROCESSED.labels(
+                                queue="convergence", status="success"
+                            ).inc()
+                        else:
+                            total_failed += 1
+                            logger.error("Convergence processing failed")
+                            QUEUE_PROCESSED.labels(
+                                queue="convergence", status="error"
+                            ).inc()
+                        continue  # Check for more work immediately
 
+                    # No convergence work either, sleep
                     logger.debug(f"No jobs, sleeping {self.config.poll_interval}s")
                     time.sleep(self.config.poll_interval)
                     continue
@@ -1986,8 +1968,6 @@ def main() -> None:
         batch_size=args.batch_size,
         enable_convergence=os.environ.get("ENABLE_CONVERGENCE", "true").lower()
         == "true",
-        convergence_priority=int(os.environ.get("CONVERGENCE_PRIORITY", "-1000")),
-        convergence_batch_size=int(os.environ.get("CONVERGENCE_BATCH_SIZE", "10")),
     )
 
     # Load and validate rules from database
