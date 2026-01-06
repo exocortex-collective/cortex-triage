@@ -955,8 +955,9 @@ class TriageWorker:
                             )
                         self.last_priority_convergence = now
 
-                    # Step 2: Pick oldest non-priority email with old config version
+                    # Step 2: Pick newest non-priority email with old config version
                     # Process it directly (not via queue) - true idle-time convergence
+                    # Use email received date (internal_date), not classification date
                     cursor.execute(
                         """
                         SELECT er.id as email_id, er.gmail_id
@@ -972,7 +973,7 @@ class TriageWorker:
                               AND tem.mapping_type = 'priority'
                               AND tem.deleted_at IS NULL
                           )
-                        ORDER BY c.classified_at ASC
+                        ORDER BY er.internal_date DESC
                         LIMIT 1
                         """,
                         (current_version,),
