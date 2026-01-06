@@ -1670,12 +1670,14 @@ class TriageWorker:
                 """
                     INSERT INTO classifications (
                         email_id, gmail_id, matched_chain, matched_rule_index,
-                        rules_version, llm_category, llm_confidence, llm_reasoning,
-                        action_taken, action_executed
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        rules_version, config_version_id, llm_category,
+                        llm_confidence, llm_reasoning, action_taken,
+                        action_executed
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     ON CONFLICT (gmail_id, rules_version) DO UPDATE SET
                         matched_chain = EXCLUDED.matched_chain,
                         matched_rule_index = EXCLUDED.matched_rule_index,
+                        config_version_id = EXCLUDED.config_version_id,
                         llm_category = EXCLUDED.llm_category,
                         llm_confidence = EXCLUDED.llm_confidence,
                         llm_reasoning = EXCLUDED.llm_reasoning,
@@ -1689,6 +1691,7 @@ class TriageWorker:
                     result.chain,
                     result.rule_index,
                     f"v{self.rules.version}",
+                    self.config_version,
                     result.llm_category,
                     result.llm_confidence,
                     result.llm_reasoning,
