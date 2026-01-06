@@ -1138,7 +1138,7 @@ class TriageWorker:
                         -- Rule matching
                         matched_chain TEXT,
                         matched_rule_index INT,
-                        rules_version TEXT,
+                        config_version_id INTEGER,
 
                         -- LLM (if used)
                         llm_category TEXT,
@@ -1149,7 +1149,10 @@ class TriageWorker:
                         action_taken JSONB,
                         action_executed BOOLEAN DEFAULT FALSE,
 
-                        classified_at TIMESTAMPTZ DEFAULT NOW()
+                        classified_at TIMESTAMPTZ DEFAULT NOW(),
+
+                        -- Unique constraint: one classification per email
+                        CONSTRAINT unique_gmail_id UNIQUE (gmail_id)
                     );
 
                     CREATE INDEX IF NOT EXISTS idx_classifications_email
@@ -1164,11 +1167,8 @@ class TriageWorker:
                     CREATE INDEX IF NOT EXISTS idx_classifications_date
                     ON classifications(classified_at DESC);
 
-                    -- Unique constraint for idempotent classification
-                    -- Prevents duplicate classifications for same email + rules version
-                    -- (allows re-evaluation with different rules versions)
-                    CREATE UNIQUE INDEX IF NOT EXISTS idx_classifications_dedup
-                    ON classifications(gmail_id, rules_version);
+                    CREATE INDEX IF NOT EXISTS idx_classifications_config_version
+                    ON classifications(config_version_id, classified_at DESC);
 
                     -- ==============================================
                     -- Pattern Detection Tables (subscriptions, etc.)
@@ -1670,11 +1670,10 @@ class TriageWorker:
                 """
                     INSERT INTO classifications (
                         email_id, gmail_id, matched_chain, matched_rule_index,
-                        rules_version, config_version_id, llm_category,
-                        llm_confidence, llm_reasoning, action_taken,
-                        action_executed
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                    ON CONFLICT (gmail_id, rules_version) DO UPDATE SET
+                        config_version_id, llm_category, llm_confidence,
+                        llm_reasoning, action_taken, action_executed
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (gmail_id) DO UPDATE SET
                         matched_chain = EXCLUDED.matched_chain,
                         matched_rule_index = EXCLUDED.matched_rule_index,
                         config_version_id = EXCLUDED.config_version_id,
@@ -1690,7 +1689,6 @@ class TriageWorker:
                     email.gmail_id,
                     result.chain,
                     result.rule_index,
-                    f"v{self.rules.version}",
                     self.config_version,
                     result.llm_category,
                     result.llm_confidence,
