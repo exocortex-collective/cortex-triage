@@ -7,7 +7,6 @@ reducing API latency compared to individual calls.
 """
 
 import argparse
-import logging
 import os
 import signal
 import sys
@@ -20,6 +19,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import psycopg2
+from cortex_utils.logging import configure_logging, get_logger
 from cortex_utils.metrics import (
     EMAILS_LABELED,
     ERRORS,
@@ -39,11 +39,7 @@ from triage.gmail import (
     get_rate_limiter,
 )
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-)
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 # How long a job can be in 'processing' before it's considered stale
 # and reset to 'pending' (visibility timeout)
@@ -940,6 +936,10 @@ def repair_failed_jobs(config: Config) -> int:
 
 
 def main() -> None:
+    # Configure logging
+    log_level = os.environ.get("LOG_LEVEL", "INFO")
+    configure_logging(service_name="labeling-worker", level=log_level)
+
     parser = argparse.ArgumentParser(description="Labeling worker service")
     parser.add_argument(
         "--once", action="store_true", help="Process all pending jobs once and exit"

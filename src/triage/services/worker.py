@@ -17,6 +17,7 @@ from typing import Any
 
 import httpx
 import psycopg2
+from cortex_utils.logging import configure_logging, get_logger
 from cortex_utils.metrics import (
     EMAILS_CLASSIFIED,
     ERRORS,
@@ -79,11 +80,7 @@ _GET_ACTIVE_CONFIG_VERSION_SQL = """
     WHERE is_active = TRUE
 """
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-)
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 @dataclass
@@ -2048,6 +2045,10 @@ def load_initial_config(config: Config) -> tuple[RulesConfig, int]:
 
 
 def main() -> None:
+
+    # Configure logging
+    log_level = os.environ.get("LOG_LEVEL", "INFO")
+    configure_logging(service_name="triage-worker", level=log_level)
     parser = argparse.ArgumentParser(description="Triage worker service")
     parser.add_argument(
         "--once", action="store_true", help="Process all pending jobs once and exit"
