@@ -7,12 +7,12 @@ Workers register on startup, update heartbeat periodically, and track:
 - Last heartbeat timestamp
 """
 
-import logging
 import os
 
 import psycopg2
+from cortex_utils.logging import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 def register_worker(

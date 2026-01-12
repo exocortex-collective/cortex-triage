@@ -1,13 +1,13 @@
 """Rules loading and configuration."""
 
-import logging
 from pathlib import Path
 
+from cortex_utils.logging import get_logger
 from cortex_utils.triage_config import load_rules_from_string
 from cortex_utils.triage_config.importer import CATEGORY_DESCRIPTIONS
 from cortex_utils.triage_config.models import EmailMappingAction, RulesConfig
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 def load_rules(path: str | Path) -> RulesConfig:

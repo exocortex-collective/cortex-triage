@@ -4,12 +4,12 @@ Rules are stored as doubly-linked lists (prev_rule_id/next_rule_id pointers)
 for O(1) insertion and deletion at any position.
 """
 
-import logging
 from typing import Any
 
 import psycopg2
+from cortex_utils.logging import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 class LinkedListError(Exception):

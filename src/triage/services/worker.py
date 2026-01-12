@@ -17,6 +17,7 @@ from typing import Any
 
 import httpx
 import psycopg2
+from cortex_utils.logging import configure_logging, get_logger
 from cortex_utils.metrics import (
     EMAILS_CLASSIFIED,
     ERRORS,
@@ -79,11 +80,7 @@ _GET_ACTIVE_CONFIG_VERSION_SQL = """
     WHERE is_active = TRUE
 """
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-)
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 @dataclass
@@ -101,6 +98,9 @@ class Config:
     signal_poll_interval: int = (
         30  # seconds between signal polls (check for control messages)
     )
+    visibility_timeout_minutes: int = (
+        5  # How long a job can be in 'processing' before reset
+    )
     # Convergence settings (idle-time config updates)
     enable_convergence: bool = True  # Enable/disable idle-time convergence
     priority_convergence_interval: int = 300  # seconds between bulk priority updates
@@ -117,10 +117,6 @@ INVALID_LLM_EXTRACTION_VALUES = {
     "null",
     "undefined",
 }
-
-# How long a job can be in 'processing' before it's considered stale
-# and reset to 'pending' (visibility timeout)
-VISIBILITY_TIMEOUT_MINUTES = 5
 
 # Maximum retry attempts before a job is considered dead letter
 MAX_ATTEMPTS = 3
@@ -752,6 +748,8 @@ class GmailClient:
 
 
 class TriageWorker:
+    queue_name = "triage"  # Queue name for this worker
+
     def __init__(
         self,
         config: Config,
@@ -1283,7 +1281,7 @@ class TriageWorker:
                     WITH reset_stale AS (
                         UPDATE queue
                         SET status = 'pending', claimed_at = NULL
-                        WHERE queue_name = 'triage'
+                        WHERE queue_name = %s
                           AND status = 'processing'
                           AND claimed_at < NOW() - (INTERVAL '1 minute' * %s)
                           AND attempts < %s
@@ -1294,7 +1292,7 @@ class TriageWorker:
                         SET status = 'failed',
                             last_error = COALESCE(last_error, '') ||
                                 ' [max attempts exceeded]'
-                        WHERE queue_name = 'triage'
+                        WHERE queue_name = %s
                           AND status = 'processing'
                           AND claimed_at < NOW() - (INTERVAL '1 minute' * %s)
                           AND attempts >= %s
@@ -1305,13 +1303,13 @@ class TriageWorker:
                         SET status = 'failed',
                             last_error = COALESCE(last_error, '') ||
                                 ' [max attempts exceeded]'
-                        WHERE queue_name = 'triage'
+                        WHERE queue_name = %s
                           AND status = 'pending'
                           AND attempts >= %s
                     ),
                     claimable AS (
                         SELECT id FROM queue
-                        WHERE queue_name = 'triage'
+                        WHERE queue_name = %s
                           AND status = 'pending'
                           AND attempts < %s
                         ORDER BY priority DESC, created_at
@@ -1324,11 +1322,15 @@ class TriageWorker:
                     RETURNING id, payload, priority
                     """,
                     (
-                        VISIBILITY_TIMEOUT_MINUTES,
+                        self.queue_name,
+                        self.config.visibility_timeout_minutes,
                         MAX_ATTEMPTS,
-                        VISIBILITY_TIMEOUT_MINUTES,
+                        self.queue_name,
+                        self.config.visibility_timeout_minutes,
                         MAX_ATTEMPTS,
+                        self.queue_name,
                         MAX_ATTEMPTS,  # expire_pending_exhausted
+                        self.queue_name,
                         MAX_ATTEMPTS,  # claimable
                         batch_size,
                     ),
@@ -2048,6 +2050,10 @@ def load_initial_config(config: Config) -> tuple[RulesConfig, int]:
 
 
 def main() -> None:
+
+    # Configure logging
+    log_level = os.environ.get("LOG_LEVEL", "INFO")
+    configure_logging(service_name="triage-worker", level=log_level)
     parser = argparse.ArgumentParser(description="Triage worker service")
     parser.add_argument(
         "--once", action="store_true", help="Process all pending jobs once and exit"

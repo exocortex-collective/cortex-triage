@@ -12,12 +12,13 @@ This rate limiter uses a token bucket algorithm with:
 - Exponential backoff on 429 errors
 """
 
-import logging
 import time
 from functools import cache
 from threading import Lock
 
-logger = logging.getLogger(__name__)
+from cortex_utils.logging import get_logger
+
+logger = get_logger(__name__)
 
 # Gmail API quota units per operation
 QUOTA_LABELS_LIST = 1

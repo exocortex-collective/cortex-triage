@@ -8,13 +8,13 @@ Signals are lightweight control messages sent to workers for:
 """
 
 import json
-import logging
 from datetime import datetime, timedelta
 from typing import Any
 
 import psycopg2
+from cortex_utils.logging import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 class WorkerSignal:
