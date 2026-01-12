@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-import logging
 from datetime import datetime
 from decimal import Decimal
 from typing import Any
 
 import psycopg2
+from cortex_utils.logging import get_logger
 from psycopg2.extras import Json, RealDictCursor
 
 from triage.models.patterns import (
@@ -18,7 +18,7 @@ from triage.models.patterns import (
     PatternStatus,
 )
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 # Pattern activation threshold - occurrences needed to become active
 PATTERN_ACTIVATION_COUNT = 3

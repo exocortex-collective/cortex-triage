@@ -7,7 +7,6 @@ reducing API latency compared to individual calls.
 """
 
 import argparse
-import logging
 import os
 import signal
 import sys
@@ -20,6 +19,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import psycopg2
+from cortex_utils.logging import configure_logging, get_logger
 from cortex_utils.metrics import (
     EMAILS_LABELED,
     ERRORS,
@@ -39,15 +39,7 @@ from triage.gmail import (
     get_rate_limiter,
 )
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-)
-logger = logging.getLogger(__name__)
-
-# How long a job can be in 'processing' before it's considered stale
-# and reset to 'pending' (visibility timeout)
-VISIBILITY_TIMEOUT_MINUTES = 5
+logger = get_logger(__name__)
 
 # Max retries for rate-limited requests
 MAX_429_RETRIES = 3
@@ -66,6 +58,9 @@ class Config:
     batch_size: int = 50  # Gmail batchModify max is 1000, but 50 is reasonable
     poll_interval: int = 10  # Seconds to wait when queue is empty
     batch_delay: int = 5  # Seconds to wait between batches to let work accumulate
+    visibility_timeout_minutes: int = (
+        5  # How long a job can be in 'processing' before reset
+    )
 
 
 @dataclass
@@ -338,6 +333,8 @@ class GmailBatchClient:
 class LabelingWorker:
     """Worker that batches label operations for efficiency."""
 
+    queue_name = "labeling"  # Queue name for this worker
+
     def __init__(self, config: Config, gmail: GmailBatchClient):
         self.config = config
         self.gmail = gmail
@@ -391,13 +388,13 @@ class LabelingWorker:
                 WITH reset_stale AS (
                     UPDATE queue
                     SET status = 'pending', claimed_at = NULL
-                    WHERE queue_name = 'labeling'
+                    WHERE queue_name = %s
                       AND status = 'processing'
                       AND claimed_at < NOW() - (INTERVAL '1 minute' * %s)
                 ),
                 claimable AS (
                     SELECT id FROM queue
-                    WHERE queue_name = 'labeling' AND status = 'pending'
+                    WHERE queue_name = %s AND status = 'pending'
                     ORDER BY priority DESC, created_at
                     LIMIT %s
                     FOR UPDATE SKIP LOCKED
@@ -407,7 +404,12 @@ class LabelingWorker:
                 WHERE id IN (SELECT id FROM claimable)
                 RETURNING id, payload
                 """,
-                (VISIBILITY_TIMEOUT_MINUTES, batch_size),
+                (
+                    self.queue_name,
+                    self.config.visibility_timeout_minutes,
+                    self.queue_name,
+                    batch_size,
+                ),
             )
             rows = cur.fetchall()
             conn.commit()
@@ -918,6 +920,7 @@ def repair_failed_jobs(config: Config) -> int:
         )
         with conn.cursor() as cur:
             # Re-enqueue failed labeling jobs with repair flag
+            queue_name = LabelingWorker.queue_name
             cur.execute(
                 """
                 UPDATE queue
@@ -926,9 +929,10 @@ def repair_failed_jobs(config: Config) -> int:
                     attempts = 0,
                     last_error = NULL,
                     claimed_at = NULL
-                WHERE queue_name = 'labeling' AND status = 'failed'
+                WHERE queue_name = %s AND status = 'failed'
                 RETURNING id
-                """
+                """,
+                (queue_name,),
             )
             count: int = cur.rowcount or 0
             conn.commit()
@@ -940,6 +944,10 @@ def repair_failed_jobs(config: Config) -> int:
 
 
 def main() -> None:
+    # Configure logging
+    log_level = os.environ.get("LOG_LEVEL", "INFO")
+    configure_logging(service_name="labeling-worker", level=log_level)
+
     parser = argparse.ArgumentParser(description="Labeling worker service")
     parser.add_argument(
         "--once", action="store_true", help="Process all pending jobs once and exit"

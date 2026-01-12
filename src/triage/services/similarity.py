@@ -6,7 +6,6 @@ variable parts (merchant names, amounts, order IDs, etc.).
 
 from __future__ import annotations
 
-import logging
 import os
 import re
 import textwrap
@@ -18,10 +17,11 @@ from typing import Any
 
 import psycopg2
 import requests
+from cortex_utils.logging import get_logger
 from cortex_utils.triage_config.models import BUILTIN_BODY_EXTRACTION_PROMPTS_DATA
 from psycopg2.extras import RealDictCursor
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 # DuckDB API URL for fetching email bodies (required for body extraction)
 DUCKDB_API_URL = os.environ.get("DUCKDB_API_URL")

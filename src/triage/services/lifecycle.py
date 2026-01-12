@@ -9,12 +9,12 @@ Handles:
 
 from __future__ import annotations
 
-import logging
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 
 import psycopg2
+from cortex_utils.logging import get_logger
 from psycopg2.extras import RealDictCursor
 
 from triage.models.patterns import EmailPattern, IntervalType, PatternStatus
@@ -26,7 +26,7 @@ from triage.services.patterns import (
 )
 from triage.services.temporal import predict_next
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 @dataclass
