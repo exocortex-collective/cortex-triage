@@ -91,7 +91,7 @@ class Config:
     postgres_user: str
     postgres_password: str
     duckdb_api_url: str
-    ollama_url: str
+    llm_url: str
     gmail_token_path: str
     batch_size: int = 100
     poll_interval: int = 5  # seconds between queue polls when empty
@@ -127,12 +127,74 @@ MAX_ATTEMPTS = 3
 PATTERN_QUALITY_CONFIDENCE_THRESHOLD = 0.5
 
 
-class OllamaClient:
-    """Client for Ollama LLM calls."""
+class LLMClient:
+    """Client for LLM calls (supports OpenAI-compatible endpoints)."""
 
     def __init__(self, base_url: str):
         self.base_url = base_url.rstrip("/")
         self.client = httpx.Client(timeout=60.0)
+
+    def _post_completion(
+        self,
+        model: str,
+        prompt: str,
+        max_tokens: int,
+        response_format: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        """Helper to post to completions endpoint and return the result.
+
+        Args:
+            model: Model name to use.
+            prompt: The prompt content to send.
+            max_tokens: Maximum tokens for the response.
+            response_format: Optional response format (e.g., {"type": "json_object"}).
+
+        Returns:
+            The JSON response from the API.
+
+        Raises:
+            httpx.RequestError: Network errors.
+            httpx.HTTPStatusError: HTTP errors (non-2xx status).
+        """
+        payload: dict[str, Any] = {
+            "model": model,
+            "messages": [{"role": "user", "content": prompt}],
+            "max_tokens": max_tokens,
+        }
+        if response_format:
+            payload["response_format"] = response_format
+
+        response = self.client.post(
+            f"{self.base_url}/v1/chat/completions",
+            json=payload,
+        )
+        response.raise_for_status()
+        result: dict[str, Any] = response.json()
+        return result
+
+    def _get_content_from_response(self, result: dict[str, Any]) -> str:
+        """Extracts message content from a completion response.
+
+        Args:
+            result: The JSON response from the API.
+
+        Returns:
+            The content string from the first choice.
+
+        Raises:
+            LLMError: If the response format is unexpected or malformed.
+        """
+        try:
+            # Safely extract content from the first choice.
+            # An empty choices list will raise an IndexError, which is caught.
+            content = result["choices"][0]["message"]["content"]
+            if not isinstance(content, str):
+                raise TypeError(
+                    f"LLM content is not a string, but {type(content).__name__}"
+                )
+            return content
+        except (KeyError, IndexError, TypeError) as e:
+            raise LLMError(f"LLM returned unexpected response format: {e}") from e
 
     def check_intent(self, subject: str, prompt: str, model: str) -> bool:
         """Check if subject matches an intent using LLM.
@@ -149,29 +211,21 @@ class OllamaClient:
             LLMError: If the LLM call fails (network, HTTP, or other error).
         """
         try:
-            response = self.client.post(
-                f"{self.base_url}/api/generate",
-                json={
-                    "model": model,
-                    "prompt": prompt,
-                    "stream": False,
-                },
-            )
-            response.raise_for_status()
-            result = response.json()
-            answer: str = result.get("response", "").strip().lower()
+            result = self._post_completion(model=model, prompt=prompt, max_tokens=10)
+            content = self._get_content_from_response(result)
+            answer: str = content.strip().lower()
             return answer == "yes"
         except httpx.RequestError as e:
-            logger.error(f"Ollama intent check network error: {e}")
-            raise LLMError(f"Ollama network error: {e}") from e
+            logger.error(f"LLM intent check network error: {e}")
+            raise LLMError(f"LLM network error: {e}") from e
         except httpx.HTTPStatusError as e:
-            logger.error(
-                f"Ollama intent check HTTP error {e.response.status_code}: {e}"
-            )
-            raise LLMError(f"Ollama HTTP {e.response.status_code}") from e
+            logger.error(f"LLM intent check HTTP error {e.response.status_code}: {e}")
+            raise LLMError(f"LLM HTTP {e.response.status_code}") from e
+        except LLMError:
+            raise  # Re-raise LLMError as-is
         except Exception as e:
-            logger.error(f"Ollama intent check failed unexpectedly: {e}")
-            raise LLMError(f"Ollama error: {e}") from e
+            logger.error(f"LLM intent check failed unexpectedly: {e}")
+            raise LLMError(f"LLM error: {e}") from e
 
     def classify(self, prompt: str, model: str) -> tuple[str, float, str]:
         """Classify an email using LLM.
@@ -187,24 +241,19 @@ class OllamaClient:
             LLMError: If the LLM call fails (network, HTTP, or invalid response).
         """
         try:
-            response = self.client.post(
-                f"{self.base_url}/api/generate",
-                json={
-                    "model": model,
-                    "prompt": prompt,
-                    "stream": False,
-                    "format": "json",
-                },
+            result = self._post_completion(
+                model=model,
+                prompt=prompt,
+                max_tokens=200,
+                response_format={"type": "json_object"},
             )
-            response.raise_for_status()
-            result = response.json()
-            text = result.get("response", "{}")
+            text = self._get_content_from_response(result)
             data = json.loads(text)
 
             # Validate response is a dict
             if not isinstance(data, dict):
-                logger.error(f"Ollama returned non-dict JSON: {text}")
-                raise LLMError(f"Ollama returned non-dict JSON: {text}")
+                logger.error(f"LLM returned non-dict JSON: {text}")
+                raise LLMError(f"LLM returned non-dict JSON: {text}")
 
             # Safe float conversion for confidence
             raw_confidence = data.get("confidence")
@@ -222,19 +271,19 @@ class OllamaClient:
                 data.get("reasoning", ""),
             )
         except httpx.RequestError as e:
-            logger.error(f"Ollama network error: {e}")
-            raise LLMError(f"Ollama network error: {e}") from e
+            logger.error(f"LLM network error: {e}")
+            raise LLMError(f"LLM network error: {e}") from e
         except httpx.HTTPStatusError as e:
-            logger.error(f"Ollama HTTP error {e.response.status_code}: {e}")
-            raise LLMError(f"Ollama HTTP {e.response.status_code}") from e
+            logger.error(f"LLM HTTP error {e.response.status_code}: {e}")
+            raise LLMError(f"LLM HTTP {e.response.status_code}") from e
         except json.JSONDecodeError as e:
-            logger.error(f"Ollama returned invalid JSON: {e}")
-            raise LLMError(f"Ollama invalid JSON: {e}") from e
+            logger.error(f"LLM returned invalid JSON: {e}")
+            raise LLMError(f"LLM invalid JSON: {e}") from e
         except LLMError:
             raise  # Re-raise LLMError as-is
         except Exception as e:
-            logger.error(f"Ollama classification failed: {e}")
-            raise LLMError(f"Ollama error: {e}") from e
+            logger.error(f"LLM classification failed: {e}")
+            raise LLMError(f"LLM error: {e}") from e
 
     def check_email_intent(
         self,
@@ -268,29 +317,25 @@ class OllamaClient:
         )
 
         try:
-            response = self.client.post(
-                f"{self.base_url}/api/generate",
-                json={
-                    "model": model,
-                    "prompt": formatted_prompt,
-                    "stream": False,
-                },
+            result = self._post_completion(
+                model=model, prompt=formatted_prompt, max_tokens=10
             )
-            response.raise_for_status()
-            result = response.json()
-            answer: str = result.get("response", "").strip().lower()
+            content = self._get_content_from_response(result)
+            answer: str = content.strip().lower()
             return answer == "yes"
         except httpx.RequestError as e:
-            logger.error(f"Ollama email intent check network error: {e}")
-            raise LLMError(f"Ollama network error: {e}") from e
+            logger.error(f"LLM email intent check network error: {e}")
+            raise LLMError(f"LLM network error: {e}") from e
         except httpx.HTTPStatusError as e:
             logger.error(
-                f"Ollama email intent check HTTP error {e.response.status_code}: {e}"
+                f"LLM email intent check HTTP error {e.response.status_code}: {e}"
             )
-            raise LLMError(f"Ollama HTTP {e.response.status_code}") from e
+            raise LLMError(f"LLM HTTP {e.response.status_code}") from e
+        except LLMError:
+            raise  # Re-raise LLMError as-is
         except Exception as e:
-            logger.error(f"Ollama email intent check failed unexpectedly: {e}")
-            raise LLMError(f"Ollama error: {e}") from e
+            logger.error(f"LLM email intent check failed unexpectedly: {e}")
+            raise LLMError(f"LLM error: {e}") from e
 
     def categorize_email(
         self,
@@ -329,17 +374,11 @@ class OllamaClient:
         )
 
         try:
-            response = self.client.post(
-                f"{self.base_url}/api/generate",
-                json={
-                    "model": model,
-                    "prompt": formatted_prompt,
-                    "stream": False,
-                },
+            result = self._post_completion(
+                model=model, prompt=formatted_prompt, max_tokens=50
             )
-            response.raise_for_status()
-            result = response.json()
-            answer: str = result.get("response", "").strip().lower()
+            content = self._get_content_from_response(result)
+            answer: str = content.strip().lower()
 
             # Validate the response is one of the allowed categories
             for cat in categories:
@@ -357,14 +396,16 @@ class OllamaClient:
             )
             return None  # Not an error - LLM responded but no category matched
         except httpx.RequestError as e:
-            logger.error(f"Ollama categorize network error: {e}")
-            raise LLMError(f"Ollama network error: {e}") from e
+            logger.error(f"LLM categorize network error: {e}")
+            raise LLMError(f"LLM network error: {e}") from e
         except httpx.HTTPStatusError as e:
-            logger.error(f"Ollama categorize HTTP error {e.response.status_code}: {e}")
-            raise LLMError(f"Ollama HTTP {e.response.status_code}") from e
+            logger.error(f"LLM categorize HTTP error {e.response.status_code}: {e}")
+            raise LLMError(f"LLM HTTP {e.response.status_code}") from e
+        except LLMError:
+            raise  # Re-raise LLMError as-is
         except Exception as e:
-            logger.error(f"Ollama categorize failed unexpectedly: {e}")
-            raise LLMError(f"Ollama error: {e}") from e
+            logger.error(f"LLM categorize failed unexpectedly: {e}")
+            raise LLMError(f"LLM error: {e}") from e
 
     def extract_value(
         self,
@@ -407,17 +448,10 @@ class OllamaClient:
             return None
 
         try:
-            response = self.client.post(
-                f"{self.base_url}/api/generate",
-                json={
-                    "model": model,
-                    "prompt": formatted,
-                    "stream": False,
-                },
+            result = self._post_completion(
+                model=model, prompt=formatted, max_tokens=100
             )
-            response.raise_for_status()
-            result = response.json()
-            value: str = result.get("response", "").strip()
+            value: str = self._get_content_from_response(result).strip()
 
             # Reject obviously invalid responses
             if not value or value.lower() in INVALID_LLM_EXTRACTION_VALUES:
@@ -426,15 +460,17 @@ class OllamaClient:
 
             return value
         except httpx.RequestError as e:
-            logger.warning(f"Ollama extraction network error: {e}")
+            logger.warning(f"LLM extraction network error: {e}")
             return None
         except httpx.HTTPStatusError as e:
-            logger.warning(
-                f"Ollama extraction HTTP error {e.response.status_code}: {e}"
-            )
+            logger.warning(f"LLM extraction HTTP error {e.response.status_code}: {e}")
+            return None
+        except LLMError as e:
+            # Helper raised LLMError - log as warning since extraction is optional
+            logger.warning(f"LLM extraction failed: {e}")
             return None
         except Exception as e:
-            logger.warning(f"Ollama extraction failed: {e}")
+            logger.warning(f"LLM extraction failed: {e}")
             return None
 
     def classify_with_extraction(
@@ -464,24 +500,19 @@ class OllamaClient:
             LLMError: If the LLM call fails (network, HTTP, or invalid response).
         """
         try:
-            response = self.client.post(
-                f"{self.base_url}/api/generate",
-                json={
-                    "model": model,
-                    "prompt": prompt,
-                    "stream": False,
-                    "format": "json",
-                },
+            result = self._post_completion(
+                model=model,
+                prompt=prompt,
+                max_tokens=300,
+                response_format={"type": "json_object"},
             )
-            response.raise_for_status()
-            result = response.json()
-            text = result.get("response", "{}")
+            text = self._get_content_from_response(result)
             data = json.loads(text)
 
             # Validate response is a dict
             if not isinstance(data, dict):
-                logger.error(f"Ollama returned non-dict JSON: {text}")
-                raise LLMError(f"Ollama returned non-dict JSON: {text}")
+                logger.error(f"LLM returned non-dict JSON: {text}")
+                raise LLMError(f"LLM returned non-dict JSON: {text}")
 
             # Safe float conversion for confidence
             raw_confidence = data.get("confidence")
@@ -512,19 +543,19 @@ class OllamaClient:
                 extracted,
             )
         except httpx.RequestError as e:
-            logger.error(f"Ollama network error: {e}")
-            raise LLMError(f"Ollama network error: {e}") from e
+            logger.error(f"LLM network error: {e}")
+            raise LLMError(f"LLM network error: {e}") from e
         except httpx.HTTPStatusError as e:
-            logger.error(f"Ollama HTTP error {e.response.status_code}: {e}")
-            raise LLMError(f"Ollama HTTP {e.response.status_code}") from e
+            logger.error(f"LLM HTTP error {e.response.status_code}: {e}")
+            raise LLMError(f"LLM HTTP {e.response.status_code}") from e
         except json.JSONDecodeError as e:
-            logger.error(f"Ollama returned invalid JSON: {e}")
-            raise LLMError(f"Ollama invalid JSON: {e}") from e
+            logger.error(f"LLM returned invalid JSON: {e}")
+            raise LLMError(f"LLM invalid JSON: {e}") from e
         except LLMError:
             raise  # Re-raise LLMError as-is
         except Exception as e:
-            logger.error(f"Ollama classification with extraction failed: {e}")
-            raise LLMError(f"Ollama error: {e}") from e
+            logger.error(f"LLM classification with extraction failed: {e}")
+            raise LLMError(f"LLM error: {e}") from e
 
 
 class GmailClient:
@@ -754,14 +785,14 @@ class TriageWorker:
         self,
         config: Config,
         rules: RulesConfig,
-        ollama: OllamaClient,
+        llm: LLMClient,
         gmail: GmailClient,
         worker_id: str | None = None,
         config_version: int | None = None,
     ):
         self.config = config
         self.rules = rules
-        self.ollama = ollama
+        self.llm = llm
         self.gmail = gmail
         self.running = True
         self._pool: SimpleConnectionPool | None = None
@@ -1750,8 +1781,8 @@ class TriageWorker:
             if not email.body:
                 email.body = self._get_body_from_api(gmail_id)
 
-            # Evaluate rules (may raise LLMError if Ollama is down)
-            result = evaluate(self.rules, email, self.ollama)
+            # Evaluate rules (may raise LLMError if LLM is down)
+            result = evaluate(self.rules, email, self.llm)
 
             # Execute action if matched
             # Propagate priority so backfill jobs stay deprioritized through pipeline
@@ -1879,7 +1910,7 @@ class TriageWorker:
                                 if not email.body:
                                     email.body = self._get_body_from_api(gmail_id)
 
-                                result = evaluate(self.rules, email, self.ollama)
+                                result = evaluate(self.rules, email, self.llm)
 
                                 action_executed = False
                                 if result.matched and result.action:
@@ -2067,19 +2098,26 @@ def main() -> None:
     args = parser.parse_args()
 
     # All config from environment
+    # Support both LLM_URL (new) and OLLAMA_URL (legacy)
+    llm_url = os.environ.get("LLM_URL") or os.environ.get("OLLAMA_URL")
+
     required_vars = [
         "POSTGRES_HOST",
         "POSTGRES_DB",
         "POSTGRES_USER",
         "POSTGRES_PASSWORD",
         "DUCKDB_API_URL",
-        "OLLAMA_URL",
         "GMAIL_TOKEN_PATH",
     ]
     missing = [v for v in required_vars if not os.environ.get(v)]
+    if not llm_url:
+        missing.append("LLM_URL or OLLAMA_URL")
     if missing:
         logger.error(f"Missing required environment variables: {', '.join(missing)}")
         sys.exit(1)
+
+    # Type guard: llm_url is guaranteed to be str at this point
+    assert llm_url is not None
 
     # Start metrics server
     try:
@@ -2097,7 +2135,7 @@ def main() -> None:
         postgres_user=os.environ["POSTGRES_USER"],
         postgres_password=os.environ["POSTGRES_PASSWORD"],
         duckdb_api_url=os.environ["DUCKDB_API_URL"],
-        ollama_url=os.environ["OLLAMA_URL"],
+        llm_url=llm_url,
         gmail_token_path=os.environ["GMAIL_TOKEN_PATH"],
         batch_size=args.batch_size,
         enable_convergence=os.environ.get("ENABLE_CONVERGENCE", "true").lower()
@@ -2117,10 +2155,10 @@ def main() -> None:
         sys.exit(1)
 
     # Initialize clients
-    ollama = OllamaClient(config.ollama_url)
+    llm = LLMClient(config.llm_url)
     gmail = GmailClient(config.gmail_token_path)
 
-    worker = TriageWorker(config, rules, ollama, gmail, config_version=config_version)
+    worker = TriageWorker(config, rules, llm, gmail, config_version=config_version)
 
     # Handle signals for graceful shutdown and config reload
     def shutdown_handler(signum: int, frame: Any) -> None:
