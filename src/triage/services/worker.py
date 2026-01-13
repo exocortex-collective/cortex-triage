@@ -182,13 +182,15 @@ class LLMClient:
             The content string from the first choice.
 
         Raises:
-            LLMError: If the response has no choices.
+            LLMError: If the response format is unexpected or malformed.
         """
-        choices = result.get("choices", [])
-        if not choices:
-            raise LLMError("LLM returned empty choices")
-        content: str = choices[0].get("message", {}).get("content", "")
-        return content
+        try:
+            # Safely extract content from the first choice.
+            # An empty choices list will raise an IndexError, which is caught.
+            content: str = result["choices"][0]["message"]["content"]
+            return content
+        except (KeyError, IndexError, TypeError) as e:
+            raise LLMError(f"LLM returned unexpected response format: {e}") from e
 
     def check_intent(self, subject: str, prompt: str, model: str) -> bool:
         """Check if subject matches an intent using LLM.
