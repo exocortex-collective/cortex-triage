@@ -236,7 +236,7 @@ def _extract_apple_merchant(body_text: str) -> str | None:
                             logger.debug(f"LLM extracted Apple merchant: {merchant}")
                             return merchant
 
-        except (requests.RequestException, ValueError, TypeError) as e:
+        except (requests.RequestException, ValueError, TypeError, AttributeError) as e:
             logger.warning(f"LLM extraction failed for Apple receipt: {e}")
 
     # Fallback to regex patterns
