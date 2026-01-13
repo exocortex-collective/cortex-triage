@@ -187,7 +187,11 @@ class LLMClient:
         try:
             # Safely extract content from the first choice.
             # An empty choices list will raise an IndexError, which is caught.
-            content: str = result["choices"][0]["message"]["content"]
+            content = result["choices"][0]["message"]["content"]
+            if not isinstance(content, str):
+                raise TypeError(
+                    f"LLM content is not a string, but {type(content).__name__}"
+                )
             return content
         except (KeyError, IndexError, TypeError) as e:
             raise LLMError(f"LLM returned unexpected response format: {e}") from e

@@ -223,18 +223,19 @@ def _extract_apple_merchant(body_text: str) -> str | None:
                     if choices:
                         message = choices[0].get("message", {})
                         merchant_raw = message.get("content", "")
-                        if not isinstance(merchant_raw, str):
-                            return None
-                        merchant = merchant_raw.strip()
-                        # Clean up common LLM artifacts
-                        merchant = merchant.strip('"').strip("'").strip()
-                        if (
-                            merchant
-                            and len(merchant) > MIN_MERCHANT_LENGTH
-                            and len(merchant) < MAX_MERCHANT_LENGTH
-                        ):
-                            logger.debug(f"LLM extracted Apple merchant: {merchant}")
-                            return merchant
+                        if isinstance(merchant_raw, str):
+                            merchant = merchant_raw.strip()
+                            # Clean up common LLM artifacts
+                            merchant = merchant.strip('"').strip("'").strip()
+                            if (
+                                merchant
+                                and len(merchant) > MIN_MERCHANT_LENGTH
+                                and len(merchant) < MAX_MERCHANT_LENGTH
+                            ):
+                                logger.debug(
+                                    f"LLM extracted Apple merchant: {merchant}"
+                                )
+                                return merchant
 
         except (requests.RequestException, ValueError, TypeError, AttributeError) as e:
             logger.warning(f"LLM extraction failed for Apple receipt: {e}")
