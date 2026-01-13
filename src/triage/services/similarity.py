@@ -220,7 +220,7 @@ def _extract_apple_merchant(body_text: str) -> str | None:
                     result: dict[str, Any] = response.json()
                     # Parse OpenAI-compatible response format
                     choices = result.get("choices", [])
-                    if choices and len(choices) > 0:
+                    if choices:
                         message = choices[0].get("message", {})
                         merchant_raw = message.get("content", "")
                         if not isinstance(merchant_raw, str):
