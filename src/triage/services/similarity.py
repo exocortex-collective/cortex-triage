@@ -26,11 +26,12 @@ logger = get_logger(__name__)
 # DuckDB API URL for fetching email bodies (required for body extraction)
 DUCKDB_API_URL = os.environ.get("DUCKDB_API_URL")
 
-# Ollama URL for LLM-based extraction (required for LLM features)
-OLLAMA_URL = os.environ.get("OLLAMA_URL")
+# LLM URL for LLM-based extraction (required for LLM features)
+# Support both LLM_URL (new) and OLLAMA_URL (legacy) for backward compatibility
+LLM_URL = os.environ.get("LLM_URL") or os.environ.get("OLLAMA_URL")
 
-# Ollama model for extraction (default: qwen2.5:3b - fast and good at extraction)
-OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "qwen2.5:3b")
+# LLM model for extraction (default: qwen2.5:3b - fast and good at extraction)
+LLM_MODEL = os.environ.get("LLM_MODEL") or os.environ.get("OLLAMA_MODEL", "qwen2.5:3b")
 
 # Merchant name validation bounds
 MIN_MERCHANT_LENGTH = 2  # Minimum chars for valid merchant name
@@ -181,7 +182,7 @@ def _extract_apple_merchant(body_text: str) -> str | None:
         "Plex: Stream Live TV Channels" -> "Plex Pass"
     """
     # Try LLM extraction first
-    if OLLAMA_URL:
+    if LLM_URL:
         try:
             # Extract just the product line from the receipt table
             product_match = re.search(
@@ -203,32 +204,37 @@ def _extract_apple_merchant(body_text: str) -> str | None:
                 # Remove indentation from prompt
                 prompt = textwrap.dedent(prompt).strip()
 
+                # Use OpenAI-compatible endpoint
                 response = requests.post(
-                    f"{OLLAMA_URL.rstrip('/')}/api/generate",
+                    f"{LLM_URL.rstrip('/')}/v1/chat/completions",
                     json={
-                        "model": OLLAMA_MODEL,
-                        "prompt": prompt,
-                        "stream": False,
-                        "options": {"temperature": 0.1},
+                        "model": LLM_MODEL,
+                        "messages": [{"role": "user", "content": prompt}],
+                        "max_tokens": 50,
+                        "temperature": 0.1,
                     },
                     timeout=15,
                 )
 
                 if response.status_code == 200:
                     result: dict[str, Any] = response.json()
-                    merchant_raw = result.get("response", "")
-                    if not isinstance(merchant_raw, str):
-                        return None
-                    merchant = merchant_raw.strip()
-                    # Clean up common LLM artifacts
-                    merchant = merchant.strip('"').strip("'").strip()
-                    if (
-                        merchant
-                        and len(merchant) > MIN_MERCHANT_LENGTH
-                        and len(merchant) < MAX_MERCHANT_LENGTH
-                    ):
-                        logger.debug(f"LLM extracted Apple merchant: {merchant}")
-                        return merchant
+                    # Parse OpenAI-compatible response format
+                    choices = result.get("choices", [])
+                    if choices and len(choices) > 0:
+                        message = choices[0].get("message", {})
+                        merchant_raw = message.get("content", "")
+                        if not isinstance(merchant_raw, str):
+                            return None
+                        merchant = merchant_raw.strip()
+                        # Clean up common LLM artifacts
+                        merchant = merchant.strip('"').strip("'").strip()
+                        if (
+                            merchant
+                            and len(merchant) > MIN_MERCHANT_LENGTH
+                            and len(merchant) < MAX_MERCHANT_LENGTH
+                        ):
+                            logger.debug(f"LLM extracted Apple merchant: {merchant}")
+                            return merchant
 
         except (requests.RequestException, ValueError) as e:
             logger.warning(f"LLM extraction failed for Apple receipt: {e}")
