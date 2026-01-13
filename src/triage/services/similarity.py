@@ -15,8 +15,8 @@ from datetime import date, datetime
 from decimal import Decimal
 from typing import Any
 
+import httpx
 import psycopg2
-import requests
 from cortex_utils.logging import get_logger
 from cortex_utils.triage_config.models import BUILTIN_BODY_EXTRACTION_PROMPTS_DATA
 from psycopg2.extras import RealDictCursor
@@ -205,7 +205,7 @@ def _extract_apple_merchant(body_text: str) -> str | None:
                 prompt = textwrap.dedent(prompt).strip()
 
                 # Use OpenAI-compatible endpoint
-                response = requests.post(
+                response = httpx.post(
                     f"{LLM_URL.rstrip('/')}/v1/chat/completions",
                     json={
                         "model": LLM_MODEL,
@@ -237,7 +237,7 @@ def _extract_apple_merchant(body_text: str) -> str | None:
                                 )
                                 return merchant
 
-        except (requests.RequestException, ValueError, TypeError, AttributeError) as e:
+        except (httpx.RequestError, ValueError, TypeError, AttributeError) as e:
             logger.warning(f"LLM extraction failed for Apple receipt: {e}")
 
     # Fallback to regex patterns
@@ -304,7 +304,7 @@ def fetch_body_text(gmail_id: str) -> str | None:
     if not DUCKDB_API_URL:
         return None
     try:
-        response = requests.get(
+        response = httpx.get(
             f"{DUCKDB_API_URL}/mail_text",
             params={"gmail_id": gmail_id},
             timeout=5,
@@ -313,7 +313,7 @@ def fetch_body_text(gmail_id: str) -> str | None:
             try:
                 data: dict[str, str | None] = response.json()
                 return data.get("text")
-            except requests.exceptions.JSONDecodeError:
+            except ValueError:
                 logger.warning("Failed to decode JSON from DuckDB API for %s", gmail_id)
                 return None
         elif response.status_code == 404:
@@ -325,7 +325,7 @@ def fetch_body_text(gmail_id: str) -> str | None:
                 response.status_code,
             )
             return None
-    except requests.RequestException as e:
+    except httpx.RequestError as e:
         logger.warning("Failed to fetch body from DuckDB API for %s: %s", gmail_id, e)
         return None
 
