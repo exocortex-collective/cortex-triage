@@ -134,6 +134,62 @@ class LLMClient:
         self.base_url = base_url.rstrip("/")
         self.client = httpx.Client(timeout=60.0)
 
+    def _post_completion(
+        self,
+        model: str,
+        prompt: str,
+        max_tokens: int,
+        response_format: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        """Helper to post to completions endpoint and return the result.
+
+        Args:
+            model: Model name to use.
+            prompt: The prompt content to send.
+            max_tokens: Maximum tokens for the response.
+            response_format: Optional response format (e.g., {"type": "json_object"}).
+
+        Returns:
+            The JSON response from the API.
+
+        Raises:
+            httpx.RequestError: Network errors.
+            httpx.HTTPStatusError: HTTP errors (non-2xx status).
+        """
+        payload: dict[str, Any] = {
+            "model": model,
+            "messages": [{"role": "user", "content": prompt}],
+            "max_tokens": max_tokens,
+        }
+        if response_format:
+            payload["response_format"] = response_format
+
+        response = self.client.post(
+            f"{self.base_url}/v1/chat/completions",
+            json=payload,
+        )
+        response.raise_for_status()
+        result: dict[str, Any] = response.json()
+        return result
+
+    def _get_content_from_response(self, result: dict[str, Any]) -> str:
+        """Extracts message content from a completion response.
+
+        Args:
+            result: The JSON response from the API.
+
+        Returns:
+            The content string from the first choice.
+
+        Raises:
+            LLMError: If the response has no choices.
+        """
+        choices = result.get("choices", [])
+        if not choices:
+            raise LLMError("LLM returned empty choices")
+        content: str = choices[0].get("message", {}).get("content", "")
+        return content
+
     def check_intent(self, subject: str, prompt: str, model: str) -> bool:
         """Check if subject matches an intent using LLM.
 
@@ -149,20 +205,8 @@ class LLMClient:
             LLMError: If the LLM call fails (network, HTTP, or other error).
         """
         try:
-            response = self.client.post(
-                f"{self.base_url}/v1/chat/completions",
-                json={
-                    "model": model,
-                    "messages": [{"role": "user", "content": prompt}],
-                    "max_tokens": 10,
-                },
-            )
-            response.raise_for_status()
-            result = response.json()
-            choices = result.get("choices", [])
-            if not choices:
-                raise LLMError("LLM returned empty choices")
-            content = choices[0].get("message", {}).get("content", "")
+            result = self._post_completion(model=model, prompt=prompt, max_tokens=10)
+            content = self._get_content_from_response(result)
             answer: str = content.strip().lower()
             return answer == "yes"
         except httpx.RequestError as e:
@@ -171,6 +215,8 @@ class LLMClient:
         except httpx.HTTPStatusError as e:
             logger.error(f"LLM intent check HTTP error {e.response.status_code}: {e}")
             raise LLMError(f"LLM HTTP {e.response.status_code}") from e
+        except LLMError:
+            raise  # Re-raise LLMError as-is
         except Exception as e:
             logger.error(f"LLM intent check failed unexpectedly: {e}")
             raise LLMError(f"LLM error: {e}") from e
@@ -189,22 +235,13 @@ class LLMClient:
             LLMError: If the LLM call fails (network, HTTP, or invalid response).
         """
         try:
-            response = self.client.post(
-                f"{self.base_url}/v1/chat/completions",
-                json={
-                    "model": model,
-                    "messages": [{"role": "user", "content": prompt}],
-                    "max_tokens": 200,
-                    "response_format": {"type": "json_object"},
-                },
+            result = self._post_completion(
+                model=model,
+                prompt=prompt,
+                max_tokens=200,
+                response_format={"type": "json_object"},
             )
-            response.raise_for_status()
-            result = response.json()
-            choices = result.get("choices", [])
-            if not choices:
-                raise LLMError("LLM returned empty choices")
-
-            text = choices[0].get("message", {}).get("content", "{}")
+            text = self._get_content_from_response(result)
             data = json.loads(text)
 
             # Validate response is a dict
@@ -274,20 +311,10 @@ class LLMClient:
         )
 
         try:
-            response = self.client.post(
-                f"{self.base_url}/v1/chat/completions",
-                json={
-                    "model": model,
-                    "messages": [{"role": "user", "content": formatted_prompt}],
-                    "max_tokens": 10,
-                },
+            result = self._post_completion(
+                model=model, prompt=formatted_prompt, max_tokens=10
             )
-            response.raise_for_status()
-            result = response.json()
-            choices = result.get("choices", [])
-            if not choices:
-                raise LLMError("LLM returned empty choices")
-            content = choices[0].get("message", {}).get("content", "")
+            content = self._get_content_from_response(result)
             answer: str = content.strip().lower()
             return answer == "yes"
         except httpx.RequestError as e:
@@ -298,6 +325,8 @@ class LLMClient:
                 f"LLM email intent check HTTP error {e.response.status_code}: {e}"
             )
             raise LLMError(f"LLM HTTP {e.response.status_code}") from e
+        except LLMError:
+            raise  # Re-raise LLMError as-is
         except Exception as e:
             logger.error(f"LLM email intent check failed unexpectedly: {e}")
             raise LLMError(f"LLM error: {e}") from e
@@ -339,20 +368,10 @@ class LLMClient:
         )
 
         try:
-            response = self.client.post(
-                f"{self.base_url}/v1/chat/completions",
-                json={
-                    "model": model,
-                    "messages": [{"role": "user", "content": formatted_prompt}],
-                    "max_tokens": 50,
-                },
+            result = self._post_completion(
+                model=model, prompt=formatted_prompt, max_tokens=50
             )
-            response.raise_for_status()
-            result = response.json()
-            choices = result.get("choices", [])
-            if not choices:
-                raise LLMError("LLM returned empty choices")
-            content = choices[0].get("message", {}).get("content", "")
+            content = self._get_content_from_response(result)
             answer: str = content.strip().lower()
 
             # Validate the response is one of the allowed categories
@@ -376,6 +395,8 @@ class LLMClient:
         except httpx.HTTPStatusError as e:
             logger.error(f"LLM categorize HTTP error {e.response.status_code}: {e}")
             raise LLMError(f"LLM HTTP {e.response.status_code}") from e
+        except LLMError:
+            raise  # Re-raise LLMError as-is
         except Exception as e:
             logger.error(f"LLM categorize failed unexpectedly: {e}")
             raise LLMError(f"LLM error: {e}") from e
@@ -421,21 +442,10 @@ class LLMClient:
             return None
 
         try:
-            response = self.client.post(
-                f"{self.base_url}/v1/chat/completions",
-                json={
-                    "model": model,
-                    "messages": [{"role": "user", "content": formatted}],
-                    "max_tokens": 100,
-                },
+            result = self._post_completion(
+                model=model, prompt=formatted, max_tokens=100
             )
-            response.raise_for_status()
-            result = response.json()
-            choices = result.get("choices", [])
-            if not choices:
-                logger.warning("LLM extraction returned empty choices")
-                return None
-            value: str = choices[0].get("message", {}).get("content", "").strip()
+            value: str = self._get_content_from_response(result).strip()
 
             # Reject obviously invalid responses
             if not value or value.lower() in INVALID_LLM_EXTRACTION_VALUES:
@@ -448,6 +458,10 @@ class LLMClient:
             return None
         except httpx.HTTPStatusError as e:
             logger.warning(f"LLM extraction HTTP error {e.response.status_code}: {e}")
+            return None
+        except LLMError as e:
+            # Helper raised LLMError - log as warning since extraction is optional
+            logger.warning(f"LLM extraction failed: {e}")
             return None
         except Exception as e:
             logger.warning(f"LLM extraction failed: {e}")
@@ -480,22 +494,13 @@ class LLMClient:
             LLMError: If the LLM call fails (network, HTTP, or invalid response).
         """
         try:
-            response = self.client.post(
-                f"{self.base_url}/v1/chat/completions",
-                json={
-                    "model": model,
-                    "messages": [{"role": "user", "content": prompt}],
-                    "max_tokens": 300,
-                    "response_format": {"type": "json_object"},
-                },
+            result = self._post_completion(
+                model=model,
+                prompt=prompt,
+                max_tokens=300,
+                response_format={"type": "json_object"},
             )
-            response.raise_for_status()
-            result = response.json()
-            choices = result.get("choices", [])
-            if not choices:
-                raise LLMError("LLM returned empty choices")
-
-            text = choices[0].get("message", {}).get("content", "{}")
+            text = self._get_content_from_response(result)
             data = json.loads(text)
 
             # Validate response is a dict
