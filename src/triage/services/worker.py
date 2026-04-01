@@ -1596,6 +1596,120 @@ class TriageWorker:
         return total_processed, total_failed
 
 
+def ensure_config_schema(config: Config) -> None:
+    """Ensure triage config tables exist in database.
+
+    Must be called before load_initial_config() on fresh databases.
+    """
+    with psycopg2.connect(
+        host=config.postgres_host,
+        port=config.postgres_port,
+        dbname=config.postgres_db,
+        user=config.postgres_user,
+        password=config.postgres_password,
+    ) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS triage_config_versions (
+                    version SERIAL PRIMARY KEY,
+                    created_by TEXT NOT NULL,
+                    notes TEXT,
+                    is_active BOOLEAN NOT NULL DEFAULT FALSE,
+                    config_hash TEXT NOT NULL,
+                    label_prefix TEXT,
+                    intents JSONB DEFAULT '{}',
+                    email_categories JSONB DEFAULT '{}',
+                    prompts JSONB DEFAULT '{}',
+                    body_extraction_prompts JSONB DEFAULT '{}',
+                    rolled_back_from INTEGER,
+                    created_at TIMESTAMPTZ DEFAULT NOW()
+                );
+
+                CREATE OR REPLACE FUNCTION deactivate_old_config_versions()
+                RETURNS TRIGGER AS $$
+                BEGIN
+                    IF NEW.is_active THEN
+                        UPDATE triage_config_versions
+                        SET is_active = FALSE
+                        WHERE version != NEW.version;
+                    END IF;
+                    RETURN NEW;
+                END;
+                $$ LANGUAGE plpgsql;
+
+                DROP TRIGGER IF EXISTS trg_deactivate_old_config
+                    ON triage_config_versions;
+                CREATE TRIGGER trg_deactivate_old_config
+                    AFTER INSERT ON triage_config_versions
+                    FOR EACH ROW
+                    EXECUTE FUNCTION deactivate_old_config_versions();
+
+                CREATE TABLE IF NOT EXISTS triage_chains (
+                    id SERIAL PRIMARY KEY,
+                    config_version INTEGER NOT NULL
+                        REFERENCES triage_config_versions(version),
+                    chain_name TEXT NOT NULL,
+                    display_order INTEGER DEFAULT 0
+                );
+
+                CREATE TABLE IF NOT EXISTS triage_rules (
+                    id SERIAL PRIMARY KEY,
+                    chain_id INTEGER NOT NULL REFERENCES triage_chains(id),
+                    config_version INTEGER NOT NULL
+                        REFERENCES triage_config_versions(version),
+                    prev_rule_id INTEGER REFERENCES triage_rules(id),
+                    next_rule_id INTEGER REFERENCES triage_rules(id),
+                    match_condition JSONB DEFAULT '{}',
+                    action JSONB,
+                    jump_to_chain TEXT,
+                    return_to_parent BOOLEAN DEFAULT FALSE,
+                    variables JSONB,
+                    llm_config JSONB,
+                    routes JSONB,
+                    rule_name TEXT,
+                    description TEXT,
+                    row_version INTEGER DEFAULT 1
+                );
+
+                CREATE TABLE IF NOT EXISTS triage_email_mappings (
+                    id SERIAL PRIMARY KEY,
+                    mapping_type TEXT NOT NULL,
+                    email_address TEXT NOT NULL,
+                    label TEXT,
+                    archive BOOLEAN DEFAULT FALSE,
+                    mark_read BOOLEAN DEFAULT FALSE,
+                    star BOOLEAN DEFAULT FALSE,
+                    created_by TEXT,
+                    updated_by TEXT,
+                    created_at TIMESTAMPTZ DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ DEFAULT NOW(),
+                    deleted_at TIMESTAMPTZ,
+                    CONSTRAINT unique_email_mapping
+                        UNIQUE (mapping_type, email_address)
+                );
+
+                CREATE TABLE IF NOT EXISTS worker_signals (
+                    id SERIAL PRIMARY KEY,
+                    signal_type TEXT NOT NULL,
+                    target_worker TEXT NOT NULL DEFAULT 'all',
+                    payload JSONB DEFAULT '{}',
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    expires_at TIMESTAMPTZ,
+                    processed_at TIMESTAMPTZ,
+                    processed_by TEXT,
+                    created_at TIMESTAMPTZ DEFAULT NOW()
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_worker_signals_pending
+                    ON worker_signals(status, created_at)
+                    WHERE status = 'pending';
+                """
+            )
+            conn.commit()
+    logger.info("Config schema ensured")
+
+
 def load_initial_config(config: Config) -> tuple[RulesConfig, int]:
     """Load config from database on startup.
 
@@ -1691,6 +1805,9 @@ def main() -> None:
         enable_convergence=os.environ.get("ENABLE_CONVERGENCE", "true").lower()
         == "true",
     )
+
+    # Ensure config tables exist (safe on fresh databases)
+    ensure_config_schema(config)
 
     # Load and validate rules from database
     try:
