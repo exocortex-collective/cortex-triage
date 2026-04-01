@@ -1835,6 +1835,32 @@ def ensure_config_schema(config: Config) -> None:
                     ON worker_signals(target_worker, status);
                 CREATE INDEX IF NOT EXISTS idx_signals_worker
                     ON worker_signals(target_worker, status);
+
+                -- Worker status tracking (heartbeat, config version)
+                CREATE TABLE IF NOT EXISTS worker_status (
+                    id BIGSERIAL PRIMARY KEY,
+                    worker_id TEXT NOT NULL UNIQUE,
+                    worker_type TEXT NOT NULL
+                        CHECK (worker_type IN (
+                            'triage', 'labeling', 'parse', 'attachment'
+                        )),
+                    current_config_version INTEGER
+                        REFERENCES triage_config_versions(version),
+                    last_reload_at TIMESTAMPTZ,
+                    status TEXT NOT NULL DEFAULT 'running',
+                    last_heartbeat TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    jobs_processed BIGINT NOT NULL DEFAULT 0,
+                    hostname TEXT,
+                    pid INTEGER
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_worker_status_type
+                    ON worker_status(worker_type, status);
+                CREATE INDEX IF NOT EXISTS idx_worker_status_heartbeat
+                    ON worker_status(last_heartbeat DESC);
+                CREATE INDEX IF NOT EXISTS idx_worker_status_config
+                    ON worker_status(current_config_version);
                 """
         )
         conn.commit()
