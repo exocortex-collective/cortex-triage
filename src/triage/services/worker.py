@@ -1596,6 +1596,277 @@ class TriageWorker:
         return total_processed, total_failed
 
 
+def ensure_config_schema(config: Config) -> None:
+    """Ensure triage config tables exist in database.
+
+    Must be called before load_initial_config() on fresh databases.
+    Table definitions match the production schema exactly.
+    """
+    with (
+        psycopg2.connect(
+            host=config.postgres_host,
+            port=config.postgres_port,
+            dbname=config.postgres_db,
+            user=config.postgres_user,
+            password=config.postgres_password,
+        ) as conn,
+        conn.cursor() as cur,
+    ):
+        cur.execute(
+            """
+                -- Config versions: versioned snapshots of triage rules
+                CREATE TABLE IF NOT EXISTS triage_config_versions (
+                    id BIGSERIAL PRIMARY KEY,
+                    version INTEGER NOT NULL UNIQUE,
+                    config_hash TEXT NOT NULL,
+                    label_prefix TEXT NOT NULL DEFAULT 'Cortex',
+                    intents JSONB NOT NULL DEFAULT '{}',
+                    email_categories JSONB NOT NULL DEFAULT '{}',
+                    prompts JSONB NOT NULL DEFAULT '{}',
+                    body_extraction_prompts JSONB NOT NULL DEFAULT '{}',
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    created_by TEXT NOT NULL,
+                    notes TEXT,
+                    is_active BOOLEAN NOT NULL DEFAULT FALSE,
+                    rolled_back_from INTEGER
+                        REFERENCES triage_config_versions(version)
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_config_created_at
+                    ON triage_config_versions(created_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_config_hash
+                    ON triage_config_versions(config_hash);
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_config_only_one_active
+                    ON triage_config_versions(is_active) WHERE is_active = true;
+                CREATE INDEX IF NOT EXISTS idx_config_versions_active
+                    ON triage_config_versions(version DESC) WHERE is_active = true;
+                CREATE INDEX IF NOT EXISTS idx_config_versions_hash
+                    ON triage_config_versions(config_hash);
+
+                -- Auto-assign version number
+                CREATE OR REPLACE FUNCTION assign_config_version()
+                RETURNS TRIGGER AS $$
+                BEGIN
+                    IF NEW.version IS NULL THEN
+                        SELECT COALESCE(MAX(version), 0) + 1
+                        INTO NEW.version
+                        FROM triage_config_versions;
+                    END IF;
+                    RETURN NEW;
+                END;
+                $$ LANGUAGE plpgsql;
+
+                DROP TRIGGER IF EXISTS assign_config_version_trigger
+                    ON triage_config_versions;
+                CREATE TRIGGER assign_config_version_trigger
+                    BEFORE INSERT ON triage_config_versions
+                    FOR EACH ROW
+                    EXECUTE FUNCTION assign_config_version();
+
+                -- Deactivate old configs (by id)
+                CREATE OR REPLACE FUNCTION deactivate_old_configs()
+                RETURNS TRIGGER AS $$
+                BEGIN
+                    IF NEW.is_active = TRUE THEN
+                        UPDATE triage_config_versions
+                        SET is_active = FALSE
+                        WHERE id != NEW.id AND is_active = TRUE;
+                    END IF;
+                    RETURN NEW;
+                END;
+                $$ LANGUAGE plpgsql;
+
+                DROP TRIGGER IF EXISTS deactivate_old_configs_trigger
+                    ON triage_config_versions;
+                CREATE TRIGGER deactivate_old_configs_trigger
+                    BEFORE INSERT OR UPDATE ON triage_config_versions
+                    FOR EACH ROW
+                    WHEN (NEW.is_active = TRUE)
+                    EXECUTE FUNCTION deactivate_old_configs();
+
+                -- Deactivate old configs (by version)
+                CREATE OR REPLACE FUNCTION deactivate_old_config_versions()
+                RETURNS TRIGGER AS $$
+                BEGIN
+                    IF NEW.is_active = TRUE THEN
+                        UPDATE triage_config_versions
+                        SET is_active = FALSE
+                        WHERE version != NEW.version AND is_active = TRUE;
+                    END IF;
+                    RETURN NEW;
+                END;
+                $$ LANGUAGE plpgsql;
+
+                DROP TRIGGER IF EXISTS trg_deactivate_old_configs
+                    ON triage_config_versions;
+                CREATE TRIGGER trg_deactivate_old_configs
+                    BEFORE INSERT OR UPDATE ON triage_config_versions
+                    FOR EACH ROW
+                    WHEN (NEW.is_active = TRUE)
+                    EXECUTE FUNCTION deactivate_old_config_versions();
+
+                -- Rule chains within a config version
+                CREATE TABLE IF NOT EXISTS triage_chains (
+                    id BIGSERIAL PRIMARY KEY,
+                    config_version INTEGER NOT NULL
+                        REFERENCES triage_config_versions(version)
+                        ON DELETE CASCADE,
+                    chain_name TEXT NOT NULL,
+                    display_order INTEGER NOT NULL DEFAULT 0,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                );
+
+                CREATE UNIQUE INDEX IF NOT EXISTS unique_chain
+                    ON triage_chains(config_version, chain_name);
+                CREATE INDEX IF NOT EXISTS idx_chains_config
+                    ON triage_chains(config_version);
+                CREATE INDEX IF NOT EXISTS idx_chains_name
+                    ON triage_chains(config_version, chain_name);
+                CREATE INDEX IF NOT EXISTS idx_chains_version
+                    ON triage_chains(config_version);
+
+                -- Individual rules within chains (linked list)
+                CREATE TABLE IF NOT EXISTS triage_rules (
+                    id BIGSERIAL PRIMARY KEY,
+                    chain_id BIGINT NOT NULL
+                        REFERENCES triage_chains(id) ON DELETE CASCADE,
+                    config_version INTEGER NOT NULL
+                        REFERENCES triage_config_versions(version)
+                        ON DELETE CASCADE,
+                    prev_rule_id BIGINT
+                        REFERENCES triage_rules(id) ON DELETE SET NULL,
+                    next_rule_id BIGINT
+                        REFERENCES triage_rules(id) ON DELETE SET NULL,
+                    match_condition JSONB NOT NULL DEFAULT '{}',
+                    variables JSONB,
+                    action JSONB,
+                    jump_to_chain TEXT,
+                    return_to_parent BOOLEAN DEFAULT FALSE,
+                    llm_config JSONB,
+                    routes JSONB,
+                    rule_name TEXT,
+                    description TEXT,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    row_version INTEGER NOT NULL DEFAULT 1
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_rules_chain
+                    ON triage_rules(chain_id);
+                CREATE INDEX IF NOT EXISTS idx_rules_chain_head
+                    ON triage_rules(chain_id) WHERE prev_rule_id IS NULL;
+                CREATE INDEX IF NOT EXISTS idx_rules_config
+                    ON triage_rules(config_version);
+                CREATE INDEX IF NOT EXISTS idx_rules_next
+                    ON triage_rules(next_rule_id);
+                CREATE INDEX IF NOT EXISTS idx_rules_prev
+                    ON triage_rules(prev_rule_id);
+                CREATE INDEX IF NOT EXISTS idx_rules_version
+                    ON triage_rules(config_version);
+
+                -- Email-to-action mappings (global, not versioned)
+                CREATE TABLE IF NOT EXISTS triage_email_mappings (
+                    id BIGSERIAL PRIMARY KEY,
+                    mapping_type TEXT NOT NULL,
+                    email_address TEXT NOT NULL,
+                    label TEXT NOT NULL,
+                    archive BOOLEAN,
+                    mark_read BOOLEAN,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    created_by TEXT,
+                    updated_by TEXT,
+                    deleted_at TIMESTAMPTZ,
+                    CONSTRAINT unique_email_mapping
+                        UNIQUE (mapping_type, email_address)
+                );
+
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_email_mappings_active
+                    ON triage_email_mappings(mapping_type, email_address)
+                    WHERE deleted_at IS NULL;
+                CREATE INDEX IF NOT EXISTS idx_email_mappings_email
+                    ON triage_email_mappings(email_address)
+                    WHERE deleted_at IS NULL;
+                CREATE INDEX IF NOT EXISTS idx_email_mappings_lookup
+                    ON triage_email_mappings(mapping_type, email_address)
+                    WHERE deleted_at IS NULL;
+                CREATE INDEX IF NOT EXISTS idx_email_mappings_type
+                    ON triage_email_mappings(mapping_type)
+                    WHERE deleted_at IS NULL;
+
+                -- Change history for email mappings
+                CREATE TABLE IF NOT EXISTS triage_email_mappings_history (
+                    id BIGSERIAL PRIMARY KEY,
+                    mapping_id BIGINT,
+                    mapping_type TEXT NOT NULL,
+                    email_address TEXT NOT NULL,
+                    label TEXT NOT NULL,
+                    archive BOOLEAN,
+                    mark_read BOOLEAN,
+                    change_type TEXT NOT NULL,
+                    changed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    changed_by TEXT NOT NULL,
+                    previous_label TEXT,
+                    previous_archive BOOLEAN,
+                    previous_mark_read BOOLEAN
+                );
+
+                -- Worker signal queue
+                CREATE TABLE IF NOT EXISTS worker_signals (
+                    id BIGSERIAL PRIMARY KEY,
+                    signal_type TEXT NOT NULL,
+                    target_worker TEXT NOT NULL,
+                    payload JSONB,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    expires_at TIMESTAMPTZ,
+                    processed_at TIMESTAMPTZ,
+                    processed_by TEXT,
+                    status TEXT NOT NULL DEFAULT 'pending'
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_signals_pending
+                    ON worker_signals(created_at)
+                    WHERE status = 'pending';
+                CREATE INDEX IF NOT EXISTS idx_signals_processed_at
+                    ON worker_signals(processed_at)
+                    WHERE status = 'processed';
+                CREATE INDEX IF NOT EXISTS idx_signals_target
+                    ON worker_signals(target_worker, status);
+                CREATE INDEX IF NOT EXISTS idx_signals_worker
+                    ON worker_signals(target_worker, status);
+
+                -- Worker status tracking (heartbeat, config version)
+                CREATE TABLE IF NOT EXISTS worker_status (
+                    id BIGSERIAL PRIMARY KEY,
+                    worker_id TEXT NOT NULL UNIQUE,
+                    worker_type TEXT NOT NULL
+                        CHECK (worker_type IN (
+                            'triage', 'labeling', 'parse', 'attachment'
+                        )),
+                    current_config_version INTEGER
+                        REFERENCES triage_config_versions(version),
+                    last_reload_at TIMESTAMPTZ,
+                    status TEXT NOT NULL DEFAULT 'running',
+                    last_heartbeat TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    jobs_processed BIGINT NOT NULL DEFAULT 0,
+                    hostname TEXT,
+                    pid INTEGER
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_worker_status_type
+                    ON worker_status(worker_type, status);
+                CREATE INDEX IF NOT EXISTS idx_worker_status_heartbeat
+                    ON worker_status(last_heartbeat DESC);
+                CREATE INDEX IF NOT EXISTS idx_worker_status_config
+                    ON worker_status(current_config_version);
+                """
+        )
+        conn.commit()
+    logger.info("Config schema ensured")
+
+
 def load_initial_config(config: Config) -> tuple[RulesConfig, int]:
     """Load config from database on startup.
 
@@ -1691,6 +1962,13 @@ def main() -> None:
         enable_convergence=os.environ.get("ENABLE_CONVERGENCE", "true").lower()
         == "true",
     )
+
+    # Ensure config tables exist (safe on fresh databases)
+    try:
+        ensure_config_schema(config)
+    except Exception as e:
+        logger.error(f"Failed to ensure config schema: {e}")
+        sys.exit(1)
 
     # Load and validate rules from database
     try:
