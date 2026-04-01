@@ -1938,7 +1938,11 @@ def main() -> None:
     )
 
     # Ensure config tables exist (safe on fresh databases)
-    ensure_config_schema(config)
+    try:
+        ensure_config_schema(config)
+    except Exception as e:
+        logger.error(f"Failed to ensure config schema: {e}")
+        sys.exit(1)
 
     # Load and validate rules from database
     try:
