@@ -500,20 +500,34 @@ class LabelingWorker:
             return {}
 
         prefix = self._get_managed_prefix()
-        like_pattern = f"{prefix}/%%" if prefix else "%%"
 
         with self._get_conn() as conn, conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT er.gmail_id, gl.name
-                FROM emails_raw er
-                CROSS JOIN LATERAL unnest(er.label_ids) AS label_id
-                JOIN gmail_labels gl ON gl.id = label_id
-                WHERE er.gmail_id = ANY(%s)
-                  AND gl.name LIKE %s
-                """,
-                (gmail_ids, like_pattern),
-            )
+            if prefix:
+                # Scoped to prefix
+                cur.execute(
+                    """
+                    SELECT er.gmail_id, gl.name
+                    FROM emails_raw er
+                    CROSS JOIN LATERAL unnest(er.label_ids) AS label_id
+                    JOIN gmail_labels gl ON gl.id = label_id
+                    WHERE er.gmail_id = ANY(%s)
+                      AND gl.name LIKE %s
+                    """,
+                    (gmail_ids, f"{prefix}/%%"),
+                )
+            else:
+                # Manage all user labels (Label_* IDs, excludes system labels)
+                cur.execute(
+                    """
+                    SELECT er.gmail_id, gl.name
+                    FROM emails_raw er
+                    CROSS JOIN LATERAL unnest(er.label_ids) AS label_id
+                    JOIN gmail_labels gl ON gl.id = label_id
+                    WHERE er.gmail_id = ANY(%s)
+                      AND gl.id LIKE 'Label_%%'
+                    """,
+                    (gmail_ids,),
+                )
             rows = cur.fetchall()
 
         result: dict[str, list[str]] = defaultdict(list)
