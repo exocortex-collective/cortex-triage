@@ -1502,9 +1502,13 @@ class TriageWorker:
                                 if merged_action is None or not merged_action.add_label:
                                     default_label = self.rules.default_label
                                     if self.rules.label_prefix:
-                                        default_label = f"{self.rules.label_prefix}/{default_label}"
+                                        default_label = (
+                                            f"{self.rules.label_prefix}/{default_label}"
+                                        )
                                     if merged_action is None:
-                                        merged_action = Action(add_label=[default_label])
+                                        merged_action = Action(
+                                            add_label=[default_label]
+                                        )
                                     else:
                                         merged_action.add_label = [default_label]
                                 llm_result = next(
