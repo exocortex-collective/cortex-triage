@@ -359,9 +359,6 @@ class LabelingWorker:
         Empty string means manage all user labels.
         Non-empty (e.g., "Cortex") means only manage labels under that prefix.
         """
-        if self._managed_prefix is not None:
-            return self._managed_prefix
-
         with self._get_conn() as conn, conn.cursor() as cur:
             cur.execute(
                 "SELECT label_prefix FROM triage_config_versions "
@@ -490,16 +487,19 @@ class LabelingWorker:
             conn.commit()
 
     def _get_current_cortex_labels(self, gmail_ids: list[str]) -> dict[str, list[str]]:
-        """Get current Cortex/* labels for a batch of gmail_ids.
+        """Get current managed labels for a batch of gmail_ids.
 
-        Queries emails_raw joined with gmail_labels to find all Cortex/*
-        labels currently on each message. Used to ensure stale labels are
-        removed when re-triaging.
+        Queries emails_raw joined with gmail_labels to find all labels
+        under the managed prefix currently on each message. Used to ensure
+        stale labels are removed when re-triaging.
 
-        Returns a dict mapping gmail_id -> list of Cortex/* label names.
+        Returns a dict mapping gmail_id -> list of managed label names.
         """
         if not gmail_ids:
             return {}
+
+        prefix = self._get_managed_prefix()
+        like_pattern = f"{prefix}/%%" if prefix else "%%"
 
         with self._get_conn() as conn, conn.cursor() as cur:
             cur.execute(
@@ -509,9 +509,9 @@ class LabelingWorker:
                 CROSS JOIN LATERAL unnest(er.label_ids) AS label_id
                 JOIN gmail_labels gl ON gl.id = label_id
                 WHERE er.gmail_id = ANY(%s)
-                  AND gl.name LIKE 'Cortex/%%'
+                  AND gl.name LIKE %s
                 """,
-                (gmail_ids,),
+                (gmail_ids, like_pattern),
             )
             rows = cur.fetchall()
 
@@ -600,7 +600,11 @@ class LabelingWorker:
             elif isinstance(add_label, list):
                 labels_to_process.extend(add_label)
 
-        return {lbl for lbl in labels_to_process if isinstance(lbl, str)}
+        return {
+            lbl
+            for lbl in labels_to_process
+            if isinstance(lbl, str) and self._is_managed_label(lbl)
+        }
 
     def _resolve_labels(
         self, label_names: list[str], create: bool = True
