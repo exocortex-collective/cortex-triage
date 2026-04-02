@@ -31,6 +31,7 @@ from cortex_utils.triage_config import (
     validate_rules,
 )
 from cortex_utils.triage_config.models import (
+    Action,
     Email,
     EvaluationResult,
     PatternInfo,
@@ -1336,8 +1337,16 @@ class TriageWorker:
                 self.rules, email, self.llm
             )
 
-            # Build a synthetic result for storage from the merge
+            # If no chains produced labels, apply default label from config
             matched_chains = [r.chain for r in chain_results if r.matched and r.chain]
+            if merged_action is None or not merged_action.add_label:
+                default_label = self.rules.default_label
+                if self.rules.label_prefix:
+                    default_label = f"{self.rules.label_prefix}/{default_label}"
+                if merged_action is None:
+                    merged_action = Action(add_label=[default_label])
+                else:
+                    merged_action.add_label = [default_label]
             # Use first matched result's LLM info if any
             llm_result = next(
                 (r for r in chain_results if r.matched and r.llm_category),
@@ -1489,6 +1498,15 @@ class TriageWorker:
                                     for r in chain_results
                                     if r.matched and r.chain
                                 ]
+                                # Apply default label if no chains produced labels
+                                if merged_action is None or not merged_action.add_label:
+                                    default_label = self.rules.default_label
+                                    if self.rules.label_prefix:
+                                        default_label = f"{self.rules.label_prefix}/{default_label}"
+                                    if merged_action is None:
+                                        merged_action = Action(add_label=[default_label])
+                                    else:
+                                        merged_action.add_label = [default_label]
                                 llm_result = next(
                                     (
                                         r
