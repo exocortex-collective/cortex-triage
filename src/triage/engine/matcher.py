@@ -1189,11 +1189,12 @@ def evaluate_chain(
         return EvaluationResult(matched=False, trace=_trace)
     _visited.add(chain_name)
 
-    chain = config.chains.get(chain_name)
-    if chain is None:
+    chain_config = config.chains.get(chain_name)
+    if chain_config is None:
         _trace.append(f"chain '{chain_name}': not found")
         return EvaluationResult(matched=False, trace=_trace)
 
+    chain = chain_config.rules
     _trace.append(f"chain '{chain_name}': evaluating {len(chain)} rules")
 
     # Use pre-computed dicts or compute once
@@ -1450,3 +1451,96 @@ def evaluate(
 
     # No match at all
     return EvaluationResult(matched=False, trace=trace)
+
+
+def evaluate_parallel(
+    config: RulesConfig,
+    email: Email,
+    llm_client: LLMClient | None = None,
+) -> tuple[Action | None, list[EvaluationResult]]:
+    """Evaluate all auto_run chains in parallel and merge results.
+
+    All auto_run chains evaluate independently for every email. Results
+    are merged using CRDT semantics (see triage.engine.merge).
+
+    Priority/fallback email mappings participate as a virtual chain —
+    a priority match produces a result that gets merged with the others.
+    Fallback mappings only fire if no auto_run chain matched.
+
+    Args:
+        config: The rules configuration.
+        email: The email to evaluate.
+        llm_client: Optional LLM client for intent/classification.
+
+    Returns:
+        Tuple of (merged Action or None, list of individual results).
+    """
+    from triage.engine.merge import merge_actions
+
+    results: list[EvaluationResult] = []
+
+    # Pre-compute dicts once for all chain evaluations
+    intents = {k: v.model_dump() for k, v in config.intents.items()}
+    email_categories = {k: v.model_dump() for k, v in config.email_categories.items()}
+
+    # Check priority email mappings (participates in merge)
+    if config.priority_email_mappings:
+        priority_mapping = lookup_email_mapping(
+            email.from_addr, config.priority_email_mappings
+        )
+        if priority_mapping:
+            action = _email_mapping_to_action(priority_mapping, config.label_prefix)
+            results.append(
+                EvaluationResult(
+                    matched=True,
+                    chain="priority_email_mappings",
+                    rule_index=0,
+                    action=action,
+                    trace=[
+                        f"priority_email_mappings: matched "
+                        f"{email.from_addr.lower()} -> {priority_mapping.label}"
+                    ],
+                )
+            )
+
+    # Evaluate all auto_run chains
+    for chain_name, chain_config in config.chains.items():
+        if not chain_config.auto_run:
+            continue
+
+        trace: list[str] = []
+        result = evaluate_chain(
+            config,
+            chain_name,
+            email,
+            llm_client,
+            None,
+            intents,
+            email_categories,
+            trace,
+        )
+        results.append(result)
+
+    # If nothing matched, check fallback mappings
+    any_matched = any(r.matched for r in results)
+    if not any_matched and config.fallback_email_mappings:
+        fallback_mapping = lookup_email_mapping(
+            email.from_addr, config.fallback_email_mappings
+        )
+        if fallback_mapping:
+            action = _email_mapping_to_action(fallback_mapping, config.label_prefix)
+            results.append(
+                EvaluationResult(
+                    matched=True,
+                    chain="fallback_email_mappings",
+                    rule_index=0,
+                    action=action,
+                    trace=[
+                        f"fallback_email_mappings: matched "
+                        f"{email.from_addr.lower()} -> {fallback_mapping.label}"
+                    ],
+                )
+            )
+
+    merged = merge_actions(results)
+    return merged, results
