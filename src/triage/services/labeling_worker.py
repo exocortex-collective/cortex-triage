@@ -371,9 +371,10 @@ class LabelingWorker:
 
     def _is_managed_label(self, label_name: str) -> bool:
         """Check if a label is managed by triage (based on configured prefix)."""
+        if label_name.upper() in GmailBatchClient.SYSTEM_LABELS:
+            return False
         prefix = self._get_managed_prefix()
         if not prefix:
-            # Empty prefix = manage all user labels
             return True
         return label_name.startswith(f"{prefix}/")
 
