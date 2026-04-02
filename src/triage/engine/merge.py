@@ -13,11 +13,11 @@ Aggressive flags (true wins — surface if anyone thinks so):
   - star: Stars if ANY chain says so.
   - important: Marks important if ANY chain says so.
 
-Vetoes (override merge result in opposite direction):
-  - not_archive: Force archive regardless of other chains.
-  - not_unread: Force mark-read regardless of other chains.
-  - not_star: Force no star regardless of other chains.
-  - not_important: Force not important regardless of other chains.
+Vetoes (override merge result regardless of other chains):
+  - force_archive: Force archive regardless of other chains.
+  - force_mark_read: Force mark-read regardless of other chains.
+  - force_no_star: Force no star regardless of other chains.
+  - force_no_important: Force not important regardless of other chains.
 """
 
 from cortex_utils.triage_config.models import Action, EvaluationResult
@@ -49,10 +49,10 @@ def merge_actions(results: list[EvaluationResult]) -> Action | None:
     important_opinions: list[bool] = []
 
     # Track vetoes
-    has_not_archive = False
-    has_not_unread = False
-    has_not_star = False
-    has_not_important = False
+    has_force_archive = False
+    has_force_mark_read = False
+    has_force_no_star = False
+    has_force_no_important = False
 
     for r in matched:
         action = r.action
@@ -83,14 +83,14 @@ def merge_actions(results: list[EvaluationResult]) -> Action | None:
             important_opinions.append(action.important)
 
         # Collect vetoes
-        if action.not_archive:
-            has_not_archive = True
-        if action.not_unread:
-            has_not_unread = True
-        if action.not_star:
-            has_not_star = True
-        if action.not_important:
-            has_not_important = True
+        if action.force_archive:
+            has_force_archive = True
+        if action.force_mark_read:
+            has_force_mark_read = True
+        if action.force_no_star:
+            has_force_no_star = True
+        if action.force_no_important:
+            has_force_no_important = True
 
     # Merge conservative flags (false wins)
     archive = all(archive_opinions) if archive_opinions else None
@@ -101,13 +101,13 @@ def merge_actions(results: list[EvaluationResult]) -> Action | None:
     important = any(important_opinions) if important_opinions else None
 
     # Apply vetoes
-    if has_not_archive:
+    if has_force_archive:
         archive = True
-    if has_not_unread:
+    if has_force_mark_read:
         mark_read = True
-    if has_not_star:
+    if has_force_no_star:
         star = False
-    if has_not_important:
+    if has_force_no_important:
         important = False
 
     # Deduplicate labels while preserving order

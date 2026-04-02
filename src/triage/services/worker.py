@@ -50,7 +50,7 @@ from triage.db.worker_status import (
     update_config_version,
     update_heartbeat,
 )
-from triage.engine.matcher import evaluate, evaluate_parallel
+from triage.engine.matcher import evaluate_parallel
 from triage.models.patterns import EmailPattern
 from triage.services.lifecycle import (
     LifecycleConfig,
@@ -1337,9 +1337,7 @@ class TriageWorker:
             )
 
             # Build a synthetic result for storage from the merge
-            matched_chains = [
-                r.chain for r in chain_results if r.matched and r.chain
-            ]
+            matched_chains = [r.chain for r in chain_results if r.matched and r.chain]
             # Use first matched result's LLM info if any
             llm_result = next(
                 (r for r in chain_results if r.matched and r.llm_category),
@@ -1501,23 +1499,25 @@ class TriageWorker:
                                 )
                                 result = EvaluationResult(
                                     matched=merged_action is not None,
-                                    chain=",".join(matched_chains)
-                                    if matched_chains
-                                    else None,
+                                    chain=(
+                                        ",".join(matched_chains)
+                                        if matched_chains
+                                        else None
+                                    ),
                                     rule_index=0,
                                     action=merged_action,
-                                    llm_category=llm_result.llm_category
-                                    if llm_result
-                                    else None,
-                                    llm_confidence=llm_result.llm_confidence
-                                    if llm_result
-                                    else None,
-                                    llm_reasoning=llm_result.llm_reasoning
-                                    if llm_result
-                                    else None,
-                                    trace=[
-                                        t for r in chain_results for t in r.trace
-                                    ],
+                                    llm_category=(
+                                        llm_result.llm_category if llm_result else None
+                                    ),
+                                    llm_confidence=(
+                                        llm_result.llm_confidence
+                                        if llm_result
+                                        else None
+                                    ),
+                                    llm_reasoning=(
+                                        llm_result.llm_reasoning if llm_result else None
+                                    ),
+                                    trace=[t for r in chain_results for t in r.trace],
                                 )
 
                                 action_executed = False
