@@ -141,16 +141,17 @@ def verify_roundtrip(
             return False
 
         # Compare rule counts per chain
-        for chain_name, original_rules in original_config.chains.items():
+        for chain_name, original_chain in original_config.chains.items():
             if chain_name not in exported_config.chains:
                 logger.error(f"Missing chain in export: {chain_name}")
                 return False
 
-            exported_rules = exported_config.chains[chain_name]
-            if len(original_rules) != len(exported_rules):
+            exported_chain = exported_config.chains[chain_name]
+            if len(original_chain.rules) != len(exported_chain.rules):
                 logger.error(
                     f"Rule count mismatch in chain '{chain_name}': "
-                    f"original={len(original_rules)}, exported={len(exported_rules)}"
+                    f"original={len(original_chain.rules)}, "
+                    f"exported={len(exported_chain.rules)}"
                 )
                 return False
 
@@ -185,7 +186,7 @@ def verify_roundtrip(
         )
 
         # Count total rules
-        total_rules = sum(len(rules) for rules in original_config.chains.values())
+        total_rules = sum(len(c.rules) for c in original_config.chains.values())
         logger.info(f"  Total rules: {total_rules}")
 
         return True
@@ -217,7 +218,7 @@ def main() -> None:
         logger.info(f"  Fallback mappings: {len(config.fallback_email_mappings)}")
 
         # Count total rules
-        total_rules = sum(len(rules) for rules in config.chains.values())
+        total_rules = sum(len(c.rules) for c in config.chains.values())
         logger.info(f"  Total rules: {total_rules}")
 
     except Exception as e:
