@@ -31,7 +31,7 @@ chains:
         assert config.version == 1
         assert config.label_prefix == "Test"
         assert "main" in config.chains
-        assert len(config.chains["main"]) == 1
+        assert len(config.chains["main"].rules) == 1
 
 
 def test_load_rules_file_not_found() -> None:

@@ -1385,7 +1385,7 @@ class TriageWorker:
             self._store_classification(email, merged_result, action_executed)
 
             # Track classification method for metrics
-            method = "llm" if result.llm_category else "rule"
+            method = "llm" if merged_result.llm_category else "rule"
             EMAILS_CLASSIFIED.labels(method=method).inc()
 
             # Mark job complete
