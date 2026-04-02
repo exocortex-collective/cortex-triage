@@ -693,9 +693,12 @@ class LabelingWorker:
             archive = classification.get("archive") or False
             mark_read = classification.get("mark_read") or False
             star = classification.get("star") or False
+            important = classification.get("important") or False
 
             if star:
                 add_labels.append("STARRED")
+            if important:
+                add_labels.append("IMPORTANT")
             if archive:
                 remove_labels.append("INBOX")
             if mark_read:

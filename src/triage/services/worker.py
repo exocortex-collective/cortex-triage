@@ -50,7 +50,7 @@ from triage.db.worker_status import (
     update_config_version,
     update_heartbeat,
 )
-from triage.engine.matcher import evaluate
+from triage.engine.matcher import evaluate_parallel
 from triage.models.patterns import EmailPattern
 from triage.services.lifecycle import (
     LifecycleConfig,
@@ -1331,40 +1331,61 @@ class TriageWorker:
             if not email.body:
                 email.body = self._get_body_from_api(gmail_id)
 
-            # Evaluate rules (may raise LLMError if LLM is down)
-            result = evaluate(self.rules, email, self.llm)
+            # Evaluate rules across all auto_run chains (may raise LLMError)
+            merged_action, chain_results = evaluate_parallel(
+                self.rules, email, self.llm
+            )
+
+            # Build a synthetic result for storage from the merge
+            matched_chains = [r.chain for r in chain_results if r.matched and r.chain]
+            # Use first matched result's LLM info if any
+            llm_result = next(
+                (r for r in chain_results if r.matched and r.llm_category),
+                None,
+            )
+            merged_result = EvaluationResult(
+                matched=merged_action is not None,
+                chain=",".join(matched_chains) if matched_chains else None,
+                rule_index=0,
+                action=merged_action,
+                llm_category=llm_result.llm_category if llm_result else None,
+                llm_confidence=llm_result.llm_confidence if llm_result else None,
+                llm_reasoning=llm_result.llm_reasoning if llm_result else None,
+                trace=[t for r in chain_results for t in r.trace],
+            )
 
             # Execute action if matched
             # Propagate priority so backfill jobs stay deprioritized through pipeline
             action_executed = False
-            if result.matched and result.action:
+            if merged_result.matched and merged_result.action:
                 action_executed = self._execute_action(
                     gmail_id, priority=job.get("priority", 0)
                 )
                 if action_executed:
                     logger.info(
-                        f"Processed {gmail_id}: chain={result.chain}, "
-                        f"rule={result.rule_index}, action={result.action}"
+                        f"Processed {gmail_id}: chains={matched_chains}, "
+                        f"action={merged_result.action}"
                     )
                     # Enqueue labeling job
                     QUEUE_PROCESSED.labels(queue="labeling", status="enqueued").inc()
                 else:
-                    logger.warning(f"Action failed for {gmail_id}: {result.action}")
+                    logger.warning(
+                        f"Action failed for {gmail_id}: {merged_result.action}"
+                    )
             else:
-                if not result.matched:
+                if not merged_result.matched:
                     logger.info(f"No match for {gmail_id}")
                 else:
                     logger.info(f"Matched but no action for {gmail_id}")
-                # Log trace at info level for debugging
-                if result.trace:
-                    trace_str = "\n".join(result.trace)
+                if merged_result.trace:
+                    trace_str = "\n".join(merged_result.trace)
                     logger.info(f"Decision trace for {gmail_id}:\n{trace_str}")
 
             # Store classification
-            self._store_classification(email, result, action_executed)
+            self._store_classification(email, merged_result, action_executed)
 
             # Track classification method for metrics
-            method = "llm" if result.llm_category else "rule"
+            method = "llm" if merged_result.llm_category else "rule"
             EMAILS_CLASSIFIED.labels(method=method).inc()
 
             # Mark job complete
@@ -1460,7 +1481,44 @@ class TriageWorker:
                                 if not email.body:
                                     email.body = self._get_body_from_api(gmail_id)
 
-                                result = evaluate(self.rules, email, self.llm)
+                                merged_action, chain_results = evaluate_parallel(
+                                    self.rules, email, self.llm
+                                )
+                                matched_chains = [
+                                    r.chain
+                                    for r in chain_results
+                                    if r.matched and r.chain
+                                ]
+                                llm_result = next(
+                                    (
+                                        r
+                                        for r in chain_results
+                                        if r.matched and r.llm_category
+                                    ),
+                                    None,
+                                )
+                                result = EvaluationResult(
+                                    matched=merged_action is not None,
+                                    chain=(
+                                        ",".join(matched_chains)
+                                        if matched_chains
+                                        else None
+                                    ),
+                                    rule_index=0,
+                                    action=merged_action,
+                                    llm_category=(
+                                        llm_result.llm_category if llm_result else None
+                                    ),
+                                    llm_confidence=(
+                                        llm_result.llm_confidence
+                                        if llm_result
+                                        else None
+                                    ),
+                                    llm_reasoning=(
+                                        llm_result.llm_reasoning if llm_result else None
+                                    ),
+                                    trace=[t for r in chain_results for t in r.trace],
+                                )
 
                                 action_executed = False
                                 if result.matched and result.action:
@@ -1470,8 +1528,7 @@ class TriageWorker:
                                     if action_executed:
                                         logger.info(
                                             f"Convergence processed {gmail_id}: "
-                                            f"chain={result.chain}, "
-                                            f"rule={result.rule_index}, "
+                                            f"chains={matched_chains}, "
                                             f"action={result.action}"
                                         )
                                         QUEUE_PROCESSED.labels(
@@ -1713,9 +1770,14 @@ def ensure_config_schema(config: Config) -> None:
                         ON DELETE CASCADE,
                     chain_name TEXT NOT NULL,
                     display_order INTEGER NOT NULL DEFAULT 0,
+                    auto_run BOOLEAN NOT NULL DEFAULT FALSE,
                     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
                 );
+
+                -- Migration: add auto_run if missing (existing deployments)
+                ALTER TABLE triage_chains
+                    ADD COLUMN IF NOT EXISTS auto_run BOOLEAN NOT NULL DEFAULT FALSE;
 
                 CREATE UNIQUE INDEX IF NOT EXISTS unique_chain
                     ON triage_chains(config_version, chain_name);
