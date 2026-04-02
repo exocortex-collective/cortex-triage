@@ -340,6 +340,7 @@ class LabelingWorker:
         self.gmail = gmail
         self.running = True
         self._pool: SimpleConnectionPool | None = None
+        self._managed_prefix: str | None = None  # Loaded on first use
 
     def stop(self) -> None:
         """Signal the worker to stop."""
@@ -351,6 +352,33 @@ class LabelingWorker:
             self._pool.closeall()
             self._pool = None
             logger.info("Database connection pool closed")
+
+    def _get_managed_prefix(self) -> str:
+        """Get the label prefix from the active triage config.
+
+        Empty string means manage all user labels.
+        Non-empty (e.g., "Cortex") means only manage labels under that prefix.
+        """
+        if self._managed_prefix is not None:
+            return self._managed_prefix
+
+        with self._get_conn() as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT label_prefix FROM triage_config_versions "
+                "WHERE is_active = TRUE LIMIT 1"
+            )
+            row = cur.fetchone()
+            self._managed_prefix = row[0] if row else "Cortex"
+            logger.info(f"Label management prefix: {self._managed_prefix!r}")
+        return self._managed_prefix
+
+    def _is_managed_label(self, label_name: str) -> bool:
+        """Check if a label is managed by triage (based on configured prefix)."""
+        prefix = self._get_managed_prefix()
+        if not prefix:
+            # Empty prefix = manage all user labels
+            return True
+        return label_name.startswith(f"{prefix}/")
 
     def _get_pool(self) -> SimpleConnectionPool:
         """Get or create connection pool."""
@@ -541,21 +569,26 @@ class LabelingWorker:
             self.gmail._ensure_label_cache()
             id_to_name = {v: k for k, v in self.gmail._label_cache.items()}
 
+            # Only return labels we manage (scoped by label_prefix config).
+            # System labels (INBOX, SENT, etc.) have non-Label_ IDs and are
+            # never managed. User labels have IDs like "Label_123".
             return [
                 id_to_name[lid]
                 for lid in label_ids
-                if lid in id_to_name and id_to_name[lid].startswith("Cortex/")
+                if lid in id_to_name
+                and lid.startswith("Label_")
+                and self._is_managed_label(id_to_name[lid])
             ]
         except Exception as e:
             logger.error(f"Failed to get Gmail labels for {gmail_id}: {e}")
             return None
 
     def _get_target_labels(self, classification: dict) -> set[str]:
-        """Extract target Cortex/* labels from a classification's action_taken.
+        """Extract target labels from a classification's action_taken.
 
         Returns set of label names that should be on the email.
         """
-        # Collect all potential labels from classification
+        # Collect all labels from classification
         labels_to_process: list[str] = []
 
         if label := classification.get("label"):
@@ -567,12 +600,7 @@ class LabelingWorker:
             elif isinstance(add_label, list):
                 labels_to_process.extend(add_label)
 
-        # Filter to Cortex/* labels
-        return {
-            lbl
-            for lbl in labels_to_process
-            if isinstance(lbl, str) and lbl.startswith("Cortex/")
-        }
+        return {lbl for lbl in labels_to_process if isinstance(lbl, str)}
 
     def _resolve_labels(
         self, label_names: list[str], create: bool = True
