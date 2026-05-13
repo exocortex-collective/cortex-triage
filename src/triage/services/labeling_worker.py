@@ -481,7 +481,7 @@ class LabelingWorker:
         with self._get_conn() as conn:
             for job_id in job_ids:
                 fail_or_retry(conn, job_id, error, max_attempts=MAX_ATTEMPTS)
-            conn.commit()
+                conn.commit()
 
     def _get_current_cortex_labels(self, gmail_ids: list[str]) -> dict[str, list[str]]:
         """Get current managed labels for a batch of gmail_ids.
