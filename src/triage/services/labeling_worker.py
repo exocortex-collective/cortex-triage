@@ -27,6 +27,7 @@ from cortex_utils.metrics import (
     QUEUE_PROCESSED,
     start_metrics_server,
 )
+from cortex_utils.queue.retry import fail_or_retry, ready_predicate
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
@@ -45,6 +46,8 @@ logger = get_logger(__name__)
 MAX_429_RETRIES = 3
 # Timeout should be longer than MAX_BACKOFF_SECONDS (60s) to avoid race condition
 ACQUIRE_TIMEOUT_SECONDS = 75.0
+
+MAX_ATTEMPTS = 3
 
 
 @dataclass
@@ -410,17 +413,42 @@ class LabelingWorker:
         with self._get_conn() as conn, conn.cursor() as cur:
             # Reset stale jobs and claim new ones in a single transaction
             cur.execute(
-                """
+                f"""
                 WITH reset_stale AS (
                     UPDATE queue
                     SET status = 'pending', claimed_at = NULL
                     WHERE queue_name = %s
                       AND status = 'processing'
                       AND claimed_at < NOW() - (INTERVAL '1 minute' * %s)
+                      AND attempts < %s
+                ),
+                expire_dead_letter AS (
+                    -- Mark stale jobs that exceeded max attempts as failed
+                    UPDATE queue
+                    SET status = 'failed',
+                        last_error = COALESCE(last_error, '') ||
+                            ' [max attempts exceeded]'
+                    WHERE queue_name = %s
+                      AND status = 'processing'
+                      AND claimed_at < NOW() - (INTERVAL '1 minute' * %s)
+                      AND attempts >= %s
+                ),
+                expire_pending_exhausted AS (
+                    -- Immediately fail pending jobs that hit max attempts
+                    UPDATE queue
+                    SET status = 'failed',
+                        last_error = COALESCE(last_error, '') ||
+                            ' [max attempts exceeded]'
+                    WHERE queue_name = %s
+                      AND status = 'pending'
+                      AND attempts >= %s
                 ),
                 claimable AS (
                     SELECT id FROM queue
-                    WHERE queue_name = %s AND status = 'pending'
+                    WHERE queue_name = %s
+                      AND status = 'pending'
+                      AND attempts < %s
+                      AND {ready_predicate()}
                     ORDER BY priority DESC, created_at
                     LIMIT %s
                     FOR UPDATE SKIP LOCKED
@@ -433,7 +461,14 @@ class LabelingWorker:
                 (
                     self.queue_name,
                     self.config.visibility_timeout_minutes,
+                    MAX_ATTEMPTS,
                     self.queue_name,
+                    self.config.visibility_timeout_minutes,
+                    MAX_ATTEMPTS,
+                    self.queue_name,
+                    MAX_ATTEMPTS,
+                    self.queue_name,
+                    MAX_ATTEMPTS,
                     batch_size,
                 ),
             )
@@ -471,21 +506,13 @@ class LabelingWorker:
             conn.commit()
 
     def _fail_jobs(self, job_ids: list[int], error: str) -> None:
-        """Mark jobs as failed."""
+        """Schedule a retry with backoff per job, or mark failed if exhausted."""
         if not job_ids:
             return
-        with self._get_conn() as conn, conn.cursor() as cur:
-            cur.execute(
-                """
-                UPDATE queue
-                SET status = 'failed',
-                    last_error = %s,
-                    attempts = attempts + 1
-                WHERE id = ANY(%s)
-                """,
-                (error[:1000], job_ids),
-            )
-            conn.commit()
+        with self._get_conn() as conn:
+            for job_id in job_ids:
+                fail_or_retry(conn, job_id, error, max_attempts=MAX_ATTEMPTS)
+                conn.commit()
 
     def _get_current_cortex_labels(self, gmail_ids: list[str]) -> dict[str, list[str]]:
         """Get current managed labels for a batch of gmail_ids.
@@ -978,6 +1005,7 @@ def repair_failed_jobs(config: Config) -> int:
                     payload = jsonb_set(payload, '{repair}', 'true'),
                     attempts = 0,
                     last_error = NULL,
+                    next_attempt_at = NULL,
                     claimed_at = NULL
                 WHERE queue_name = %s AND status = 'failed'
                 RETURNING id
