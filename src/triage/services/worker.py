@@ -25,6 +25,7 @@ from cortex_utils.metrics import (
     QUEUE_PROCESSED,
     start_metrics_server,
 )
+from cortex_utils.queue.retry import fail_or_retry, ready_predicate
 from cortex_utils.triage_config import (
     ConfigLoadError,
     load_config_from_db,
@@ -859,7 +860,7 @@ class TriageWorker:
             with conn.cursor() as cur:
                 # Reset stale jobs (only if under max attempts) and claim new ones
                 cur.execute(
-                    """
+                    f"""
                     WITH reset_stale AS (
                         UPDATE queue
                         SET status = 'pending', claimed_at = NULL
@@ -894,6 +895,7 @@ class TriageWorker:
                         WHERE queue_name = %s
                           AND status = 'pending'
                           AND attempts < %s
+                          AND {ready_predicate()}
                         ORDER BY priority DESC, created_at
                         LIMIT %s
                         FOR UPDATE SKIP LOCKED
@@ -1298,18 +1300,9 @@ class TriageWorker:
             conn.commit()
 
     def _fail_job(self, job_id: int, error: str) -> None:
-        """Mark job as failed."""
-        with self._get_conn() as conn, conn.cursor() as cur:
-            cur.execute(
-                """
-                    UPDATE queue
-                    SET status = 'failed',
-                        last_error = %s,
-                        attempts = attempts + 1
-                    WHERE id = %s
-                """,
-                (error[:1000], job_id),
-            )
+        """Schedule a retry with backoff, or mark failed if attempts exhausted."""
+        with self._get_conn() as conn:
+            fail_or_retry(conn, job_id, error, max_attempts=MAX_ATTEMPTS)
             conn.commit()
 
     def process_job(self, job: dict[str, Any]) -> bool:
