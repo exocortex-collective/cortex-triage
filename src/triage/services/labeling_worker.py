@@ -420,10 +420,34 @@ class LabelingWorker:
                     WHERE queue_name = %s
                       AND status = 'processing'
                       AND claimed_at < NOW() - (INTERVAL '1 minute' * %s)
+                      AND attempts < %s
+                ),
+                expire_dead_letter AS (
+                    -- Mark stale jobs that exceeded max attempts as failed
+                    UPDATE queue
+                    SET status = 'failed',
+                        last_error = COALESCE(last_error, '') ||
+                            ' [max attempts exceeded]'
+                    WHERE queue_name = %s
+                      AND status = 'processing'
+                      AND claimed_at < NOW() - (INTERVAL '1 minute' * %s)
+                      AND attempts >= %s
+                ),
+                expire_pending_exhausted AS (
+                    -- Immediately fail pending jobs that hit max attempts
+                    UPDATE queue
+                    SET status = 'failed',
+                        last_error = COALESCE(last_error, '') ||
+                            ' [max attempts exceeded]'
+                    WHERE queue_name = %s
+                      AND status = 'pending'
+                      AND attempts >= %s
                 ),
                 claimable AS (
                     SELECT id FROM queue
-                    WHERE queue_name = %s AND status = 'pending'
+                    WHERE queue_name = %s
+                      AND status = 'pending'
+                      AND attempts < %s
                       AND {ready_predicate()}
                     ORDER BY priority DESC, created_at
                     LIMIT %s
@@ -437,7 +461,14 @@ class LabelingWorker:
                 (
                     self.queue_name,
                     self.config.visibility_timeout_minutes,
+                    MAX_ATTEMPTS,
                     self.queue_name,
+                    self.config.visibility_timeout_minutes,
+                    MAX_ATTEMPTS,
+                    self.queue_name,
+                    MAX_ATTEMPTS,
+                    self.queue_name,
+                    MAX_ATTEMPTS,
                     batch_size,
                 ),
             )
