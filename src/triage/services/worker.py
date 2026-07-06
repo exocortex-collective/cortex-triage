@@ -1714,7 +1714,8 @@ def ensure_config_schema(config: Config) -> None:
 
                 -- Migration: add default_label if missing (existing deployments)
                 ALTER TABLE triage_config_versions
-                    ADD COLUMN IF NOT EXISTS default_label TEXT NOT NULL DEFAULT 'Uncategorized';
+                    ADD COLUMN IF NOT EXISTS default_label TEXT NOT NULL
+                    DEFAULT 'Uncategorized';
 
                 CREATE INDEX IF NOT EXISTS idx_config_created_at
                     ON triage_config_versions(created_at DESC);
