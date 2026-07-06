@@ -1692,6 +1692,7 @@ def ensure_config_schema(config: Config) -> None:
                     version INTEGER NOT NULL UNIQUE,
                     config_hash TEXT NOT NULL,
                     label_prefix TEXT NOT NULL DEFAULT 'Cortex',
+                    default_label TEXT NOT NULL DEFAULT 'Uncategorized',
                     intents JSONB NOT NULL DEFAULT '{}',
                     email_categories JSONB NOT NULL DEFAULT '{}',
                     prompts JSONB NOT NULL DEFAULT '{}',
@@ -1703,6 +1704,11 @@ def ensure_config_schema(config: Config) -> None:
                     rolled_back_from INTEGER
                         REFERENCES triage_config_versions(version)
                 );
+
+                -- Migration: add default_label if missing (existing deployments)
+                ALTER TABLE triage_config_versions
+                    ADD COLUMN IF NOT EXISTS default_label TEXT NOT NULL
+                    DEFAULT 'Uncategorized';
 
                 CREATE INDEX IF NOT EXISTS idx_config_created_at
                     ON triage_config_versions(created_at DESC);
