@@ -1465,7 +1465,8 @@ def evaluate_parallel(
 
     Priority/fallback email mappings participate as a virtual chain —
     a priority match produces a result that gets merged with the others.
-    Fallback mappings only fire if no auto_run chain matched.
+    Fallback mappings fire only when no chain produced a label (a chain that
+    matches without emitting a label does not suppress them).
 
     Args:
         config: The rules configuration.
@@ -1521,9 +1522,16 @@ def evaluate_parallel(
         )
         results.append(result)
 
-    # If nothing matched, check fallback mappings
-    any_matched = any(r.matched for r in results)
-    if not any_matched and config.fallback_email_mappings:
+    # Fallback mappings are a last resort: fire when no chain produced a LABEL.
+    # A chain can match without emitting a label (e.g. an archive-only rule, or
+    # an LLM intent that matches but doesn't categorize) — that must not suppress
+    # the fallback, or the sender falls through to default_label instead of its
+    # mapping. (Gating on `any_matched` here silently killed all fallback
+    # mappings for senders the main chain "touched" without labeling.)
+    produced_label = any(
+        r.action is not None and (r.action.label or r.action.add_label) for r in results
+    )
+    if not produced_label and config.fallback_email_mappings:
         fallback_mapping = lookup_email_mapping(
             email.from_addr, config.fallback_email_mappings
         )
