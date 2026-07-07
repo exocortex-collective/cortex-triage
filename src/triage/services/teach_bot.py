@@ -201,7 +201,10 @@ class TeachBot(commands.Bot):
     async def on_raw_reaction_add(
         self, payload: discord.RawReactionActionEvent
     ) -> None:
-        # Ignore the bot's own seed reactions and unrelated emojis.
+        # Only reactions in the teach channel, not the bot's own seed
+        # reactions, and only the ✅ / ❌ emojis.
+        if payload.channel_id != self.config.channel_id:
+            return
         if self.user is not None and payload.user_id == self.user.id:
             return
         emoji = str(payload.emoji)
