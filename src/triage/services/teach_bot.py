@@ -81,10 +81,11 @@ class TeachConfig:
 
 def format_proposal(proposal: RuleProposal) -> str:
     """Human-readable prompt for a proposal, with ✅ / ❌ instructions."""
+    sender = discord.utils.escape_markdown(proposal.sender)
     if proposal.direction == "add":
-        action = f"Label mail from **{proposal.sender}** as `{proposal.label}`?"
+        action = f"Label mail from **{sender}** as `{proposal.label}`?"
     else:
-        action = f"Stop labeling mail from **{proposal.sender}** as `{proposal.label}`?"
+        action = f"Stop labeling mail from **{sender}** as `{proposal.label}`?"
     seen = (
         f" _(seen {proposal.opportunity_count}×)_"
         if proposal.opportunity_count > 1
@@ -207,13 +208,14 @@ class TeachBot(commands.Bot):
                     f"Failed to delete orphan message {message.id}", exc_info=True
                 )
             raise
-        try:
-            await message.add_reaction(APPROVE)
-            await message.add_reaction(REJECT)
-        except Exception:
-            logger.warning(
-                f"Failed to add reactions to message {message.id}", exc_info=True
-            )
+        for emoji in (APPROVE, REJECT):
+            try:
+                await message.add_reaction(emoji)
+            except Exception:
+                logger.warning(
+                    f"Failed to add reaction {emoji} to message {message.id}",
+                    exc_info=True,
+                )
         logger.info(
             f"Posted proposal {proposal.id} ({proposal.sender} -> "
             f"{proposal.label}, {proposal.direction}) as message {message.id}"
@@ -228,7 +230,8 @@ class TeachBot(commands.Bot):
             return
         if self.user is not None and payload.user_id == self.user.id:
             return
-        if payload.member is not None and payload.member.bot:
+        user = payload.member or self.get_user(payload.user_id)
+        if user is not None and user.bot:
             return  # never let another bot approve/reject
         emoji = str(payload.emoji)
         if emoji not in (APPROVE, REJECT):
