@@ -93,9 +93,18 @@ def test_config_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_config_from_env_missing_raises(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("DISCORD_TEACH_BOT_TOKEN", raising=False)
-    monkeypatch.setenv("DISCORD_TEACH_CHANNEL_ID", "1")
-    with pytest.raises(ValueError):
+    # Set everything, then drop only the token, so the error is about it.
+    for k, v in {
+        "DISCORD_TEACH_BOT_TOKEN": "tok",
+        "DISCORD_TEACH_CHANNEL_ID": "1",
+        "POSTGRES_HOST": "db",
+        "POSTGRES_DB": "cortex",
+        "POSTGRES_USER": "cortex",
+        "POSTGRES_PASSWORD": "secret",
+    }.items():
+        monkeypatch.setenv(k, v)
+    monkeypatch.delenv("DISCORD_TEACH_BOT_TOKEN")
+    with pytest.raises(ValueError, match="DISCORD_TEACH_BOT_TOKEN"):
         TeachConfig.from_env()
 
 

@@ -233,9 +233,16 @@ class TeachBot(commands.Bot):
         emoji = str(payload.emoji)
         if emoji not in (APPROVE, REJECT):
             return
-        proposal = await asyncio.to_thread(
-            self._decide, str(payload.message_id), emoji == APPROVE
-        )
+        try:
+            proposal = await asyncio.to_thread(
+                self._decide, str(payload.message_id), emoji == APPROVE
+            )
+        except Exception:
+            logger.error(
+                f"Failed to resolve reaction on message {payload.message_id}",
+                exc_info=True,
+            )
+            return
         if proposal is not None:
             verb = "approved" if emoji == APPROVE else "rejected"
             logger.info(
