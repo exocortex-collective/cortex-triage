@@ -3,6 +3,7 @@
 import pytest
 from cortex_utils.triage_config.models import (
     Action,
+    ChainConfig,
     Email,
     EmailMappingAction,
     IntentConfig,
@@ -14,6 +15,7 @@ from cortex_utils.triage_config.models import (
 
 from triage.engine.matcher import (
     evaluate,
+    evaluate_parallel,
     matches_condition,
 )
 
@@ -2862,6 +2864,65 @@ class TestEmailMappings:
         assert result.chain == "priority_email_mappings"
         assert result.action is not None
         assert result.action.label == "Cortex/Priority"
+
+    def test_parallel_fallback_fires_when_match_has_no_label(self) -> None:
+        """Regression: a label-less main-chain match must not suppress fallback.
+
+        A rule that matches but emits no label (e.g. archive-only) previously set
+        any_matched=True and skipped the fallback mapping, sending the sender to
+        the default label instead of its mapping.
+        """
+        email = Email(
+            id=1,
+            gmail_id="abc",
+            from_addr="newsletter@example.com",
+            to_addrs=["me@example.com"],
+            subject="Test",
+        )
+        config = RulesConfig(
+            fallback_email_mappings={
+                "newsletter@example.com": EmailMappingAction(label="Marketing/News")
+            },
+            chains={
+                "main": ChainConfig(
+                    auto_run=True,
+                    rules=[Rule(match=MatchCondition(), action=Action(archive=True))],
+                )
+            },
+        )
+
+        merged, results = evaluate_parallel(config, email)
+
+        assert merged is not None
+        assert "Cortex/Marketing/News" in (merged.add_label or [])
+        assert any(r.chain == "fallback_email_mappings" for r in results)
+
+    def test_parallel_fallback_skipped_when_chain_labels(self) -> None:
+        """Fallback stays suppressed when a chain actually produces a label."""
+        email = Email(
+            id=1,
+            gmail_id="abc",
+            from_addr="newsletter@example.com",
+            to_addrs=["me@example.com"],
+            subject="Test",
+        )
+        config = RulesConfig(
+            fallback_email_mappings={
+                "newsletter@example.com": EmailMappingAction(label="Marketing/News")
+            },
+            chains={
+                "main": ChainConfig(
+                    auto_run=True,
+                    rules=[Rule(match=MatchCondition(), action=Action(label="Real"))],
+                )
+            },
+        )
+
+        merged, results = evaluate_parallel(config, email)
+
+        assert merged is not None
+        assert "Cortex/Real" in (merged.add_label or [])
+        assert not any(r.chain == "fallback_email_mappings" for r in results)
 
     def test_email_mappings_no_match(self) -> None:
         """Test no match when email not in mappings or rules."""
