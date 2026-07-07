@@ -184,8 +184,23 @@ class TeachBot(commands.Bot):
     ) -> None:
         message = await channel.send(format_proposal(proposal))
         # Record the link immediately so a slow/failed reaction add can't cause
-        # a re-post on the next poll.
-        await asyncio.to_thread(self._mark_posted, proposal.id, str(message.id))
+        # a re-post on the next poll. If the DB write fails, delete the message
+        # so it doesn't become an orphan that re-posts as a duplicate.
+        try:
+            await asyncio.to_thread(self._mark_posted, proposal.id, str(message.id))
+        except Exception:
+            logger.error(
+                f"Failed to record proposal {proposal.id} as posted; "
+                f"deleting message {message.id} to avoid a duplicate",
+                exc_info=True,
+            )
+            try:
+                await message.delete()
+            except Exception:
+                logger.error(
+                    f"Failed to delete orphan message {message.id}", exc_info=True
+                )
+            raise
         try:
             await message.add_reaction(APPROVE)
             await message.add_reaction(REJECT)
@@ -219,6 +234,11 @@ class TeachBot(commands.Bot):
                 f"Proposal {proposal.id} {verb} ({proposal.sender} -> "
                 f"{proposal.label})"
             )
+
+    async def close(self) -> None:
+        if self.scheduler.running:
+            self.scheduler.shutdown()
+        await super().close()
 
 
 def main() -> None:
