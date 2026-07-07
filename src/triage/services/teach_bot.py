@@ -161,6 +161,9 @@ class TeachBot(commands.Bot):
         logger.info(f"Teach bot ready as {self.user}")
 
     async def _poll(self) -> None:
+        # The scheduler can fire before the gateway connection is ready.
+        if not self.is_ready():
+            return
         try:
             channel = self.get_channel(self.config.channel_id)
             if channel is None:
@@ -222,6 +225,8 @@ class TeachBot(commands.Bot):
             return
         if self.user is not None and payload.user_id == self.user.id:
             return
+        if payload.member is not None and payload.member.bot:
+            return  # never let another bot approve/reject
         emoji = str(payload.emoji)
         if emoji not in (APPROVE, REJECT):
             return
