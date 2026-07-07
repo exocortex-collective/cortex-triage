@@ -35,7 +35,10 @@ def make_proposal(**kw: object) -> RuleProposal:
 def make_bot() -> TeachBot:
     bot = TeachBot.__new__(TeachBot)
     bot.config = TeachConfig(
-        token="t", channel_id=1, dsn="dsn", poll_interval_seconds=60
+        token="t",
+        channel_id=1,
+        db_params={"host": "db", "dbname": "cortex"},
+        poll_interval_seconds=60,
     )
     return bot
 
@@ -44,7 +47,7 @@ def patch_conn(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
     conn = MagicMock()
     conn.__enter__.return_value = conn
     conn.__exit__.return_value = False
-    monkeypatch.setattr(tb.psycopg2, "connect", lambda dsn: conn)
+    monkeypatch.setattr(tb.psycopg2, "connect", lambda *a, **k: conn)
     return conn
 
 
@@ -85,7 +88,8 @@ def test_config_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
     assert config.token == "tok"
     assert config.channel_id == 12345
     assert config.poll_interval_seconds == 30
-    assert "dbname=cortex" in config.dsn and "host=db" in config.dsn
+    assert config.db_params["dbname"] == "cortex"
+    assert config.db_params["host"] == "db"
 
 
 def test_config_from_env_missing_raises(monkeypatch: pytest.MonkeyPatch) -> None:

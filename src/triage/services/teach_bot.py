@@ -24,7 +24,6 @@ from dataclasses import dataclass
 
 import discord
 import psycopg2
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from cortex_utils.learning import (
     RuleProposal,
     approve_proposal,
@@ -38,7 +37,7 @@ from cortex_utils.learning import (
 )
 from cortex_utils.logging import configure_logging, get_logger
 from cortex_utils.metrics import start_metrics_server
-from discord.ext import commands
+from discord.ext import commands, tasks
 
 configure_logging(service_name="teach-bot", level=os.getenv("LOG_LEVEL", "INFO"))
 logger = get_logger(__name__)
@@ -58,22 +57,24 @@ def _require(name: str) -> str:
 class TeachConfig:
     token: str
     channel_id: int
-    dsn: str
+    db_params: dict[str, str]
     poll_interval_seconds: int
 
     @classmethod
     def from_env(cls) -> TeachConfig:
-        dsn = (
-            f"host={_require('POSTGRES_HOST')} "
-            f"port={os.getenv('POSTGRES_PORT', '5432')} "
-            f"dbname={_require('POSTGRES_DB')} "
-            f"user={_require('POSTGRES_USER')} "
-            f"password={_require('POSTGRES_PASSWORD')}"
-        )
+        # Kwargs (not a DSN string) so special characters in the password can't
+        # break connection-string parsing.
+        db_params = {
+            "host": _require("POSTGRES_HOST"),
+            "port": os.getenv("POSTGRES_PORT", "5432"),
+            "dbname": _require("POSTGRES_DB"),
+            "user": _require("POSTGRES_USER"),
+            "password": _require("POSTGRES_PASSWORD"),
+        }
         return cls(
             token=_require("DISCORD_TEACH_BOT_TOKEN"),
             channel_id=int(_require("DISCORD_TEACH_CHANNEL_ID")),
-            dsn=dsn,
+            db_params=db_params,
             poll_interval_seconds=int(os.getenv("TEACH_POLL_INTERVAL_SECONDS", "60")),
         )
 
@@ -100,7 +101,7 @@ class TeachBot(commands.Bot):
         intents.reactions = True
         super().__init__(command_prefix="!", intents=intents)
         self.config = config
-        self.scheduler = AsyncIOScheduler()
+        self.poll_task.change_interval(seconds=config.poll_interval_seconds)
 
     # --- DB (blocking; called via asyncio.to_thread from async contexts) ---
 
@@ -108,7 +109,7 @@ class TeachBot(commands.Bot):
     def _db_connection(self) -> Iterator[psycopg2.extensions.connection]:
         """A connection that commits/rolls back the transaction and always
         closes — psycopg2's ``with conn`` only manages the transaction."""
-        conn = psycopg2.connect(self.config.dsn)
+        conn = psycopg2.connect(**self.config.db_params)
         try:
             with conn:
                 yield conn
@@ -148,22 +149,19 @@ class TeachBot(commands.Bot):
 
     async def setup_hook(self) -> None:
         # setup_hook runs exactly once on startup; on_ready can fire on every
-        # reconnect, so schema + scheduler belong here.
+        # reconnect, so schema + the poll loop belong here.
         await asyncio.to_thread(self._ensure_schema)
-        self.scheduler.add_job(
-            self._poll,
-            "interval",
-            seconds=self.config.poll_interval_seconds,
-        )
-        self.scheduler.start()
+        self.poll_task.start()
 
     async def on_ready(self) -> None:
         logger.info(f"Teach bot ready as {self.user}")
 
-    async def _poll(self) -> None:
-        # The scheduler can fire before the gateway connection is ready.
-        if not self.is_ready():
-            return
+    async def close(self) -> None:
+        self.poll_task.cancel()
+        await super().close()
+
+    @tasks.loop(seconds=60.0)
+    async def poll_task(self) -> None:
         try:
             channel = self.get_channel(self.config.channel_id)
             if channel is None:
@@ -181,6 +179,11 @@ class TeachBot(commands.Bot):
                     )
         except Exception:
             logger.error("Teach poll failed", exc_info=True)
+
+    @poll_task.before_loop
+    async def _before_poll(self) -> None:
+        # Don't poll until the gateway connection is ready.
+        await self.wait_until_ready()
 
     async def _post_proposal(
         self, channel: discord.abc.Messageable, proposal: RuleProposal
@@ -219,8 +222,8 @@ class TeachBot(commands.Bot):
     async def on_raw_reaction_add(
         self, payload: discord.RawReactionActionEvent
     ) -> None:
-        # Only reactions in the teach channel, not the bot's own seed
-        # reactions, and only the ✅ / ❌ emojis.
+        # Only reactions in the teach channel, not from any bot, and only the
+        # ✅ / ❌ emojis.
         if payload.channel_id != self.config.channel_id:
             return
         if self.user is not None and payload.user_id == self.user.id:
@@ -239,11 +242,6 @@ class TeachBot(commands.Bot):
                 f"Proposal {proposal.id} {verb} ({proposal.sender} -> "
                 f"{proposal.label})"
             )
-
-    async def close(self) -> None:
-        if self.scheduler.running:
-            self.scheduler.shutdown()
-        await super().close()
 
 
 def main() -> None:
