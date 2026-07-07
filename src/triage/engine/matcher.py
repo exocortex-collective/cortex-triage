@@ -1465,7 +1465,8 @@ def evaluate_parallel(
 
     Priority/fallback email mappings participate as a virtual chain —
     a priority match produces a result that gets merged with the others.
-    Fallback mappings only fire if no auto_run chain matched.
+    Fallback mappings fire only when no chain produced a label (a chain that
+    matches without emitting a label does not suppress them).
 
     Args:
         config: The rules configuration.
