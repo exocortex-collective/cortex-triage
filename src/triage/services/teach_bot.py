@@ -18,6 +18,8 @@ from __future__ import annotations
 
 import asyncio
 import os
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 
 import discord
@@ -99,36 +101,39 @@ class TeachBot(commands.Bot):
         super().__init__(command_prefix="!", intents=intents)
         self.config = config
         self.scheduler = AsyncIOScheduler()
-        self._ensure_schema()
 
     # --- DB (blocking; called via asyncio.to_thread from async contexts) ---
 
-    def _connect(self) -> psycopg2.extensions.connection:
-        return psycopg2.connect(self.config.dsn)
+    @contextmanager
+    def _db_connection(self) -> Iterator[psycopg2.extensions.connection]:
+        """A connection that commits/rolls back the transaction and always
+        closes — psycopg2's ``with conn`` only manages the transaction."""
+        conn = psycopg2.connect(self.config.dsn)
+        try:
+            with conn:
+                yield conn
+        finally:
+            conn.close()
 
     def _ensure_schema(self) -> None:
-        with self._connect() as conn:
+        with self._db_connection() as conn:
             ensure_learning_schema(conn)
             ensure_proposals_schema(conn)
-            conn.commit()
 
     def _promote_and_fetch(self) -> list[RuleProposal]:
         """Roll opportunities into proposals, return the ones still unposted."""
-        with self._connect() as conn:
+        with self._db_connection() as conn:
             propose_from_opportunities(conn)
-            proposals = unposted_pending_proposals(conn)
-            conn.commit()
-        return proposals
+            return unposted_pending_proposals(conn)
 
     def _mark_posted(self, proposal_id: int, message_id: str) -> None:
-        with self._connect() as conn:
+        with self._db_connection() as conn:
             mark_proposal_posted(conn, proposal_id, message_id)
-            conn.commit()
 
     def _decide(self, message_id: str, approved: bool) -> RuleProposal | None:
         """Resolve the proposal a reacted-to message presents. Returns it if
         the reaction actually transitioned a pending proposal, else None."""
-        with self._connect() as conn:
+        with self._db_connection() as conn:
             proposal = get_proposal_by_message_id(conn, message_id)
             if proposal is None:
                 return None
@@ -137,20 +142,23 @@ class TeachBot(commands.Bot):
                 if approved
                 else reject_proposal(conn, proposal.id)
             )
-            conn.commit()
-        return proposal if changed else None
+            return proposal if changed else None
 
     # --- Discord lifecycle ---
 
+    async def setup_hook(self) -> None:
+        # setup_hook runs exactly once on startup; on_ready can fire on every
+        # reconnect, so schema + scheduler belong here.
+        await asyncio.to_thread(self._ensure_schema)
+        self.scheduler.add_job(
+            self._poll,
+            "interval",
+            seconds=self.config.poll_interval_seconds,
+        )
+        self.scheduler.start()
+
     async def on_ready(self) -> None:
         logger.info(f"Teach bot ready as {self.user}")
-        if not self.scheduler.running:
-            self.scheduler.add_job(
-                self._poll,
-                "interval",
-                seconds=self.config.poll_interval_seconds,
-            )
-            self.scheduler.start()
 
     async def _poll(self) -> None:
         try:
@@ -162,7 +170,12 @@ class TeachBot(commands.Bot):
                 return
             proposals = await asyncio.to_thread(self._promote_and_fetch)
             for proposal in proposals:
-                await self._post_proposal(channel, proposal)
+                try:
+                    await self._post_proposal(channel, proposal)
+                except Exception:
+                    logger.error(
+                        f"Failed to post proposal {proposal.id}", exc_info=True
+                    )
         except Exception:
             logger.error("Teach poll failed", exc_info=True)
 
@@ -170,9 +183,16 @@ class TeachBot(commands.Bot):
         self, channel: discord.abc.Messageable, proposal: RuleProposal
     ) -> None:
         message = await channel.send(format_proposal(proposal))
-        await message.add_reaction(APPROVE)
-        await message.add_reaction(REJECT)
+        # Record the link immediately so a slow/failed reaction add can't cause
+        # a re-post on the next poll.
         await asyncio.to_thread(self._mark_posted, proposal.id, str(message.id))
+        try:
+            await message.add_reaction(APPROVE)
+            await message.add_reaction(REJECT)
+        except Exception:
+            logger.warning(
+                f"Failed to add reactions to message {message.id}", exc_info=True
+            )
         logger.info(
             f"Posted proposal {proposal.id} ({proposal.sender} -> "
             f"{proposal.label}, {proposal.direction}) as message {message.id}"
