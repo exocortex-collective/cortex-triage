@@ -183,6 +183,7 @@ class TestEvaluateChain:
     def test_no_match(self, sample_email: Email) -> None:
         """Test when no rules match."""
         config = RulesConfig(
+            default_label="",  # isolate: no default so a no-match stays unmatched
             chains={
                 "main": [
                     Rule(
@@ -190,7 +191,7 @@ class TestEvaluateChain:
                         action=Action(label="Test"),
                     )
                 ]
-            }
+            },
         )
         result = evaluate(config, sample_email)
         assert not result.matched
@@ -271,6 +272,7 @@ class TestEvaluateChain:
     def test_cycle_detection(self, sample_email: Email) -> None:
         """Test that chain cycles are detected and don't infinite loop."""
         config = RulesConfig(
+            default_label="",  # isolate cycle detection from default-label behavior
             chains={
                 "main": [
                     Rule(match=MatchCondition(), jump="a"),
@@ -281,7 +283,7 @@ class TestEvaluateChain:
                 "b": [
                     Rule(match=MatchCondition(), jump="a"),  # Cycle!
                 ],
-            }
+            },
         )
         # Should not hang, should return no match
         result = evaluate(config, sample_email)
@@ -1382,6 +1384,7 @@ class TestReturnToParent:
             subject="Unknown email",
         )
         config = RulesConfig(
+            default_label="",  # isolate: focus on the return-to-parent no-match path
             chains={
                 "main": [
                     Rule(match=MatchCondition(), jump="sub_chain"),
@@ -1394,7 +1397,7 @@ class TestReturnToParent:
                 "sub_chain": [
                     Rule(match=MatchCondition(), return_to_parent=True),
                 ],
-            }
+            },
         )
 
         result = evaluate(config, email)
@@ -2924,6 +2927,100 @@ class TestEmailMappings:
         assert "Cortex/Real" in (merged.add_label or [])
         assert not any(r.chain == "fallback_email_mappings" for r in results)
 
+    def test_parallel_default_label_when_nothing_matches(self) -> None:
+        """No rule and no fallback -> the default label is the last resort."""
+        email = Email(
+            id=1,
+            gmail_id="abc",
+            from_addr="stranger@example.com",
+            to_addrs=["me@example.com"],
+            subject="Test",
+        )
+        config = RulesConfig(
+            default_label="Uncategorized",
+            chains={"main": ChainConfig(auto_run=True, rules=[])},
+        )
+
+        merged, results = evaluate_parallel(config, email)
+
+        assert merged is not None
+        assert "Cortex/Uncategorized" in (merged.add_label or [])
+        assert any(r.chain == "default_label" for r in results)
+
+    def test_parallel_fallback_beats_default_label(self) -> None:
+        """A fallback mapping must win over the default label (regression for the
+        catch-all Uncategorized rule that used to suppress fallbacks)."""
+        email = Email(
+            id=1,
+            gmail_id="abc",
+            from_addr="familysafety@microsoft.com",
+            to_addrs=["me@example.com"],
+            subject="Test",
+        )
+        config = RulesConfig(
+            default_label="Uncategorized",
+            fallback_email_mappings={
+                "familysafety@microsoft.com": EmailMappingAction(
+                    label="Family/FamilySafety"
+                )
+            },
+            chains={"main": ChainConfig(auto_run=True, rules=[])},
+        )
+
+        merged, results = evaluate_parallel(config, email)
+
+        assert merged is not None
+        labels = merged.add_label or []
+        assert "Cortex/Family/FamilySafety" in labels
+        # The default must NOT coexist with the fallback's real label.
+        assert "Cortex/Uncategorized" not in labels
+        assert any(r.chain == "fallback_email_mappings" for r in results)
+        assert not any(r.chain == "default_label" for r in results)
+
+    def test_parallel_default_label_skipped_when_real_label(self) -> None:
+        """The default never coexists with a real chain label."""
+        email = Email(
+            id=1,
+            gmail_id="abc",
+            from_addr="x@example.com",
+            to_addrs=["me@example.com"],
+            subject="Test",
+        )
+        config = RulesConfig(
+            default_label="Uncategorized",
+            chains={
+                "main": ChainConfig(
+                    auto_run=True,
+                    rules=[Rule(match=MatchCondition(), action=Action(label="Real"))],
+                )
+            },
+        )
+
+        merged, results = evaluate_parallel(config, email)
+
+        assert merged is not None
+        assert "Cortex/Real" in (merged.add_label or [])
+        assert "Cortex/Uncategorized" not in (merged.add_label or [])
+        assert not any(r.chain == "default_label" for r in results)
+
+    def test_default_label_applied_in_single_path(self) -> None:
+        """evaluate() also applies the default as a last resort."""
+        email = Email(
+            id=1,
+            gmail_id="abc",
+            from_addr="stranger@example.com",
+            to_addrs=["me@example.com"],
+            subject="Test",
+        )
+        config = RulesConfig(default_label="Uncategorized", chains={"main": []})
+
+        result = evaluate(config, email)
+
+        assert result.matched
+        assert result.chain == "default_label"
+        assert result.action is not None
+        assert result.action.label == "Cortex/Uncategorized"
+
     def test_email_mappings_no_match(self) -> None:
         """Test no match when email not in mappings or rules."""
         email = Email(
@@ -2934,6 +3031,7 @@ class TestEmailMappings:
             subject="Test",
         )
         config = RulesConfig(
+            default_label="",  # no default -> a truly unknown sender is unmatched
             priority_email_mappings={
                 "known@example.com": EmailMappingAction(label="Known")
             },

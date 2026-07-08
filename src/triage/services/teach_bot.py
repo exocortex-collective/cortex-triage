@@ -45,7 +45,6 @@ from cortex_utils.learning import (
     mark_proposal_posted,
     propose_from_opportunities,
     reject_proposal,
-    taught_mail_archived,
     unposted_pending_proposals,
 )
 from cortex_utils.logging import configure_logging, get_logger
@@ -312,13 +311,16 @@ class TeachBot(commands.Bot):
             return result
 
     def _apply_add(self, proposal: RuleProposal) -> None:
-        """Upsert the sender's priority mapping. Sets archive=true only if the
-        mail that taught the rule had been removed from the inbox."""
+        """Upsert the sender's priority mapping (label only).
+
+        Archive is deliberately NOT inferred from the taught mail's inbox state:
+        that would turn any manual archive into a standing auto-archive rule.
+        Archiving stays a separate, explicit decision.
+        """
         with self._db_connection() as conn:
             prefix = active_label_prefix(conn)
-            archive = taught_mail_archived(conn, proposal.sender, proposal.label)
         label = _strip_prefix(proposal.label, prefix)
-        self._upsert_mapping(proposal.sender, label, archive)
+        self._upsert_mapping(proposal.sender, label, archive=False)
 
     def _upsert_mapping(self, email: str, label: str, archive: bool) -> None:
         """POST a new priority mapping; on 409 (already exists) move it via PUT.

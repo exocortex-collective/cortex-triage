@@ -1372,6 +1372,14 @@ def _email_mapping_to_action(mapping: EmailMappingAction, label_prefix: str) -> 
     )
 
 
+def _default_label_action(config: RulesConfig) -> Action:
+    """Action applying the config's default label, prefixed like any rule label."""
+    label = config.default_label
+    if config.label_prefix:
+        label = f"{config.label_prefix}/{label}"
+    return Action(label=label)
+
+
 def evaluate(
     config: RulesConfig,
     email: Email,
@@ -1448,6 +1456,17 @@ def evaluate(
                 trace=trace,
             )
         trace.append("fallback_email_mappings: no match")
+
+    # Default label: last resort when neither a rule nor a fallback labeled it.
+    if config.default_label:
+        trace.append(f"default_label: no match -> {config.default_label}")
+        return EvaluationResult(
+            matched=True,
+            chain="default_label",
+            rule_index=0,
+            action=_default_label_action(config),
+            trace=trace,
+        )
 
     # No match at all
     return EvaluationResult(matched=False, trace=trace)
@@ -1549,6 +1568,27 @@ def evaluate_parallel(
                     ],
                 )
             )
+
+    # Default label is the TRUE last resort: apply it only when nothing — no
+    # chain, no fallback mapping — produced a label. Previously a catch-all
+    # rule in `main` applied Uncategorized in-chain, which counted as "produced
+    # a label" and silently suppressed every fallback mapping (and let the
+    # default coexist with a real label). Removing that rule and applying
+    # default_label here makes fallbacks reachable and keeps Uncategorized from
+    # ever sitting alongside a real label.
+    produced_label = any(
+        r.action is not None and (r.action.label or r.action.add_label) for r in results
+    )
+    if not produced_label and config.default_label:
+        results.append(
+            EvaluationResult(
+                matched=True,
+                chain="default_label",
+                rule_index=0,
+                action=_default_label_action(config),
+                trace=[f"default_label: no match -> {config.default_label}"],
+            )
+        )
 
     merged = merge_actions(results)
     return merged, results
