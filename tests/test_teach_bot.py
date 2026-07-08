@@ -273,19 +273,19 @@ def test_move_existing_raises_when_mapping_absent() -> None:
 # --- _apply_add wiring ---
 
 
-def test_apply_add_strips_prefix_and_passes_archive(
+def test_apply_add_strips_prefix_label_only(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # Archive is never inferred — a manual archive must not become a rule.
     patch_conn(monkeypatch)
     monkeypatch.setattr(tb, "active_label_prefix", lambda conn: "Cortex")
-    monkeypatch.setattr(tb, "taught_mail_archived", lambda conn, sender, label: True)
     bot = make_bot()
     calls = []
     bot._upsert_mapping = lambda email, label, archive: calls.append(  # type: ignore[method-assign]
         (email, label, archive)
     )
     bot._apply_add(make_proposal(sender="bob@x.com", label="Cortex/Home/Redfin"))
-    assert calls == [("bob@x.com", "Home/Redfin", True)]
+    assert calls == [("bob@x.com", "Home/Redfin", False)]
 
 
 # --- _apply_one outcomes ---
