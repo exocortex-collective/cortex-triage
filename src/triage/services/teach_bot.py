@@ -22,6 +22,7 @@ import os
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
+from enum import Enum
 
 import discord
 import httpx
@@ -127,20 +128,43 @@ def _reactions_for(proposal: RuleProposal) -> tuple[str, ...]:
     return (APPROVE, REJECT)
 
 
-def _interpret_reaction(emoji: str) -> tuple[bool, bool] | None:
-    """Map a reaction emoji to ``(approved, archive)``, or ``None`` if it isn't a
-    decision emoji. 📦 approves AND archives; ✅ approves label-only; ❌ rejects."""
-    if emoji == APPROVE:
-        return (True, False)
-    if emoji == ARCHIVE:
-        return (True, True)
-    if emoji == REJECT:
-        return (False, False)
-    return None
+class Decision(Enum):
+    """What a reaction on a proposal means. A closed set of exactly three
+    outcomes — using this instead of an ``(approved, archive)`` bool pair keeps
+    the impossible "not approved but archive" combination unrepresentable."""
+
+    LABEL = "label"  # ✅ approve, label only
+    LABEL_ARCHIVE = "archive"  # 📦 approve + archive
+    REJECT = "reject"  # ❌
+
+
+_REACTION_DECISIONS: dict[str, Decision] = {
+    APPROVE: Decision.LABEL,
+    ARCHIVE: Decision.LABEL_ARCHIVE,
+    REJECT: Decision.REJECT,
+}
+
+
+def _interpret_reaction(emoji: str) -> Decision | None:
+    """The decision a reaction emoji represents, or ``None`` if it isn't one of
+    the ✅ / 📦 / ❌ decision emojis."""
+    return _REACTION_DECISIONS.get(emoji)
+
+
+def _decision_verb(decision: Decision, direction: str) -> str:
+    """Log verb for a resolved decision. Archive only actually happens for an
+    add proposal — ``approve_proposal`` coerces it off for a remove — so a 📦 on
+    a remove reads as "approved", not "approved+archive"."""
+    if decision is Decision.REJECT:
+        return "rejected"
+    if decision is Decision.LABEL_ARCHIVE and direction == "add":
+        return "approved+archive"
+    return "approved"
 
 
 def format_proposal(proposal: RuleProposal) -> str:
-    """Human-readable prompt for a proposal, with ✅ / 📦 / ❌ instructions."""
+    """Human-readable prompt for a proposal, with ✅ / ❌ instructions (plus 📦
+    for add proposals)."""
     sender = discord.utils.escape_markdown(proposal.sender)
     if proposal.direction == "add":
         action = f"Label mail from **{sender}** as `{proposal.label}`?"
@@ -197,27 +221,29 @@ class TeachBot(commands.Bot):
         with self._db_connection() as conn:
             mark_proposal_posted(conn, proposal_id, message_id)
 
-    def _decide(
-        self, message_id: str, approved: bool, archive: bool = False
-    ) -> RuleProposal | None:
+    def _decide(self, message_id: str, decision: Decision) -> RuleProposal | None:
         """Resolve the proposal a reacted-to message presents. Returns it if
         the reaction actually transitioned a pending proposal, else None.
 
-        ``archive`` (the 📦 reaction) is carried onto the approved proposal so
-        the committed mapping archives the sender's mail. Approving also enqueues
-        a ``proposal_apply`` job in the same transaction, so the approval and the
-        work to commit it land atomically — the apply loop then picks it up.
+        ``Decision.LABEL_ARCHIVE`` (the 📦 reaction) approves and carries the
+        archive flag onto the proposal so the committed mapping archives the
+        sender's mail; ``Decision.LABEL`` (✅) approves label-only; ``REJECT``
+        (❌) rejects. Approving enqueues a ``proposal_apply`` job in the same
+        transaction, so the approval and the work to commit it land atomically —
+        the apply loop then picks it up.
         """
         with self._db_connection() as conn:
             proposal = get_proposal_by_message_id(conn, message_id)
             if proposal is None:
                 return None
-            if approved:
-                changed = approve_proposal(conn, proposal.id, archive=archive)
+            if decision is Decision.REJECT:
+                changed = reject_proposal(conn, proposal.id)
+            else:
+                changed = approve_proposal(
+                    conn, proposal.id, archive=decision is Decision.LABEL_ARCHIVE
+                )
                 if changed:
                     enqueue_proposal_apply(conn, proposal.id)
-            else:
-                changed = reject_proposal(conn, proposal.id)
             return proposal if changed else None
 
     # --- Discord lifecycle ---
@@ -452,10 +478,9 @@ class TeachBot(commands.Bot):
         decision = _interpret_reaction(str(payload.emoji))
         if decision is None:
             return
-        approved, archive = decision
         try:
             proposal = await asyncio.to_thread(
-                self._decide, str(payload.message_id), approved, archive
+                self._decide, str(payload.message_id), decision
             )
         except Exception:
             logger.error(
@@ -464,11 +489,7 @@ class TeachBot(commands.Bot):
             )
             return
         if proposal is not None:
-            verb = (
-                "approved+archive"
-                if archive
-                else "approved" if approved else "rejected"
-            )
+            verb = _decision_verb(decision, proposal.direction)
             logger.info(
                 f"Proposal {proposal.id} {verb} ({proposal.sender} -> "
                 f"{proposal.label})"

@@ -1549,6 +1549,7 @@ This reviewer applies to:
 - The verbose / inaccurate text.
 - A terse / accurate replacement.
 - Brief reason (only if not obvious).
+
 ## test-isolation-reviewer
 
 Review test changes for **isolation from live infrastructure**. Cortex tests must run against mocks/fixtures, not the live homelab services, for two reasons:

@@ -12,8 +12,10 @@ from triage.services.teach_bot import (
     APPROVE,
     ARCHIVE,
     REJECT,
+    Decision,
     TeachBot,
     TeachConfig,
+    _decision_verb,
     _interpret_reaction,
     _reactions_for,
     format_proposal,
@@ -86,10 +88,18 @@ def test_reactions_for_remove_omits_archive() -> None:
 
 
 def test_interpret_reaction() -> None:
-    assert _interpret_reaction(APPROVE) == (True, False)
-    assert _interpret_reaction(ARCHIVE) == (True, True)
-    assert _interpret_reaction(REJECT) == (False, False)
+    assert _interpret_reaction(APPROVE) is Decision.LABEL
+    assert _interpret_reaction(ARCHIVE) is Decision.LABEL_ARCHIVE
+    assert _interpret_reaction(REJECT) is Decision.REJECT
     assert _interpret_reaction("🎉") is None
+
+
+def test_decision_verb() -> None:
+    assert _decision_verb(Decision.LABEL, "add") == "approved"
+    assert _decision_verb(Decision.LABEL_ARCHIVE, "add") == "approved+archive"
+    # 📦 manually reacted on a remove: archive is coerced off, verb reflects it.
+    assert _decision_verb(Decision.LABEL_ARCHIVE, "remove") == "approved"
+    assert _decision_verb(Decision.REJECT, "add") == "rejected"
 
 
 def test_format_shows_repeat_count() -> None:
@@ -165,7 +175,7 @@ def test_decide_approve_returns_proposal_and_enqueues(
     monkeypatch.setattr(tb, "approve_proposal", approve)
     monkeypatch.setattr(tb, "enqueue_proposal_apply", enqueue)
     monkeypatch.setattr(tb, "reject_proposal", MagicMock())
-    result = make_bot()._decide("msg-1", approved=True)
+    result = make_bot()._decide("msg-1", Decision.LABEL)
     assert result is proposal
     approve.assert_called_once()
     # Label-only approval (✅) carries archive=False.
@@ -177,7 +187,7 @@ def test_decide_approve_returns_proposal_and_enqueues(
 def test_decide_approve_with_archive_passes_flag(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # The 📦 reaction approves with archive=True.
+    # The 📦 reaction (Decision.LABEL_ARCHIVE) approves with archive=True.
     patch_conn(monkeypatch)
     proposal = make_proposal(id=5, direction="add")
     monkeypatch.setattr(tb, "get_proposal_by_message_id", lambda conn, mid: proposal)
@@ -185,7 +195,7 @@ def test_decide_approve_with_archive_passes_flag(
     monkeypatch.setattr(tb, "approve_proposal", approve)
     monkeypatch.setattr(tb, "enqueue_proposal_apply", MagicMock())
     monkeypatch.setattr(tb, "reject_proposal", MagicMock())
-    make_bot()._decide("msg-1", approved=True, archive=True)
+    make_bot()._decide("msg-1", Decision.LABEL_ARCHIVE)
     assert approve.call_args.kwargs["archive"] is True
 
 
@@ -200,7 +210,7 @@ def test_decide_approve_noop_does_not_enqueue(
     monkeypatch.setattr(tb, "approve_proposal", lambda conn, pid, archive=False: False)
     enqueue = MagicMock()
     monkeypatch.setattr(tb, "enqueue_proposal_apply", enqueue)
-    assert make_bot()._decide("msg-1", approved=True) is None
+    assert make_bot()._decide("msg-1", Decision.LABEL) is None
     enqueue.assert_not_called()
 
 
@@ -211,14 +221,14 @@ def test_decide_reject_uses_reject(monkeypatch: pytest.MonkeyPatch) -> None:
     reject = MagicMock(return_value=True)
     monkeypatch.setattr(tb, "approve_proposal", MagicMock())
     monkeypatch.setattr(tb, "reject_proposal", reject)
-    assert make_bot()._decide("msg-1", approved=False) is proposal
+    assert make_bot()._decide("msg-1", Decision.REJECT) is proposal
     reject.assert_called_once()
 
 
 def test_decide_unknown_message_returns_none(monkeypatch: pytest.MonkeyPatch) -> None:
     patch_conn(monkeypatch)
     monkeypatch.setattr(tb, "get_proposal_by_message_id", lambda conn, mid: None)
-    assert make_bot()._decide("msg-x", approved=True) is None
+    assert make_bot()._decide("msg-x", Decision.LABEL) is None
 
 
 def test_decide_already_decided_returns_none(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -228,7 +238,7 @@ def test_decide_already_decided_returns_none(monkeypatch: pytest.MonkeyPatch) ->
         tb, "get_proposal_by_message_id", lambda conn, mid: make_proposal()
     )
     monkeypatch.setattr(tb, "approve_proposal", lambda conn, pid, archive=False: False)
-    assert make_bot()._decide("msg-1", approved=True) is None
+    assert make_bot()._decide("msg-1", Decision.LABEL) is None
 
 
 # --- _strip_prefix (pure) ---
@@ -321,7 +331,7 @@ def test_apply_add_strips_prefix_and_uses_proposal_archive(
     monkeypatch.setattr(tb, "active_label_prefix", lambda conn: "Cortex")
     bot = make_bot()
     calls = []
-    bot._upsert_mapping = lambda email, label, archive: calls.append(  # type: ignore[method-assign]
+    bot._upsert_mapping = lambda email, label, archive: calls.append(  # type: ignore[method-assign]  # test double: stub instance method
         (email, label, archive)
     )
     bot._apply_add(
