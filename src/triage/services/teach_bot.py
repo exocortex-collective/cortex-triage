@@ -7,8 +7,9 @@ triage image::
 
 On an interval it rolls new ``learning_opportunities`` into ``rule_proposals``
 (cortex-utils), then posts any not-yet-presented pending proposal to a Discord
-channel with ✅ / ❌ reactions. A reaction resolves the proposal
-(approve / reject). Committing an approved proposal to triage config is uo9b.4.
+channel with ✅ / 📦 / ❌ reactions. A reaction resolves the proposal:
+✅ approves (label only), 📦 approves and archives the sender's mail, ❌ rejects.
+Committing an approved proposal to triage config is uo9b.4.
 
 The proposal↔message link lives in the DB, so reactions still resolve after a
 restart and proposals are never double-posted.
@@ -56,6 +57,7 @@ configure_logging(service_name="teach-bot", level=os.getenv("LOG_LEVEL", "INFO")
 logger = get_logger(__name__)
 
 APPROVE = "✅"
+ARCHIVE = "📦"
 REJECT = "❌"
 
 # Actor recorded on mappings the bot creates/updates (Gateway audit headers).
@@ -116,19 +118,42 @@ def _strip_prefix(label: str, prefix: str | None) -> str:
     return label[len(head) :] if label.startswith(head) else label
 
 
+def _reactions_for(proposal: RuleProposal) -> tuple[str, ...]:
+    """Reactions to offer for a proposal. 📦 (approve + archive) is only
+    meaningful for an add proposal — there's no mapping to archive on a "stop
+    labeling" remove — so remove proposals get just ✅ / ❌."""
+    if proposal.direction == "add":
+        return (APPROVE, ARCHIVE, REJECT)
+    return (APPROVE, REJECT)
+
+
+def _interpret_reaction(emoji: str) -> tuple[bool, bool] | None:
+    """Map a reaction emoji to ``(approved, archive)``, or ``None`` if it isn't a
+    decision emoji. 📦 approves AND archives; ✅ approves label-only; ❌ rejects."""
+    if emoji == APPROVE:
+        return (True, False)
+    if emoji == ARCHIVE:
+        return (True, True)
+    if emoji == REJECT:
+        return (False, False)
+    return None
+
+
 def format_proposal(proposal: RuleProposal) -> str:
-    """Human-readable prompt for a proposal, with ✅ / ❌ instructions."""
+    """Human-readable prompt for a proposal, with ✅ / 📦 / ❌ instructions."""
     sender = discord.utils.escape_markdown(proposal.sender)
     if proposal.direction == "add":
         action = f"Label mail from **{sender}** as `{proposal.label}`?"
+        keys = f"{APPROVE} yes · {ARCHIVE} yes + archive · {REJECT} no"
     else:
         action = f"Stop labeling mail from **{sender}** as `{proposal.label}`?"
+        keys = f"{APPROVE} yes · {REJECT} no"
     seen = (
         f" _(seen {proposal.opportunity_count}×)_"
         if proposal.opportunity_count > 1
         else ""
     )
-    return f"**Rule proposal**{seen}\n{action}\n{APPROVE} yes · {REJECT} no"
+    return f"**Rule proposal**{seen}\n{action}\n{keys}"
 
 
 class TeachBot(commands.Bot):
@@ -172,20 +197,23 @@ class TeachBot(commands.Bot):
         with self._db_connection() as conn:
             mark_proposal_posted(conn, proposal_id, message_id)
 
-    def _decide(self, message_id: str, approved: bool) -> RuleProposal | None:
+    def _decide(
+        self, message_id: str, approved: bool, archive: bool = False
+    ) -> RuleProposal | None:
         """Resolve the proposal a reacted-to message presents. Returns it if
         the reaction actually transitioned a pending proposal, else None.
 
-        Approving also enqueues a ``proposal_apply`` job in the same
-        transaction, so the approval and the work to commit it land atomically —
-        the apply loop then picks it up.
+        ``archive`` (the 📦 reaction) is carried onto the approved proposal so
+        the committed mapping archives the sender's mail. Approving also enqueues
+        a ``proposal_apply`` job in the same transaction, so the approval and the
+        work to commit it land atomically — the apply loop then picks it up.
         """
         with self._db_connection() as conn:
             proposal = get_proposal_by_message_id(conn, message_id)
             if proposal is None:
                 return None
             if approved:
-                changed = approve_proposal(conn, proposal.id)
+                changed = approve_proposal(conn, proposal.id, archive=archive)
                 if changed:
                     enqueue_proposal_apply(conn, proposal.id)
             else:
@@ -311,16 +339,16 @@ class TeachBot(commands.Bot):
             return result
 
     def _apply_add(self, proposal: RuleProposal) -> None:
-        """Upsert the sender's priority mapping (label only).
+        """Upsert the sender's priority mapping.
 
-        Archive is deliberately NOT inferred from the taught mail's inbox state:
-        that would turn any manual archive into a standing auto-archive rule.
-        Archiving stays a separate, explicit decision.
+        Archive comes from the proposal's explicit ``archive`` flag (set when the
+        user approved with 📦), never inferred from the taught mail's inbox state
+        — so a manual archive doesn't silently become a standing rule.
         """
         with self._db_connection() as conn:
             prefix = active_label_prefix(conn)
         label = _strip_prefix(proposal.label, prefix)
-        self._upsert_mapping(proposal.sender, label, archive=False)
+        self._upsert_mapping(proposal.sender, label, archive=proposal.archive)
 
     def _upsert_mapping(self, email: str, label: str, archive: bool) -> None:
         """POST a new priority mapping; on 409 (already exists) move it via PUT.
@@ -396,7 +424,7 @@ class TeachBot(commands.Bot):
                     f"Failed to delete orphan message {message.id}", exc_info=True
                 )
             raise
-        for emoji in (APPROVE, REJECT):
+        for emoji in _reactions_for(proposal):
             try:
                 await message.add_reaction(emoji)
             except Exception:
@@ -413,7 +441,7 @@ class TeachBot(commands.Bot):
         self, payload: discord.RawReactionActionEvent
     ) -> None:
         # Only reactions in the teach channel, not from any bot, and only the
-        # ✅ / ❌ emojis.
+        # ✅ / 📦 / ❌ emojis.
         if payload.channel_id != self.config.channel_id:
             return
         if self.user is not None and payload.user_id == self.user.id:
@@ -421,12 +449,13 @@ class TeachBot(commands.Bot):
         user = payload.member or self.get_user(payload.user_id)
         if user is not None and user.bot:
             return  # never let another bot approve/reject
-        emoji = str(payload.emoji)
-        if emoji not in (APPROVE, REJECT):
+        decision = _interpret_reaction(str(payload.emoji))
+        if decision is None:
             return
+        approved, archive = decision
         try:
             proposal = await asyncio.to_thread(
-                self._decide, str(payload.message_id), emoji == APPROVE
+                self._decide, str(payload.message_id), approved, archive
             )
         except Exception:
             logger.error(
@@ -435,7 +464,11 @@ class TeachBot(commands.Bot):
             )
             return
         if proposal is not None:
-            verb = "approved" if emoji == APPROVE else "rejected"
+            verb = (
+                "approved+archive"
+                if archive
+                else "approved" if approved else "rejected"
+            )
             logger.info(
                 f"Proposal {proposal.id} {verb} ({proposal.sender} -> "
                 f"{proposal.label})"
