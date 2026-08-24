@@ -863,7 +863,7 @@ class TriageWorker:
                     f"""
                     WITH reset_stale AS (
                         UPDATE queue
-                        SET status = 'pending', claimed_at = NULL
+                        SET status = 'pending', claimed_at = NULL, claimed_by = NULL
                         WHERE queue_name = %s
                           AND status = 'processing'
                           AND claimed_at < NOW() - (INTERVAL '1 minute' * %s)
