@@ -27,6 +27,7 @@ from cortex_utils.metrics import (
     QUEUE_PROCESSED,
     start_metrics_server,
 )
+from cortex_utils.queue import ensure_queue_schema
 from cortex_utils.queue.retry import fail_or_retry, ready_predicate
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
@@ -920,8 +921,26 @@ class LabelingWorker:
             ).inc()
             return 0, 1
 
+    def _ensure_schema(self) -> None:
+        """Ensure the shared queue schema.
+
+        This worker had no schema hook at all, which is why it was one of the
+        two that crash-looped: it claims from the queue and reports back, so it
+        depends on the queue's shape entirely while ensuring none of it.
+        """
+        # The queue's own schema, from the package that owns it. Not optional
+        # and not a manual step: the exponential-backoff feature shipped months
+        # before it first RAN in production, its migration existed as a CLI
+        # command the deploy flow never invoked, and this worker and the
+        # labeling worker crash-looped on "column next_attempt_at does not
+        # exist" (cortex-rgmk). Idempotent, serialised across services, cheap on
+        # the steady-state path.
+        with self._get_conn() as conn:
+            ensure_queue_schema(conn)
+
     def run(self) -> None:
         """Main processing loop."""
+        self._ensure_schema()
         logger.info("Labeling worker started")
 
         total_processed = 0

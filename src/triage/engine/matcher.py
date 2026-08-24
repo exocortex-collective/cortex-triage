@@ -1124,8 +1124,7 @@ def matches_condition(
             return _result(False)
         if email.pattern_info.status not in pattern_statuses:
             _trace(
-                f"pattern_status: {email.pattern_info.status} not in "
-                f"{pattern_statuses}"
+                f"pattern_status: {email.pattern_info.status} not in {pattern_statuses}"
             )
             return _result(False)
 

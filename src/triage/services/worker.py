@@ -25,6 +25,7 @@ from cortex_utils.metrics import (
     QUEUE_PROCESSED,
     start_metrics_server,
 )
+from cortex_utils.queue import ensure_queue_schema
 from cortex_utils.queue.retry import fail_or_retry, ready_predicate
 from cortex_utils.triage_config import (
     ConfigLoadError,
@@ -708,7 +709,17 @@ class TriageWorker:
             self._get_pool().putconn(conn)
 
     def _ensure_schema(self) -> None:
-        """Ensure classifications table exists."""
+        """Ensure the shared queue schema and this service's own tables."""
+        # The queue's own schema, from the package that owns it. Not optional
+        # and not a manual step: the exponential-backoff feature shipped months
+        # before it first RAN in production, its migration existed as a CLI
+        # command the deploy flow never invoked, and this worker and the
+        # labeling worker crash-looped on "column next_attempt_at does not
+        # exist" (cortex-rgmk). Idempotent, serialised across services, cheap on
+        # the steady-state path.
+        with self._get_conn() as conn:
+            ensure_queue_schema(conn)
+
         with self._get_conn() as conn, conn.cursor() as cur:
             cur.execute(
                 """
@@ -1985,7 +1996,6 @@ def load_initial_config(config: Config) -> tuple[RulesConfig, int]:
 
 
 def main() -> None:
-
     # Configure logging
     log_level = os.environ.get("LOG_LEVEL", "INFO")
     configure_logging(service_name="triage-worker", level=log_level)
