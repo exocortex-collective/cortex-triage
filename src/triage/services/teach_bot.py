@@ -51,6 +51,7 @@ from cortex_utils.learning import (
 )
 from cortex_utils.logging import configure_logging, get_logger
 from cortex_utils.metrics import start_metrics_server
+from cortex_utils.queue import ensure_queue_schema
 from cortex_utils.queue.retry import fail_or_retry
 from discord.ext import commands, tasks
 
@@ -207,7 +208,15 @@ class TeachBot(commands.Bot):
             conn.close()
 
     def _ensure_schema(self) -> None:
+        # The queue's own schema, from the package that owns it. Not optional
+        # and not a manual step: the exponential-backoff feature shipped months
+        # before it first RAN in production, its migration existed as a CLI
+        # command the deploy flow never invoked, and this worker and the
+        # labeling worker crash-looped on "column next_attempt_at does not
+        # exist" (cortex-rgmk). Idempotent, serialised across services, cheap on
+        # the steady-state path.
         with self._db_connection() as conn:
+            ensure_queue_schema(conn)
             ensure_learning_schema(conn)
             ensure_proposals_schema(conn)
 
@@ -492,8 +501,7 @@ class TeachBot(commands.Bot):
         if proposal is not None:
             verb = _decision_verb(decision, proposal.direction)
             logger.info(
-                f"Proposal {proposal.id} {verb} ({proposal.sender} -> "
-                f"{proposal.label})"
+                f"Proposal {proposal.id} {verb} ({proposal.sender} -> {proposal.label})"
             )
 
 
