@@ -14,7 +14,7 @@ dependencies = [
     "pyyaml>=6.0.0",
     "structlog>=23.0.0",
     "discord.py>=2.3.0",
-    "cortex-utils @ git+https://github.com/devonjones/cortex-utils.git@8fac743",
+    "cortex-utils @ git+https://github.com/devonjones/cortex-utils.git@80c3e56",
 ]
 
 [project.optional-dependencies]
