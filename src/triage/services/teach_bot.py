@@ -317,7 +317,8 @@ class TeachBot(commands.Bot):
         'pending' so they retry. The apply itself is idempotent (POST→409→PUT)."""
         with conn.cursor() as cur:
             cur.execute(
-                "UPDATE queue SET status = 'pending', claimed_at = NULL "
+                "UPDATE queue SET status = 'pending', claimed_at = NULL, "
+                "claimed_by = NULL "
                 "WHERE queue_name = %s AND status = 'processing' "
                 "AND claimed_at < NOW() - INTERVAL '10 minutes'",
                 (APPLY_QUEUE,),
