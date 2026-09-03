@@ -27,8 +27,13 @@ from cortex_utils.metrics import (
     QUEUE_PROCESSED,
     start_metrics_server,
 )
-from cortex_utils.queue import ensure_queue_schema
-from cortex_utils.queue.retry import fail_or_retry, ready_predicate
+from cortex_utils.queue import (
+    claim,
+    complete,
+    ensure_queue_schema,
+    fail_or_retry,
+    worker_identity,
+)
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
@@ -47,8 +52,6 @@ logger = get_logger(__name__)
 MAX_429_RETRIES = 3
 # Timeout should be longer than MAX_BACKOFF_SECONDS (60s) to avoid race condition
 ACQUIRE_TIMEOUT_SECONDS = 75.0
-
-MAX_ATTEMPTS = 3
 
 
 @dataclass
@@ -345,6 +348,9 @@ class LabelingWorker:
         self.running = True
         self._pool: SimpleConnectionPool | None = None
         self._managed_prefix: str | None = None  # Loaded on first use
+        # The claim token, one per process -- host-qualified so two hosts
+        # cannot collide. See TriageWorker for why it is not a pid alone.
+        self._claim_token = worker_identity("labeling-worker")
 
     def stop(self) -> None:
         """Signal the worker to stop."""
@@ -406,114 +412,62 @@ class LabelingWorker:
             self._get_pool().putconn(conn)
 
     def _claim_jobs(self, batch_size: int) -> list[LabelingJob]:
-        """Claim a batch of pending labeling jobs.
+        """Claim a batch of pending labeling jobs, through the library that owns
+        the queue's SQL.
 
-        Also resets stale jobs that have been processing for too long
-        (visibility timeout), handling crashed/killed workers.
+        The hand-written CTE set status and claimed_at but never claimed_by, so
+        this worker never wrote a claim token and everything built on it was
+        inert. claim() also carries the branches this one had -- the stale
+        reset, retiring stale rows out of attempts, and refusing to hand out a
+        pending row with none left.
+
+        The payload is read for gmail_id and the repair flag only. Target state
+        (labels, archive) is queried from classifications at processing time, so
+        a stale job is harmless.
         """
-        with self._get_conn() as conn, conn.cursor() as cur:
-            # Reset stale jobs and claim new ones in a single transaction
-            cur.execute(
-                f"""
-                WITH reset_stale AS (
-                    UPDATE queue
-                    SET status = 'pending', claimed_at = NULL, claimed_by = NULL
-                    WHERE queue_name = %s
-                      AND status = 'processing'
-                      AND claimed_at < NOW() - (INTERVAL '1 minute' * %s)
-                      AND attempts < %s
-                ),
-                expire_dead_letter AS (
-                    -- Mark stale jobs that exceeded max attempts as failed
-                    UPDATE queue
-                    SET status = 'failed',
-                        last_error = COALESCE(last_error, '') ||
-                            ' [max attempts exceeded]'
-                    WHERE queue_name = %s
-                      AND status = 'processing'
-                      AND claimed_at < NOW() - (INTERVAL '1 minute' * %s)
-                      AND attempts >= %s
-                ),
-                expire_pending_exhausted AS (
-                    -- Immediately fail pending jobs that hit max attempts
-                    UPDATE queue
-                    SET status = 'failed',
-                        last_error = COALESCE(last_error, '') ||
-                            ' [max attempts exceeded]'
-                    WHERE queue_name = %s
-                      AND status = 'pending'
-                      AND attempts >= %s
-                ),
-                claimable AS (
-                    SELECT id FROM queue
-                    WHERE queue_name = %s
-                      AND status = 'pending'
-                      AND attempts < %s
-                      AND {ready_predicate()}
-                    ORDER BY priority DESC, created_at
-                    LIMIT %s
-                    FOR UPDATE SKIP LOCKED
-                )
-                UPDATE queue
-                SET status = 'processing', claimed_at = NOW()
-                WHERE id IN (SELECT id FROM claimable)
-                RETURNING id, payload
-                """,
-                (
-                    self.queue_name,
-                    self.config.visibility_timeout_minutes,
-                    MAX_ATTEMPTS,
-                    self.queue_name,
-                    self.config.visibility_timeout_minutes,
-                    MAX_ATTEMPTS,
-                    self.queue_name,
-                    MAX_ATTEMPTS,
-                    self.queue_name,
-                    MAX_ATTEMPTS,
-                    batch_size,
-                ),
+        with self._get_conn() as conn:
+            rows = claim(
+                conn,
+                self.queue_name,
+                worker=self._claim_token,
+                limit=batch_size,
+                visibility_timeout_min=self.config.visibility_timeout_minutes,
             )
-            rows = cur.fetchall()
-            conn.commit()
-
-        jobs = []
-        for row in rows:
-            job_id, payload = row
-            # Only extract gmail_id and repair flag from payload.
-            # Target state (labels, archive, etc.) is queried from classifications
-            # table at processing time, making stale jobs harmless.
-            jobs.append(
-                LabelingJob(
-                    job_id=job_id,
-                    gmail_id=payload["gmail_id"],
-                    repair=payload.get("repair", False),
-                )
+        return [
+            LabelingJob(
+                job_id=row["id"],
+                gmail_id=row["payload"]["gmail_id"],
+                repair=row["payload"].get("repair", False),
             )
-        return jobs
+            for row in rows
+        ]
 
     def _complete_jobs(self, job_ids: list[int]) -> None:
-        """Mark jobs as completed."""
-        if not job_ids:
-            return
-        with self._get_conn() as conn, conn.cursor() as cur:
-            cur.execute(
-                """
-                UPDATE queue
-                SET status = 'completed', completed_at = NOW()
-                WHERE id = ANY(%s)
-                """,
-                (job_ids,),
-            )
-            conn.commit()
+        """Mark jobs as completed, each against the claim we still hold.
 
-    def _fail_jobs(self, job_ids: list[int], error: str) -> None:
-        """Schedule a retry with backoff per job, or mark failed if exhausted."""
+        Was one UPDATE over ANY(ids) matching on id alone, so a worker stalled
+        past the visibility timeout could retire rows another worker had since
+        claimed. complete() checks the token per job; one that bounces leaves
+        the others alone, which is what should happen -- losing one claim says
+        nothing about the rest of the batch.
+        """
         if not job_ids:
             return
         with self._get_conn() as conn:
             for job_id in job_ids:
-                fail_or_retry(conn, job_id, error, max_attempts=MAX_ATTEMPTS)
-                conn.commit()
+                complete(conn, job_id, self._claim_token)
+
+    def _fail_jobs(self, job_ids: list[int], error: str) -> None:
+        """Schedule a retry with backoff per job, or mark failed if exhausted.
+
+        ops.fail_or_retry rather than retry.fail_or_retry: it matches the claim
+        token, and reads max_attempts from the row.
+        """
+        if not job_ids:
+            return
+        with self._get_conn() as conn:
+            for job_id in job_ids:
+                fail_or_retry(conn, job_id, error, self._claim_token)
 
     def _get_current_cortex_labels(self, gmail_ids: list[str]) -> dict[str, list[str]]:
         """Get current managed labels for a batch of gmail_ids.
