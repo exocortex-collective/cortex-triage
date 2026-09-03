@@ -107,8 +107,6 @@ class Config:
     priority_convergence_interval: int = 300  # seconds between bulk priority updates
 
 
-# Maximum retry attempts before a job is considered dead letter
-
 # Pattern quality filter: confidence threshold for irregular patterns
 # Irregular patterns with confidence below this threshold are only created
 # if the merchant is known (not "unknown")
