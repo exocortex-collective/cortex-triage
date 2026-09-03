@@ -25,8 +25,13 @@ from cortex_utils.metrics import (
     QUEUE_PROCESSED,
     start_metrics_server,
 )
-from cortex_utils.queue import ensure_queue_schema
-from cortex_utils.queue.retry import fail_or_retry, ready_predicate
+from cortex_utils.queue import (
+    claim,
+    complete,
+    ensure_queue_schema,
+    fail_or_retry,
+    worker_identity,
+)
 from cortex_utils.triage_config import (
     ConfigLoadError,
     load_config_from_db,
@@ -101,9 +106,6 @@ class Config:
     enable_convergence: bool = True  # Enable/disable idle-time convergence
     priority_convergence_interval: int = 300  # seconds between bulk priority updates
 
-
-# Maximum retry attempts before a job is considered dead letter
-MAX_ATTEMPTS = 3
 
 # Pattern quality filter: confidence threshold for irregular patterns
 # Irregular patterns with confidence below this threshold are only created
@@ -350,6 +352,12 @@ class TriageWorker:
         self.running = True
         self._pool: SimpleConnectionPool | None = None
         self.worker_id = worker_id or f"triage-{os.getpid()}"
+        # Deliberately NOT worker_id. That one is caller-supplied and defaults
+        # to pid alone, so two hosts running this worker would collide -- and a
+        # claim token that two processes share stops discriminating, which is
+        # the one thing it has to do. This is host-qualified and built by the
+        # library, so every consumer's tokens have the same shape.
+        self._claim_token = worker_identity("triage-worker")
         self.last_signal_poll = time.time()
         self.last_cleanup = time.time()  # Track when we last cleaned up stale workers
         self.last_priority_convergence = 0.0  # Track last bulk priority update
@@ -859,82 +867,35 @@ class TriageWorker:
         logger.info("triage schema ensured (classifications + patterns + system_state)")
 
     def _claim_jobs(self, batch_size: int) -> list[dict[str, Any]]:
-        """Claim a batch of pending triage jobs.
+        """Claim a batch of pending triage jobs, through the library that owns
+        the queue's SQL.
 
-        Also resets stale jobs that have been processing for too long
-        (visibility timeout), handling crashed/killed workers.
+        This was a five-CTE hand-written statement. Everything it did, claim()
+        does -- the stale reset, retiring stale rows that had exhausted their
+        attempts, refusing to hand out a pending row with none left, and the
+        ready predicate. The one branch claim() was missing,
+        expire_pending_exhausted, was added to it rather than dropped here: a
+        pending row with no attempts left is refused by claimable and was then
+        never retired, so it sat pending forever, pinning its partition against
+        retention.
 
-        Jobs that have exceeded MAX_ATTEMPTS are left in 'failed' status
-        and not retried (dead letter).
+        What the hand-written version did NOT do is set claimed_by. So this
+        worker never wrote a claim token, and everything built on it was inert.
+
+        One semantic change worth naming: claim() judges a row against its own
+        max_attempts column rather than this module's MAX_ATTEMPTS constant, so
+        a job enqueued with its own budget now gets that budget honoured.
         """
         with self._get_conn() as conn:
-            with conn.cursor() as cur:
-                # Reset stale jobs (only if under max attempts) and claim new ones
-                cur.execute(
-                    f"""
-                    WITH reset_stale AS (
-                        UPDATE queue
-                        SET status = 'pending', claimed_at = NULL, claimed_by = NULL
-                        WHERE queue_name = %s
-                          AND status = 'processing'
-                          AND claimed_at < NOW() - (INTERVAL '1 minute' * %s)
-                          AND attempts < %s
-                    ),
-                    expire_dead_letter AS (
-                        -- Mark stale jobs that exceeded max attempts as failed
-                        UPDATE queue
-                        SET status = 'failed',
-                            last_error = COALESCE(last_error, '') ||
-                                ' [max attempts exceeded]'
-                        WHERE queue_name = %s
-                          AND status = 'processing'
-                          AND claimed_at < NOW() - (INTERVAL '1 minute' * %s)
-                          AND attempts >= %s
-                    ),
-                    expire_pending_exhausted AS (
-                        -- Immediately fail pending jobs that hit max attempts
-                        UPDATE queue
-                        SET status = 'failed',
-                            last_error = COALESCE(last_error, '') ||
-                                ' [max attempts exceeded]'
-                        WHERE queue_name = %s
-                          AND status = 'pending'
-                          AND attempts >= %s
-                    ),
-                    claimable AS (
-                        SELECT id FROM queue
-                        WHERE queue_name = %s
-                          AND status = 'pending'
-                          AND attempts < %s
-                          AND {ready_predicate()}
-                        ORDER BY priority DESC, created_at
-                        LIMIT %s
-                        FOR UPDATE SKIP LOCKED
-                    )
-                    UPDATE queue
-                    SET status = 'processing', claimed_at = NOW()
-                    WHERE id IN (SELECT id FROM claimable)
-                    RETURNING id, payload, priority
-                    """,
-                    (
-                        self.queue_name,
-                        self.config.visibility_timeout_minutes,
-                        MAX_ATTEMPTS,
-                        self.queue_name,
-                        self.config.visibility_timeout_minutes,
-                        MAX_ATTEMPTS,
-                        self.queue_name,
-                        MAX_ATTEMPTS,  # expire_pending_exhausted
-                        self.queue_name,
-                        MAX_ATTEMPTS,  # claimable
-                        batch_size,
-                    ),
-                )
-                jobs = [
-                    {"id": row[0], "payload": row[1], "priority": row[2]}
-                    for row in cur.fetchall()
-                ]
-                conn.commit()
+            # Annotated because cortex_utils ships no py.typed marker, so mypy
+            # sees everything it returns as Any.
+            jobs: list[dict[str, Any]] = claim(
+                conn,
+                self.queue_name,
+                worker=self._claim_token,
+                limit=batch_size,
+                visibility_timeout_min=self.config.visibility_timeout_minutes,
+            )
             return jobs
 
     def _detect_or_create_pattern(
@@ -1298,23 +1259,26 @@ class TriageWorker:
             conn.commit()
 
     def _complete_job(self, job_id: int) -> None:
-        """Mark job as completed."""
-        with self._get_conn() as conn, conn.cursor() as cur:
-            cur.execute(
-                """
-                    UPDATE queue
-                    SET status = 'completed', completed_at = NOW()
-                    WHERE id = %s
-                """,
-                (job_id,),
-            )
-            conn.commit()
+        """Mark job as completed, against the claim we still hold.
+
+        The raw UPDATE this replaces matched on id alone, so a worker stalled
+        past the visibility timeout could retire a row another worker had since
+        claimed. complete() requires status='processing' and a matching
+        claimed_by, and returns False rather than raising when the claim is
+        gone -- the library logs the bounce.
+        """
+        with self._get_conn() as conn:
+            complete(conn, job_id, self._claim_token)
 
     def _fail_job(self, job_id: int, error: str) -> None:
-        """Schedule a retry with backoff, or mark failed if attempts exhausted."""
+        """Schedule a retry with backoff, or mark failed if attempts exhausted.
+
+        ops.fail_or_retry rather than retry.fail_or_retry: it matches the claim
+        token, and reads max_attempts from the row rather than taking it as an
+        argument -- so a job enqueued with its own budget gets that budget.
+        """
         with self._get_conn() as conn:
-            fail_or_retry(conn, job_id, error, max_attempts=MAX_ATTEMPTS)
-            conn.commit()
+            fail_or_retry(conn, job_id, error, self._claim_token)
 
     def process_job(self, job: dict[str, Any]) -> bool:
         """Process a single triage job. Returns True on success."""

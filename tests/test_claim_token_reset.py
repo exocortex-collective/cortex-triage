@@ -27,7 +27,14 @@ SRC = Path(__file__).parent.parent / "src" / "triage" / "services"
 # WHERE so a later clause mentioning claimed_by cannot satisfy the assertion.
 TO_PENDING = re.compile(r"UPDATE queue\s+SET status = 'pending'.*?(?=WHERE)", re.S)
 
-EXPECTED = {"worker.py": 1, "labeling_worker.py": 2, "teach_bot.py": 1}
+# A file drops to 0 when it is ported to ops.claim(): the library then owns the
+# stale reset, and cortex-utils tests the invariant at its source. A count going
+# DOWN is the port landing; a count going UP needs the guard.
+# labeling_worker keeps 1: the repair re-enqueue mutates the payload as it
+# re-pends, which no library call does, so it stays hand-written and stays
+# guarded here. teach_bot keeps 1 for its own stale reset -- its claim lives in
+# cortex_utils.learning.apply and is tracked as cortex-xluv.
+EXPECTED = {"worker.py": 0, "labeling_worker.py": 1, "teach_bot.py": 1}
 
 
 @pytest.mark.parametrize("name,count", sorted(EXPECTED.items()))
