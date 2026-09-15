@@ -34,19 +34,75 @@ triage/
 
 ## Configuration
 
-**IMPORTANT**: `config/rules.yaml` is gitignored and NOT checked into this repo. It contains personal email addresses and filtering rules.
+**The worker loads config from Postgres, not from disk.** `RULES_PATH`,
+`config/rules.yaml` and the `~/HomeLab/cortex/triage/rules.yaml` mount are all
+dead — nothing reads them. `load_config_from_db()` (cortex-utils) reads the row
+in `triage_config_versions` where `is_active = TRUE` and rebuilds the chains
+from `triage_chains` / `triage_rules`.
 
-- **Example config**: `config/rules.example.yaml` shows the structure with generic examples
-- **Personal config**: Stored at `~/HomeLab/cortex/triage/rules.yaml` and mounted into containers at runtime
-- For local development, copy `rules.example.yaml` to `config/rules.yaml` and customize
+- **Chains and rules** are edited by round-tripping YAML through the Gateway
+  `/config` API. There is no CRUD API for rules; the YAML is the interface.
+- **Priority / fallback email mappings** live in `triage_email_mappings`, are
+  NOT config-versioned, and are edited through the Gateway `/mappings` CRUD API.
+  Do not manage them through the `/config` YAML — the importer is upsert-only,
+  so deletions there are silently ignored (cortex-ac56).
+- `config/rules.example.yaml` is still useful as a schema reference.
+
+Full workflow, hazards, and the convergence/backfill behaviour:
+`~/Projects/cortex/CLAUDE.md` → "Triage Config Management".
 
 ## Architecture
 
-Firewall-style rules engine:
-- Rules evaluated in order (first match wins)
-- Chains for sub-evaluation (like iptables -j CHAIN)
-- Actions: label, archive, workflow dispatch, webhook
-- LLM fallback for fuzzy matching
+Firewall-style rules engine, but **parallel**, not single-pass:
+
+- Every chain with `auto_run: true` is evaluated independently against every
+  email (`evaluate_parallel` in `src/triage/engine/matcher.py`). `main` defaults
+  to `auto_run: true`; every other chain defaults to `false` and is reachable
+  only via `jump`.
+- Within one chain, rules are evaluated in order and the first match wins.
+- The per-chain results are merged with CRDT semantics
+  (`src/triage/engine/merge.py`) — see "Writing rules for parallel chains" below.
+- Priority email mappings participate in the merge as a virtual chain. Fallback
+  mappings, then `default_label`, fire only if nothing produced a label.
+- LLM intent/classification for fuzzy matching, configured per-rule.
+
+`evaluate()` (the old serial, first-match-wins, priority-short-circuits path)
+still exists in `matcher.py` but **the worker does not call it**. Don't reason
+about production behaviour from it.
+
+### Writing rules for parallel chains
+
+Because every `auto_run` chain gets a vote, an action set by one chain can be
+cancelled by another:
+
+| Field | Merge rule |
+|-------|-----------|
+| `label`, `add_label`, `remove_label` | **Union.** Purely additive — an email can end up with labels from several chains. |
+| `archive`, `mark_read` | **Conservative — `all()` of the chains that have an opinion.** One dissenting chain suppresses it. |
+| `star`, `important` | **Aggressive — `any()`.** One chain asserting it wins. |
+| `force_archive`, `force_mark_read`, `force_no_star`, `force_no_important` | **Vetoes.** Applied last, override the merged value unconditionally. |
+
+A chain expresses "no opinion" by leaving the field unset (`None`), which is why
+`exclude_none` matters and why `false` is *not* the same as omitted.
+
+**Rule of thumb: an additive "scan" chain must set only `add_label` and say
+nothing about `archive` / `mark_read`.** Setting `archive: false` in a scan chain
+is not a no-op — it is a vote, and it will stop another chain from archiving the
+email. Use `force_archive` only when you genuinely mean to override every other
+chain.
+
+### Convergence (automatic backfill on rule change)
+
+`classifications.config_version_id` tracks which config version labelled each
+email. When the triage queue is idle the worker picks the **newest** email
+behind the active version and re-triages it in-process, one per poll, walking
+backwards through history (`_converge_priority_and_get_next_email`). Emails from
+priority-mapped senders are bulk-updated in place every 5 minutes instead.
+
+So **publishing a new config version silently re-labels historical mail.** No
+manual re-enqueue is needed after a rules change. Disable with
+`ENABLE_CONVERGENCE=false`; check progress with
+`GET /triage/convergence/status` on the gateway.
 
 ## Postgres Access
 
@@ -91,8 +147,10 @@ DUCKDB_API_URL=http://<duckdb-api-host>:8081
 # Gmail API (for labels)
 GMAIL_TOKEN_PATH=/app/secrets/gmail-token.json
 
-# Rules
-RULES_PATH=/app/config/rules.yaml
+# Convergence (idle-time re-triage of emails on an older config version)
+ENABLE_CONVERGENCE=true   # default
+
+# NOTE: there is no RULES_PATH. Config comes from Postgres.
 ```
 
 ## Development
@@ -125,13 +183,9 @@ This applies to all changes, no matter how small.
 
 ### Rules Sync
 
-**IMPORTANT**: Before deploying, always sync the rules file from HomeLab to Hades:
-
-```bash
-scp ~/HomeLab/cortex/triage/rules.yaml devon@10.5.2.21:/home/devon/cortex-config/rules.yaml
-```
-
-This ensures the latest rules are deployed. The rules file is edited locally in HomeLab and mounted into the container at runtime.
+**Not a thing any more.** Rules live in Postgres and survive redeploys; there is
+no file to scp and no volume to mount. Change rules with `PUT /config` on the
+gateway (see `~/Projects/cortex/CLAUDE.md` → "Triage Config Management").
 
 ## GitHub Integrations
 
