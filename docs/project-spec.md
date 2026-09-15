@@ -65,8 +65,18 @@ what the worker calls.
 ```
 
 `main` defaults to `auto_run: true`. Every other chain defaults to `false` and
-is reachable only via `jump`. As of config v10 the active config has 13 chains,
-of which only `main` is `auto_run`.
+is reachable only via `jump`.
+
+More than one chain can be `auto_run`, and that is the point of the design
+rather than a hypothetical: their results merge, they do not race. To see
+which chains are `auto_run` in the live config, ask it rather than trusting a
+number written here:
+
+```bash
+curl -s "$CORTEX_GATEWAY/config" \
+  | python3 -c 'import sys,yaml; d=yaml.safe_load(sys.stdin); \
+      print([n for n,c in d["chains"].items() if c.get("auto_run")])'
+```
 
 > `evaluate()` in the same module is the legacy serial path (first match wins
 > globally, priority mappings short-circuit). It is **not** used by the worker.
