@@ -73,7 +73,7 @@ which chains are `auto_run` in the live config, ask it rather than trusting a
 number written here:
 
 ```bash
-curl -s "$CORTEX_GATEWAY/config" \
+curl -s -H "Authorization: Bearer $CORTEX_API_TOKEN" "$CORTEX_GATEWAY/config" \
   | python3 -c 'import sys,yaml; d=yaml.safe_load(sys.stdin); \
       print([n for n,c in d["chains"].items() if c.get("auto_run")])'
 ```
