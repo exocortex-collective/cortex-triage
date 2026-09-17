@@ -63,27 +63,26 @@ def _executed_ddl() -> str:
 
     mod = importlib.import_module("triage.services.worker")
     cfg = MagicMock()
-    # suppress() is inert against the current single-execute implementation,
-    # but if the DDL is ever split across statements it would let this return
-    # whatever was emitted BEFORE a failure and assert happily on the prefix.
-    # Keep swallowing (the mock cannot satisfy every driver call) and record
-    # what was swallowed, so the vacuity guard can say why it is short.
-    swallowed: list[BaseException] = []
+    # Deliberately NOT wrapped in try/except, and recording the exception was
+    # not enough either. An exception part-way through truncates the capture,
+    # and the vacuity guard cannot see that: the guard is anchored on the
+    # mappings CREATE TABLE, which this function emits BEFORE most of its DDL.
+    # Measured -- routing DDL through psycopg2.extras.execute_batch or
+    # execute_values raises on the mock and truncates to the SAME 57
+    # statements a clean run produces, so the capture looks complete from the
+    # outside and all three tests pass. If the mock ever stops satisfying a
+    # call, that is information. Let it raise.
     with patch.object(mod.psycopg2, "connect", return_value=conn):
-        try:
-            mod.ensure_config_schema(cfg)
-        except Exception as exc:  # noqa: BLE001 -- see above
-            swallowed.append(exc)
-    _LAST_SWALLOWED[:] = swallowed
+        mod.ensure_config_schema(cfg)
     # ";" is what _guard splits on, so it must be what separates captured
-    # statements. Joining on "\n" alone let an unterminated statement run
-    # into the next one and borrow its WHERE -- mutation-verified: an
-    # ALTER ... ADD CONSTRAINT with no trailing ";" passed.
+    # statements. Inert against today's source, which issues a single
+    # execute() -- with one statement the join character never applies. It
+    # becomes load-bearing the moment there is more than one, which the
+    # capture above now supports: under a two-cursor injection, an
+    # ALTER ... ADD CONSTRAINT with no trailing ";" merged into the next
+    # statement and borrowed its WHERE. Measured both ways against that
+    # injection -- "\n" passed the defect, ";" caught it.
     return ";\n".join(statements)
-
-
-# Populated by _executed_ddl(); read only by the vacuity guard's message.
-_LAST_SWALLOWED: list[BaseException] = []
 
 
 def _without_comments(sql: str) -> str:
@@ -114,7 +113,6 @@ def ddl() -> str:
     assert "CREATE TABLE IF NOT EXISTS triage_email_mappings (" in sql, (
         "the mappings DDL was not executed at all -- this test is not looking "
         "at what it thinks it is"
-        + (f" (swallowed: {_LAST_SWALLOWED[0]!r})" if _LAST_SWALLOWED else "")
     )
     return sql
 
@@ -152,9 +150,12 @@ def _key_columns(text: str) -> frozenset[str] | None:
                 break
     else:
         return None  # unbalanced -- not a column list we can judge
-    return frozenset(
-        c.strip().strip('"').lower() for c in inner.split(",") if c.strip()
-    )
+
+    def name(element: str) -> str:
+        """The column name alone, without COLLATE / opclass / DESC / NULLS."""
+        return element.split()[0].strip('"').lower()
+
+    return frozenset(name(c) for c in inner.split(",") if c.strip())
 
 
 def _guard(ddl: str, at: int, what: str) -> None:
@@ -173,10 +174,13 @@ def _guard(ddl: str, at: int, what: str) -> None:
       that merely QUOTES this shape would truncate the window and fail on
       benign SQL. That direction is safe (loud, not silent) but it is a real
       limit, not the absence of one.
-    * It relies on _executed_ddl() joining captured statements with `;`. Left
-      to `\n` alone, a statement with no trailing semicolon merged into the
-      next and borrowed its WHERE -- an unterminated ALTER ... ADD CONSTRAINT
-      passed. Keep those two in step.
+    * It relies on _executed_ddl() joining captured statements with `;`.
+      Inert while that function issues a single statement, as it does today;
+      once there is more than one, a statement with no trailing semicolon
+      merges into the next and borrows its WHERE -- measured under a
+      two-cursor injection, where an unterminated ALTER ... ADD CONSTRAINT
+      passed on a `\n` join and was caught on a `;` join. Keep the two in
+      step.
     """
     statement = ddl[at:].split(";", 1)[0]
     assert re.search(r"WHERE\s+deleted_at\s+IS\s+NULL", statement, re.I), (
@@ -221,17 +225,25 @@ def test_no_unconditional_unique_index_on_the_mapping_columns(ddl: str) -> None:
       for this reason
     * UPPERCASE or "quoted" column names, which fold to the same identifiers
     * CONCURRENTLY, and an explicit `USING btree`
+    * a per-column COLLATE, opclass, DESC/ASC or NULLS FIRST/LAST -- these
+      sit inside the key list and used to make the column set stop matching,
+      so the guard never ran. COLLATE "C" is the realistic one: the sibling
+      incident here was glibc collation corrupting these exact text btrees
+      (cortex-rj2b), so pinning a collation on them is a plausible fix that
+      would quietly restore the defect.
+    * no index name at all (Postgres auto-names it), and a schema-qualified
+      table (public.triage_email_mappings)
     """
     for m in re.finditer(
         r"CREATE\s+UNIQUE\s+INDEX"
         r"(?:\s+CONCURRENTLY)?(?:\s+IF\s+NOT\s+EXISTS)?"
-        r'\s+"?(\w+)"?\s+ON\s+"?triage_email_mappings"?'
+        r'(?:\s+"?(\w+)"?)?\s+ON\s+(?:"?\w+"?\.)?"?triage_email_mappings"?'
         r"(?:\s+USING\s+\w+)?\s*(?=\()",
         ddl,
         re.I,
     ):
         if _key_columns(ddl[m.end() :]) == _PAIR:
-            _guard(ddl, m.start(), f"unique index {m.group(1)!r}")
+            _guard(ddl, m.start(), f"unique index {m.group(1) or '<unnamed>'!r}")
 
 
 def test_the_partial_unique_index_is_still_created(ddl: str) -> None:
