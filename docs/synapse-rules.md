@@ -704,11 +704,19 @@ active config from Postgres (`triage_config_versions` / `triage_chains` /
 
 This YAML is the wire format of the Gateway `/config` API:
 
+The gateway's external port has required a bearer token since 2026-09-15
+(`CORTEX_API_TOKEN`; only `/health`, `/metrics` and `/oauth/callback` are
+exempt -- `/metrics` because Prometheus scrapes it), so
+these 401 without the header. Peer services calling the internal port do not
+need it.
+
 ```bash
-curl -s http://<gateway>/config > /tmp/rules.yaml          # export active
-curl -s -X POST http://<gateway>/config/validate \
+AUTH="Authorization: Bearer $CORTEX_API_TOKEN"
+
+curl -s -H "$AUTH" http://<gateway>/config > /tmp/rules.yaml   # export active
+curl -s -X POST http://<gateway>/config/validate -H "$AUTH" \
   -H 'Content-Type: text/plain' --data-binary @/tmp/rules.yaml
-curl -s -X PUT http://<gateway>/config \
+curl -s -X PUT http://<gateway>/config -H "$AUTH" \
   -H 'Content-Type: text/plain' -H 'X-Created-By: you@context' \
   -H 'X-Notes: what changed' --data-binary @/tmp/rules.yaml
 ```
