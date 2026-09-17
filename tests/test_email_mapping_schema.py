@@ -145,7 +145,7 @@ def test_no_unconditional_unique_under_a_reordered_or_renamed_form(ddl: str) -> 
     # CREATE UNIQUE INDEX some_other_name on the same two columns slipped
     # through. Closing that is cheaper than softening the claim.
     for m in re.finditer(
-        r"CREATE\s+UNIQUE\s+INDEX(?:\s+IF\s+NOT\s+EXISTS)?\s+(\w+)\s+"
+        r"CREATE\s+UNIQUE\s+INDEX(?:\s+CONCURRENTLY)?(?:\s+IF\s+NOT\s+EXISTS)?\s+(\w+)\s+"
         r"ON\s+triage_email_mappings\s*\(",
         ddl,
         re.I,
