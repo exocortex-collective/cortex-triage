@@ -67,7 +67,14 @@ def _without_comments(sql: str) -> str:
     any executable SQL -- and reports the fix itself as the bug. Exactly the
     trap cortex-utils' arbiter test calls out.
     """
-    return "\n".join(re.sub(r"--.*$", "", line) for line in sql.splitlines())
+    # WHOLE-LINE comments only. `--.*$` ignores quoting, so a line like
+    #     note TEXT DEFAULT 'a -- b', CONSTRAINT unique_email_mapping ...
+    # would have the constraint stripped along with the comment and pass.
+    # Every comment in this DDL is full-line, so nothing is lost, and a
+    # violation sharing a line with a trailing comment stays visible.
+    return "\n".join(
+        "" if line.lstrip().startswith("--") else line for line in sql.splitlines()
+    )
 
 
 @pytest.fixture(scope="module")
@@ -106,6 +113,56 @@ def test_no_unconditional_unique_on_the_mapping_columns(ddl: str) -> None:
         assert re.search(
             r"WHERE\s+deleted_at\s+IS\s+NULL", window, re.I
         ), f"unconditional UNIQUE on (mapping_type, email_address): {window[:120]!r}"
+
+
+def test_no_unconditional_unique_under_a_reordered_or_renamed_form(ddl: str) -> None:
+    """Two shapes of the same defect the first test does not see.
+
+    * REVERSED COLUMNS. Postgres infers an arbiter by the SET of key columns,
+      so UNIQUE (email_address, mapping_type) shadows the partial index just as
+      effectively. postmark migration 004 sorts by name for exactly this
+      reason, and its assertions were fixed for it in review.
+    * A BARE UNIQUE INDEX reusing the name. There is no CONSTRAINT keyword, so
+      `"CONSTRAINT unique_email_mapping" not in ddl` does not see it. Migration
+      004 drops that form explicitly, which is the evidence it occurs.
+
+    Both were mutation-verified as passing before this test existed.
+    """
+    both_orders = (
+        r"UNIQUE\s*\(\s*(?:mapping_type\s*,\s*email_address"
+        r"|email_address\s*,\s*mapping_type)\s*\)"
+    )
+    for m in re.finditer(both_orders, ddl, re.I):
+        statement = ddl[m.start() :].split(";", 1)[0]
+        assert re.search(r"WHERE\s+deleted_at\s+IS\s+NULL", statement, re.I), (
+            "unconditional unique over those two columns, in either order, "
+            f"shadows idx_email_mappings_active: {' '.join(statement.split())[:110]!r}"
+        )
+
+    # Any unconditional unique INDEX on those columns, under ANY name -- not
+    # just one reusing unique_email_mapping. Review noted the docstring
+    # claimed "whatever it is called" while the check was name-pinned, so a
+    # CREATE UNIQUE INDEX some_other_name on the same two columns slipped
+    # through. Closing that is cheaper than softening the claim.
+    for m in re.finditer(
+        r"CREATE\s+UNIQUE\s+INDEX(?:\s+IF\s+NOT\s+EXISTS)?\s+(\w+)\s+"
+        r"ON\s+triage_email_mappings\s*\(",
+        ddl,
+        re.I,
+    ):
+        statement = ddl[m.start() :].split(";", 1)[0]
+        cols = statement[statement.index("(") :]
+        on_the_pair = re.match(
+            r"\(\s*(?:mapping_type\s*,\s*email_address"
+            r"|email_address\s*,\s*mapping_type)\s*\)",
+            cols,
+        )
+        if not on_the_pair:
+            continue
+        assert re.search(r"WHERE\s+deleted_at\s+IS\s+NULL", statement, re.I), (
+            f"unconditional unique index {m.group(1)!r} on those two columns "
+            "shadows idx_email_mappings_active just as a constraint would"
+        )
 
 
 def test_the_partial_unique_index_is_still_created(ddl: str) -> None:
