@@ -167,9 +167,14 @@ def test_without_comments_strips_whole_lines_only() -> None:
     wrong for it. With stripping disabled, worker.py:1839
     (`-- NO unconditional UNIQUE (mapping_type, email_address).`) MATCHES the
     UNIQUE walk, and worker.py:1844 (`--   WHERE deleted_at IS NULL`) then
-    SUPPLIES the predicate that satisfies _guard. The prose explaining the fix
-    both triggers the check and rescues it, so the suite stays green for two
-    compounding reasons rather than one.
+    SUPPLIES the predicate that satisfies _guard -- so the prose explaining the
+    fix both triggers the check and rescues it.
+
+    The RESCUE is the load-bearing half, though, and an earlier version of this
+    docstring got the tally wrong by calling them two compounding reasons for
+    the green. Measured: defang 1844 and the mutant dies; defang 1839 and it
+    still passes, because then there is no match to guard at all. One cause,
+    not two.
     """
     banned = "CONSTRAINT unique_email_mapping UNIQUE (mapping_type, email_address)"
 
@@ -333,6 +338,60 @@ def _guard(ddl: str, at: int, what: str) -> None:
     )
 
 
+# Hoisted so a test can read it. Round 6: while it was an inline literal,
+# nothing asserted WHICH statements the walk selects -- only what happens to
+# the ones it picks. Replacing the whole pattern with one that never matches
+# left all 363 tests passing, and so did re-tightening the index-name group,
+# which would have silently reverted a fix made in this very PR (cortex-migc
+# item 2). The verdict half (_guard) and the normaliser half (_key_columns)
+# were asserted in rounds 5 and 4; this is the selector half.
+_INDEX_SELECTOR = re.compile(
+    r"CREATE\s+UNIQUE\s+INDEX"
+    r"(?:\s+CONCURRENTLY)?(?:\s+IF\s+NOT\s+EXISTS)?"
+    r'(?:\s+"?(\w+)"?)?\s+ON\s+(?:"?\w+"?\.)?"?triage_email_mappings"?'
+    r"(?:\s+USING\s+\w+)?\s*(?=\()",
+    re.I,
+)
+
+# Shapes the selector must select (M1 is the base case; the rest are the
+# tolerances it claims), plus near-misses it must reject.
+_SELECTOR_MUST_MATCH = [
+    "CREATE UNIQUE INDEX i ON triage_email_mappings(a, b)",
+    "CREATE UNIQUE INDEX IF NOT EXISTS i ON triage_email_mappings(a, b)",
+    "CREATE UNIQUE INDEX CONCURRENTLY i ON triage_email_mappings(a, b)",
+    "CREATE UNIQUE INDEX ON triage_email_mappings(a, b)",
+    'CREATE UNIQUE INDEX "i" ON "triage_email_mappings"(a, b)',
+    "CREATE UNIQUE INDEX i ON public.triage_email_mappings(a, b)",
+    "CREATE UNIQUE INDEX i ON triage_email_mappings USING btree (a, b)",
+    "create unique index i on triage_email_mappings (a, b)",
+]
+_SELECTOR_MUST_NOT_MATCH = [
+    "CREATE INDEX i ON triage_email_mappings(a, b)",
+    "CREATE UNIQUE INDEX i ON triage_email_mappings_history(a, b)",
+    "CREATE UNIQUE INDEX i ON other_table(a, b)",
+]
+
+
+@pytest.mark.parametrize("stmt", _SELECTOR_MUST_MATCH)
+def test_index_selector_matches_every_shape_it_claims(stmt: str) -> None:
+    m = _INDEX_SELECTOR.search(stmt)
+    assert m, f"selector missed a shape it claims: {stmt!r}"
+    # WHERE the match ends is half the contract, and the half the rest of the
+    # code depends on: the walk does _key_columns(ddl[m.end():]), which
+    # hard-requires a "(" at that offset. Turning the trailing lookahead into a
+    # consuming group left all 374 tests passing while every _key_columns()
+    # returned None and _guard never ran -- the guard silently vacuous.
+    assert stmt[m.end() :].startswith("("), (
+        f"match must end immediately before the key list, not at "
+        f"{stmt[m.end() : m.end() + 12]!r}"
+    )
+
+
+@pytest.mark.parametrize("stmt", _SELECTOR_MUST_NOT_MATCH)
+def test_index_selector_rejects_near_misses(stmt: str) -> None:
+    assert not _INDEX_SELECTOR.search(stmt), f"selector over-matched: {stmt!r}"
+
+
 def test_no_unconditional_unique_constraint_on_the_mapping_columns(
     ddl: str,
 ) -> None:
@@ -378,14 +437,7 @@ def test_no_unconditional_unique_index_on_the_mapping_columns(ddl: str) -> None:
     * no index name at all (Postgres auto-names it), and a schema-qualified
       table (public.triage_email_mappings)
     """
-    for m in re.finditer(
-        r"CREATE\s+UNIQUE\s+INDEX"
-        r"(?:\s+CONCURRENTLY)?(?:\s+IF\s+NOT\s+EXISTS)?"
-        r'(?:\s+"?(\w+)"?)?\s+ON\s+(?:"?\w+"?\.)?"?triage_email_mappings"?'
-        r"(?:\s+USING\s+\w+)?\s*(?=\()",
-        ddl,
-        re.I,
-    ):
+    for m in _INDEX_SELECTOR.finditer(ddl):
         if _key_columns(ddl[m.end() :]) == _PAIR:
             _guard(ddl, m.start(), f"unique index {m.group(1) or '<unnamed>'!r}")
 

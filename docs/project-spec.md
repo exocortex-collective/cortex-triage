@@ -95,8 +95,14 @@ Each `auto_run` chain contributes an opinion. Merging (`merge.py`):
 | `force_archive`, `force_mark_read` | Veto — forces `true` regardless of the merge. |
 | `force_no_star`, `force_no_important` | Veto — forces `false` regardless of the merge. |
 
-A chain has "no opinion" on a flag when the field is absent (`None`). `false` is
-an opinion, not an absence.
+A chain has "no opinion" on a flag when the field is absent (`None`). For the
+four OPINION flags -- `archive`, `mark_read`, `star`, `important` -- `false` is
+an opinion, not an absence (`merge.py:76-83` gates each on `is not None`).
+
+The four **vetoes** in the table above are the exception: `force_archive`,
+`force_mark_read`, `force_no_star` and `force_no_important` are gated on plain
+truthiness (`merge.py:86-93`), so for those `false` and absent are the same
+thing -- and neither is emitted in the merged `Action`.
 
 **Consequences worth internalising before writing rules:**
 
