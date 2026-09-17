@@ -82,8 +82,15 @@ cancelled by another:
 | `star`, `important` | **Aggressive — `any()`.** One chain asserting it wins. |
 | `force_archive`, `force_mark_read`, `force_no_star`, `force_no_important` | **Vetoes.** Applied last, override the merged value unconditionally. |
 
-A chain expresses "no opinion" by leaving the field unset (`None`), which is why
-`exclude_none` matters and why `false` is *not* the same as omitted.
+A chain expresses "no opinion" by leaving the field unset (`None`), and `false`
+is *not* the same as omitted -- `merge_actions` gates every flag on
+`if action.<flag> is not None` (`src/triage/engine/merge.py:75-82`), so `false`
+is a vote and `None` is an abstention.
+
+(The stored YAML does not yet preserve that distinction well: the importer
+calls `model_dump()` without `exclude_none`, which is why `GET /config` is ~88%
+`: null`. That is **cortex-1oy2**, still open -- `exclude_none` appears nowhere
+in the code today, so don't go looking for it.)
 
 **Rule of thumb: an additive "scan" chain must set only `add_label` and say
 nothing about `archive` / `mark_read`.** Setting `archive: false` in a scan chain
