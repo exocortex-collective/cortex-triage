@@ -24,6 +24,15 @@
 
 ## test-coverage-reviewer
 
+verification: mutation
+<!-- evidence: PR #80: r3 13-path execute-injection found the swallow; r4 _key_columns->None; r5 _guard->return and _without_comments->identity; r6 selector never-match; r7 fixture drops stripping. Every finding a surviving mutant. -->
+
+**Carry the proof in the finding.** An undemonstrated finding is a hypothesis;
+report it as one or not at all. A behavioural claim -- anything of the form
+"this does X" -- is checkable and must be checked before you post it. A design
+objection is a JUDGEMENT: state it as one rather than dressing it as behaviour.
+Say which you are doing in the finding itself.
+
 Review code changes to **ensure the code touched by the PR has test coverage**. The goal is to incrementally grow the test suite — every PR either adds coverage or preserves it.
 
 **Core rule: Code touched by a PR must be covered by tests. Either the coverage already exists, or this PR adds it.**
@@ -165,6 +174,12 @@ Beyond coverage existence, the reviewer also flags tests whose behavior is broke
 ---
 
 ## error-handling-reviewer
+
+**Carry the proof in the finding.** An undemonstrated finding is a hypothesis;
+report it as one or not at all. A behavioural claim -- anything of the form
+"this does X" -- is checkable and must be checked before you post it. A design
+objection is a JUDGEMENT: state it as one rather than dressing it as behaviour.
+Say which you are doing in the finding itself.
 
 Review Python code for **error handling correctness**. The focus is on errors that vanish: exceptions caught and discarded, exceptions converted to defaults without logging, exception context stripped by missing `raise from`. Silent error handling makes failures impossible to investigate after the fact — the original traceback is the most valuable debugging signal you have, and discarding it deletes the investigation trail.
 
@@ -360,6 +375,12 @@ This reviewer enforces universal Python error-handling hygiene. It does **not** 
 
 ## logging-reviewer
 
+**Carry the proof in the finding.** An undemonstrated finding is a hypothesis;
+report it as one or not at all. A behavioural claim -- anything of the form
+"this does X" -- is checkable and must be checked before you post it. A design
+objection is a JUDGEMENT: state it as one rather than dressing it as behaviour.
+Say which you are doing in the finding itself.
+
 Review Python code for **logging discipline**. Logging is observability infrastructure: it determines what operators see in production when things go wrong, and it's also a security boundary (logs are often shipped off-host and indexed by tools that don't redact secrets). The reviewer covers two contexts with different rules:
 
 - **Libraries and services** — long-running code that ships logs to operators.
@@ -546,6 +567,12 @@ CLI tools follow Unix's rule of silence: *when a program has nothing surprising 
 
 ## complexity-reviewer
 
+**Carry the proof in the finding.** An undemonstrated finding is a hypothesis;
+report it as one or not at all. A behavioural claim -- anything of the form
+"this does X" -- is checkable and must be checked before you post it. A design
+objection is a JUDGEMENT: state it as one rather than dressing it as behaviour.
+Say which you are doing in the finding itself.
+
 Review **production code only** for function complexity. **Skip all files in `tests/`** — test files often have long fixtures, parametrize tables, and assertion blocks that don't need the same complexity constraints.
 
 **Objective floor: `ruff check --select C901 --max-complexity 10 .` must pass on every PR.** McCabe cyclomatic complexity above 10 in a single function is a hard signal, independent of the subjective heuristics below. The agent should run `ruff check --select C901` (or accept CI's output) and flag every function that exceeds the threshold.
@@ -643,6 +670,12 @@ Apply these heuristics on top of the ruff floor:
 ---
 
 ## concurrency-reviewer
+
+**Carry the proof in the finding.** An undemonstrated finding is a hypothesis;
+report it as one or not at all. A behavioural claim -- anything of the form
+"this does X" -- is checkable and must be checked before you post it. A design
+objection is a JUDGEMENT: state it as one rather than dressing it as behaviour.
+Say which you are doing in the finding itself.
 
 Review Python code for **concurrency correctness**: threads, processes, asyncio, and shared state. Python's concurrency model is messy (GIL, threading-vs-multiprocessing trade-offs, async/await coloring), and the dominant failure mode is silent data corruption from shared mutable state.
 
@@ -858,6 +891,12 @@ Each tolerated use must have a comment explaining *why* it's not a queue or proc
 
 ## resource-leak-reviewer
 
+**Carry the proof in the finding.** An undemonstrated finding is a hypothesis;
+report it as one or not at all. A behavioural claim -- anything of the form
+"this does X" -- is checkable and must be checked before you post it. A design
+objection is a JUDGEMENT: state it as one rather than dressing it as behaviour.
+Say which you are doing in the finding itself.
+
 Review Python code for **resource leaks** in long-running processes (daemons, servers, workers, CLI tools that process large batches). Python's GC is forgiving but not magic — file handles, sockets, database connections, and processes can pile up faster than GC frees them, especially in async code where the same coroutine reopens resources in a loop.
 
 **Patterns to FLAG:**
@@ -1019,6 +1058,12 @@ Review Python code for **resource leaks** in long-running processes (daemons, se
 
 ## external-process-reviewer
 
+**Carry the proof in the finding.** An undemonstrated finding is a hypothesis;
+report it as one or not at all. A behavioural claim -- anything of the form
+"this does X" -- is checkable and must be checked before you post it. A design
+objection is a JUDGEMENT: state it as one rather than dressing it as behaviour.
+Say which you are doing in the finding itself.
+
 Review Python code that shells out via `subprocess`. CLI failures (timeout, malformed output, missing binary) are routine, and Python's defaults are dangerous.
 
 **Patterns to FLAG:**
@@ -1139,6 +1184,12 @@ Review Python code that shells out via `subprocess`. CLI failures (timeout, malf
 
 ## dead-code-reviewer
 
+**Carry the proof in the finding.** An undemonstrated finding is a hypothesis;
+report it as one or not at all. A behavioural claim -- anything of the form
+"this does X" -- is checkable and must be checked before you post it. A design
+objection is a JUDGEMENT: state it as one rather than dressing it as behaviour.
+Say which you are doing in the finding itself.
+
 Review PRs for **dead code introduction**. Python's runtime has no compile-time check for unused symbols. `vulture` and `ruff` (`F401` unused imports, `F841` unused variables) catch most cases; this reviewer fills the gaps — especially around public APIs, reflection-driven code, and partial refactors.
 
 **What to flag:**
@@ -1174,6 +1225,12 @@ Review PRs for **dead code introduction**. Python's runtime has no compile-time 
 ---
 
 ## import-reviewer
+
+**Carry the proof in the finding.** An undemonstrated finding is a hypothesis;
+report it as one or not at all. A behavioural claim -- anything of the form
+"this does X" -- is checkable and must be checked before you post it. A design
+objection is a JUDGEMENT: state it as one rather than dressing it as behaviour.
+Say which you are doing in the finding itself.
 
 Review Python imports for **PEP 8 compliance and placement discipline**. Most import-ordering issues are caught by `ruff check --select I`; this reviewer focuses on the structural rules ruff doesn't enforce.
 
@@ -1233,6 +1290,12 @@ Review Python imports for **PEP 8 compliance and placement discipline**. Most im
 
 ## importlib-resources-reviewer
 
+**Carry the proof in the finding.** An undemonstrated finding is a hypothesis;
+report it as one or not at all. A behavioural claim -- anything of the form
+"this does X" -- is checkable and must be checked before you post it. A design
+objection is a JUDGEMENT: state it as one rather than dressing it as behaviour.
+Say which you are doing in the finding itself.
+
 Review Python code for **correct package data access**. Package data files (JSON sidecars, SQL schema, text fixtures, templates) must be loaded via `importlib.resources`, not `Path(__file__).parent`. The `__file__.parent` pattern silently breaks when a module is renamed or moved to a subpackage — the parent directory shifts and the relative path no longer resolves. The `importlib.resources` pattern is robust to package moves and works identically in dev (editable install), `pip install`, frozen builds, and Lambda zips.
 
 **FLAG when a file in a packaged module contains:**
@@ -1267,6 +1330,12 @@ For Python ≥3.9. On older versions, `importlib.resources.read_text("mypackage.
 ---
 
 ## dataclass-decorator-reviewer
+
+**Carry the proof in the finding.** An undemonstrated finding is a hypothesis;
+report it as one or not at all. A behavioural claim -- anything of the form
+"this does X" -- is checkable and must be checked before you post it. A design
+objection is a JUDGEMENT: state it as one rather than dressing it as behaviour.
+Say which you are doing in the finding itself.
 
 Review Python code for **missing `@dataclass` decorators on classes that use `dataclasses.field()`**. The decorator is what makes `field()` resolve to a `Field` descriptor at class-construction time. Without it, `field(default_factory=list)` becomes a literal `Field` object as the attribute value — passing tests at import time but failing at first instance use with errors like `argument of type 'Field' is not iterable` or `'Field' object has no attribute 'append'`.
 
@@ -1306,6 +1375,12 @@ This rule fires almost exclusively on **extraction PRs** — when a `@dataclass`
 ---
 
 ## typing-consistency-reviewer
+
+**Carry the proof in the finding.** An undemonstrated finding is a hypothesis;
+report it as one or not at all. A behavioural claim -- anything of the form
+"this does X" -- is checkable and must be checked before you post it. A design
+objection is a JUDGEMENT: state it as one rather than dressing it as behaviour.
+Say which you are doing in the finding itself.
 
 Review Python type annotations for **consistency within files that have opted in to typing**. This reviewer does NOT push untyped codebases toward typing — Python's flexibility is a feature, and gratuitous type ceremony adds complexity for little gain. But once a file opts in, the standards apply: half-typed code is worse than no types, because it gives a false signal to type checkers and human readers alike.
 
@@ -1429,6 +1504,15 @@ This reviewer enforces "if you opt in, do it well" rather than "everyone must op
 ---
 
 ## clarity-reviewer
+
+verification: mixed
+<!-- evidence: PR #80 mutations: r4 injected execute_batch to test the capture mechanism; r6 defanged worker.py:1839 vs :1844 to count causes. Evidence-queries: r2 showed _ensure_schema never names triage_email_mappings; r5 lexed the DDL to get 44 statements, not 45; r6 ran merge_actions to show false==unset for the vetoes. -->
+
+**Carry the proof in the finding.** An undemonstrated finding is a hypothesis;
+report it as one or not at all. A behavioural claim -- anything of the form
+"this does X" -- is checkable and must be checked before you post it. A design
+objection is a JUDGEMENT: state it as one rather than dressing it as behaviour.
+Say which you are doing in the finding itself.
 
 Review markdown documentation AND Python docstrings/comments for terseness, structure, and factual accuracy. Every token costs money and attention — cut the fat, fix the layout, and don't let docstrings lie about what the code does.
 
@@ -1555,6 +1639,15 @@ This reviewer applies to:
 
 ## test-isolation-reviewer
 
+verification: mixed
+<!-- evidence: PR #80 r2 mutation: removed the psycopg2 patch to prove it load-bearing (3 errors). Evidence-query: ran the suite with Postgres env blackholed to TEST-NET-1 and then unset, timing both to show no connect was attempted. -->
+
+**Carry the proof in the finding.** An undemonstrated finding is a hypothesis;
+report it as one or not at all. A behavioural claim -- anything of the form
+"this does X" -- is checkable and must be checked before you post it. A design
+objection is a JUDGEMENT: state it as one rather than dressing it as behaviour.
+Say which you are doing in the finding itself.
+
 Review test changes for **isolation from live infrastructure**. Cortex tests must run against mocks/fixtures, not the live homelab services, for two reasons:
 
 1. **CI doesn't have the infra.** There's no Postgres, DuckDB API, Gmail API, S3/Minio, Ollama, or LiteLLM proxy on a CI runner. A test that reaches one works on a dev box (where the infra exists) and fails or hangs on CI — a false-green that only surfaces at merge time.
@@ -1586,6 +1679,15 @@ Review test changes for **isolation from live infrastructure**. Cortex tests mus
 
 ## migration-idempotency-reviewer
 
+verification: mixed
+<!-- evidence: PR #80 r2 mutation: replayed the DDL against a scratch Postgres 16.13 in three start states, twice each. Evidence-query: ran the importer's real upsert against both schemas to establish the pre-fix failure was SILENT ROW LOSS, not an error. -->
+
+**Carry the proof in the finding.** An undemonstrated finding is a hypothesis;
+report it as one or not at all. A behavioural claim -- anything of the form
+"this does X" -- is checkable and must be checked before you post it. A design
+objection is a JUDGEMENT: state it as one rather than dressing it as behaviour.
+Say which you are doing in the finding itself.
+
 Review schema changes for **idempotency**. Cortex applies its schema by running `ensure_schema()` / `ensure_*_schema()` functions on **every service and worker startup** — there is no one-shot migration runner. The same DDL re-executes on every boot and against databases at different starting states, so each statement must be safe to run repeatedly and safe against tables that already hold rows.
 
 **Default severity: P1** — a non-idempotent statement crashes the service on its *second* startup (or on a redeploy), which is a production outage, not a test failure.
@@ -1616,6 +1718,12 @@ Review schema changes for **idempotency**. Cortex applies its schema by running 
 ---
 
 ## homelab-values-reviewer
+
+**Carry the proof in the finding.** An undemonstrated finding is a hypothesis;
+report it as one or not at all. A behavioural claim -- anything of the form
+"this does X" -- is checkable and must be checked before you post it. A design
+objection is a JUDGEMENT: state it as one rather than dressing it as behaviour.
+Say which you are doing in the finding itself.
 
 Enforce CLAUDE.md's **no hardcoded homelab values** and **no hardcoded LLM models/prompts** rules. These repos are public; personal infrastructure details and un-configurable model choices must not leak into code.
 
@@ -1649,6 +1757,74 @@ Enforce CLAUDE.md's **no hardcoded homelab values** and **no hardcoded LLM model
 # Guidelines
 
 A reviewer pack for Python projects. Each section below is an independent reviewer prompt with its own scope, set of patterns to flag, and disposition.
+
+## Verification: every reviewer owes a demonstration
+
+**Execute. Do not read.** Every reviewer owes a demonstration; what differs is
+which kind. A finding nobody demonstrated is a hypothesis, and is reported as
+one or not at all.
+
+Each reviewer declares the KIND on the FIRST LINE of its own body:
+
+    verification: mutation           change the code, watch the check fail
+    verification: evidence-query     run the query that would produce the
+                                     evidence the claim depends on, report the n
+    verification: judgement          no demonstration exists to run -- say so
+    verification: mixed              the honest answer for most
+
+A missing line is **undeclared** -- a finding about this roster, not about the
+code. Greppable as `^verification:`, and the round summary carries the kind
+(`foo=ok(mutation)`, `bar=ok(evidence-query)`) so a reader weights findings
+without opening a charter.
+
+**The tempting declaration is `none`; the second most tempting is
+`evidence-query` on a reviewer that could mutate.** Both are the disease. The
+honest test is not "what could this reviewer do" but "what did it do last time
+it filed a finding" -- which for this roster is answerable from PR history.
+
+**THE OBLIGATION SITS ON THE FINDING, not the reviewer.** A reviewer's line says
+what it TYPICALLY owes; it never licenses a finding to skip its proof.
+
+**Judgement is a KIND, not an exemption.** "This abstraction is wrong", "these
+two arguments are swappable" -- no mutation exists to run, so state it AS
+judgement rather than avoiding it. Two of the most valuable findings in this
+estate were judgements. What the rule forbids is a judgement DRESSED AS a
+behavioural claim: "this exits 0 on failure" is checkable and must be checked;
+"this design is confusing" is not and must say so.
+
+**If you declare `mixed`, be able to name which recent findings were which** --
+otherwise it is undeclared wearing a better word. The evidence comments under
+each declaration below do exactly that, and are the audit trail.
+
+**Review the fix as suspiciously as the thing it replaced, and your own most
+suspiciously of all.** On PR #80 every round's finding lived inside the previous
+round's fix, three rounds running -- the round-3 P2 was the round-2 fix treating
+a symptom rather than removing the swallow.
+
+**Where the rule comes from, measured rather than asserted.** cortex-triage
+PR #80, 2026-09-17: nine findings across the first two rounds, eight accepted.
+The one declined was the only one asserting something without running it -- it
+claimed CI gates on `ruff format` when CI runs `black`, and the two disagree, so
+complying would have broken the build.
+
+**Three ways a demonstration lies, all seen on that PR in one day:**
+
+1. **The mutant dies at collection.** A `SyntaxError` or import failure catches
+   nothing. Distinguish `N errors` from `N failed` -- but a *fixture* assertion
+   legitimately surfaces as errors, so read the error text before dismissing it.
+2. **The denominator moves.** Print the total test count every run. Restoring an
+   uncommitted file with `git checkout --` reverts it to HEAD and deletes the
+   work under test; save and rewrite bytes instead.
+3. **The instrument cannot see the thing.** A point-in-time snapshot cannot
+   observe per-request behaviour; a grep for the shape you expect a fix to take
+   cannot find a fix written another way. Ask what would be true if the claim
+   were false, and whether your instrument could detect it.
+
+**Cross-language caution.** These examples are Python. The shapes do not
+translate for free -- a bash `EXIT` trap whose command fails does *not* mask the
+script's exit status, so the exception-swapping hazard has no direct analogue
+there. Verify the mechanism in the target language before writing a charter
+against it.
 
 ## How the pack runs
 
