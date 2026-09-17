@@ -29,15 +29,14 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 
-def _executed_ddl() -> str:
-    """Every statement ensure_config_schema() hands to the cursor.
+def _recording_conn() -> tuple[MagicMock, list[str]]:
+    """A connection whose every SQL path lands in the returned list.
 
-    NOT TriageWorker._ensure_schema -- that one ensures classifications,
-    patterns and system_state only. The mappings DDL lives in the module-level
-    ensure_config_schema(), called from main() on boot. My first version of
-    this test pointed at the worker method and asserted the constraint was
-    absent from SQL that never mentioned mappings at all: vacuously true. The
-    `triage_email_mappings in sql` guard below is what caught it, twice.
+    Extracted from _executed_ddl so its REACH is assertable. Round 8: both of
+    round 2's widenings could be reverted with the suite green -- deleting the
+    executemany recorder, or narrowing conn.cursor back to binding only
+    __enter__ -- and DDL routed through either escaped unseen. The capture was
+    correct and unguarded, so nothing noticed it narrowing again.
     """
     statements: list[str] = []
 
@@ -60,7 +59,54 @@ def _executed_ddl() -> str:
     conn = MagicMock()
     conn.__enter__.return_value = conn
     conn.cursor.return_value = cur
+    return conn, statements
 
+
+@pytest.mark.parametrize(
+    ("label", "drive"),
+    [
+        ("with conn.cursor() as c", lambda c: _drive_with(c)),
+        ("bare c = conn.cursor()", lambda c: c.cursor().execute("SENTINEL 1;")),
+        ("executemany", lambda c: c.cursor().executemany("SENTINEL 2;", [()])),
+        ("nested with, twice", lambda c: _drive_twice(c)),
+    ],
+)
+def test_the_capture_reaches_every_sql_path(label: str, drive: object) -> None:
+    """Round 2's widenings must not be silently revertible.
+
+    Reverting either one -- the executemany recorder, or conn.cursor returning
+    the cursor directly -- left all 375 tests passing while DDL sent that way
+    vanished. These drive each path against the mock itself, so a narrowing
+    fails here rather than going quiet.
+    """
+    conn, statements = _recording_conn()
+    drive(conn)  # type: ignore[operator]
+    assert statements, f"SQL sent via {label} never reached the recorder"
+
+
+def _drive_with(conn: MagicMock) -> None:
+    with conn.cursor() as c:
+        c.execute("SENTINEL 0;")
+
+
+def _drive_twice(conn: MagicMock) -> None:
+    with conn.cursor() as c:
+        c.execute("SENTINEL 3;")
+    with conn.cursor() as c:
+        c.executemany("SENTINEL 4;", [()])
+
+
+def _executed_ddl() -> str:
+    """Every statement ensure_config_schema() hands to the cursor.
+
+    NOT TriageWorker._ensure_schema -- that one ensures classifications,
+    patterns and system_state only. The mappings DDL lives in the module-level
+    ensure_config_schema(), called from main() on boot. My first version of
+    this test pointed at the worker method and asserted the constraint was
+    absent from SQL that never mentioned mappings at all: vacuously true. The
+    `triage_email_mappings in sql` guard below is what caught it, twice.
+    """
+    conn, statements = _recording_conn()
     mod = importlib.import_module("triage.services.worker")
     cfg = MagicMock()
     # Deliberately NOT wrapped in try/except, and recording the exception was
@@ -210,9 +256,16 @@ def ddl() -> str:
     #
     # Asserting the PROPERTY, not a quoted phrase from worker.py. The first
     # version keyed on "-- NO unconditional UNIQUE" -- prose this test does not
-    # own, in a file whose edits reach main with no PR under CLAUDE.md's
-    # beads-and-docs carve-out. Rewording that comment while dropping the
-    # stripping call reopened the whole defect with the suite green.
+    # own, which changes for reasons that have nothing to do with this guard.
+    # Rewording that comment while dropping the stripping call reopened the
+    # whole defect with the suite green.
+    #
+    # (An earlier version of this note claimed worker.py's edits reach main
+    # without a PR under CLAUDE.md's beads-and-docs carve-out. False: that
+    # carve-out is beads and DOCUMENTATION, and the root CLAUDE.md resolves the
+    # ambiguity explicitly -- "Code still goes through a PR". worker.py is code.
+    # The reason to avoid keying on foreign prose stands on its own; it did not
+    # need the governance claim, which was wrong.)
     assert not any(ln.lstrip().startswith("--") for ln in sql.splitlines()), (
         "the ddl fixture is no longer stripping comments; the prose explaining "
         "the fix is being matched as if it were executable SQL"
@@ -220,7 +273,14 @@ def ddl() -> str:
     return sql
 
 
-def test_the_swallow_stays_removed() -> None:
+@pytest.mark.parametrize(
+    ("exc", "helper"),
+    [
+        (TypeError("sequence item 0: expected bytes, MagicMock"), "execute_batch"),
+        (KeyError("<MagicMock name='mock.connection.encoding'>"), "execute_values"),
+    ],
+)
+def test_the_swallow_stays_removed(exc: Exception, helper: str) -> None:
     """Round 3's fix has to be revertible loudly, not silently.
 
     _executed_ddl() deliberately does NOT wrap ensure_config_schema() in
@@ -230,28 +290,39 @@ def test_the_swallow_stays_removed() -> None:
     regression test, because the defect it prevents only appears once something
     else has already gone wrong.
 
-    Drive the same path with a raise, and require it through. TypeError
-    specifically, because that is what the documented hazard throws: both
-    psycopg2.extras helpers die inside cur.mogrify on a MagicMock cursor with
-    "sequence item 0: expected a bytes-like object". A narrow
-    `except TypeError: pass` is therefore the swallow that reproduces round 3's
-    defect, and an earlier version of this test raised RuntimeError and did not
-    see it -- a real ALTER ... ADD CONSTRAINT routed through execute_batch
-    shipped with all 375 green.
+    Parametrised over BOTH exception types, because the two documented helpers
+    do not raise the same one and an earlier version of this test assumed they
+    did. Measured against the cursor _recording_conn() builds, psycopg2 2.9.11:
+
+        execute_batch   TypeError at extras.py:1216 in execute_batch()
+                        "sequence item 0: expected a bytes-like object"
+                        -- inside b";".join(sqls), NOT inside mogrify
+        execute_values  KeyError  at extras.py:1287 in execute_values()
+                        cur.connection.encoding -- mogrify never reached
+
+    So a narrow swallow of EITHER type reproduces round 3's defect. Two earlier
+    versions of this test each saw only one: RuntimeError saw neither, and
+    TypeError alone left `except KeyError: pass` plus a real
+    ALTER ... ADD CONSTRAINT routed through execute_values shipping at 375
+    green. Guessing the exception class from the helper's name is how both
+    misses happened; these were run.
     """
     mod = importlib.import_module("triage.services.worker")
     # NOT by patching psycopg2.connect -- _executed_ddl() patches that itself,
     # so an outer patch is simply overridden and the test passes vacuously.
     # Raise from the function under capture instead.
     with (
-        patch.object(
-            mod,
-            "ensure_config_schema",
-            side_effect=TypeError("sequence item 0: expected bytes, MagicMock"),
-        ),
-        pytest.raises(TypeError, match="sequence item 0"),
+        patch.object(mod, "ensure_config_schema", side_effect=exc),
+        pytest.raises(type(exc)) as caught,
     ):
         _executed_ddl()
+    # The exact instance, not merely the type. Widening this from
+    # match="sequence item 0" to a bare type check bought the KeyError case and
+    # sold propagation fidelity: `raise type(e)("schema setup failed") from e`
+    # kept the type, discarded the message, and shipped at 389 green. The
+    # message is what identifies WHICH helper carried the DDL away, so losing
+    # it destroys the same evidence a swallow would.
+    assert caught.value is exc, "the exception must propagate unaltered"
 
 
 # The two columns whose uniqueness is supposed to hold over LIVE rows only.
@@ -388,6 +459,44 @@ def _guard(ddl: str, at: int, what: str) -> None:
     )
 
 
+# The constraint walk's selector. Round 8: this one was never hoisted, and on a
+# green run it matches ZERO times -- the DDL's only bare UNIQUE is
+# `worker_id TEXT NOT NULL UNIQUE`, which has no key list. So gutting it left
+# 375 green, and gutting it alongside an unnamed or reversed inline UNIQUE also
+# left 375 green. A selector that never fires on healthy input is invisible
+# until the day it needed to fire.
+_CONSTRAINT_SELECTOR = re.compile(r"UNIQUE\s*(?=\()", re.I)
+
+_CONSTRAINT_MUST_MATCH = [
+    "CONSTRAINT x UNIQUE (mapping_type, email_address)",
+    "UNIQUE (mapping_type, email_address)",
+    "ALTER TABLE t ADD CONSTRAINT x UNIQUE (a, b)",
+    "ALTER TABLE t ADD UNIQUE (a, b)",
+    "unique (a, b)",
+    "UNIQUE(a, b)",
+]
+_CONSTRAINT_MUST_NOT_MATCH = [
+    "worker_id TEXT NOT NULL UNIQUE",
+    "CREATE UNIQUE INDEX i ON t(a, b)",
+    # Not about comments -- those are stripped upstream. This is rejected
+    # because nothing follows UNIQUE before a "(", which is what a
+    # lookahead-free selector would get wrong.
+    "the word UNIQUE with no key list",
+]
+
+
+@pytest.mark.parametrize("stmt", _CONSTRAINT_MUST_MATCH)
+def test_constraint_selector_matches_every_shape_it_claims(stmt: str) -> None:
+    m = _CONSTRAINT_SELECTOR.search(stmt)
+    assert m, f"constraint selector missed: {stmt!r}"
+    assert stmt[m.end() :].startswith("("), "match must end right before the key list"
+
+
+@pytest.mark.parametrize("stmt", _CONSTRAINT_MUST_NOT_MATCH)
+def test_constraint_selector_rejects_near_misses(stmt: str) -> None:
+    assert not _CONSTRAINT_SELECTOR.search(stmt), f"over-matched: {stmt!r}"
+
+
 # Hoisted so a test can read it. Round 6: while it was an inline literal,
 # nothing asserted WHICH statements the walk selects -- only what happens to
 # the ones it picks. Replacing the whole pattern with one that never matches
@@ -457,7 +566,7 @@ def test_no_unconditional_unique_constraint_on_the_mapping_columns(
         "migration 004 drops it precisely because it blocks recreating a "
         "soft-deleted mapping and shadows idx_email_mappings_active"
     )
-    for m in re.finditer(r"UNIQUE\s*(?=\()", ddl, re.I):
+    for m in _CONSTRAINT_SELECTOR.finditer(ddl):
         if _key_columns(ddl[m.end() :]) == _PAIR:
             _guard(ddl, m.start(), "UNIQUE constraint")
 
