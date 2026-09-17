@@ -464,8 +464,13 @@ merged:
 | `force_archive`, `force_mark_read` | Veto → forces `true`. |
 | `force_no_star`, `force_no_important` | Veto → forces `false`. |
 
-Omitting a flag means "no opinion". Setting it to `false` is a **vote**, and a
-single dissenting vote blocks `archive` / `mark_read` for the whole email.
+Omitting one of the four OPINION flags means "no opinion". Setting it to
+`false` is a **vote**, and a single dissenting vote blocks `archive` /
+`mark_read` for the whole email.
+
+The four **vetoes** above behave differently: they are gated on truthiness, so
+`force_no_star: false` is indistinguishable from omitting it. Only `true` does
+anything.
 
 ### Writing an additive scan chain
 
