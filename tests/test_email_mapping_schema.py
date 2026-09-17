@@ -201,7 +201,57 @@ def ddl() -> str:
         "the mappings DDL was not executed at all -- this test is not looking "
         "at what it thinks it is"
     )
+    # ...and that it was stripped. Round 5 asserted _without_comments works;
+    # nothing asserted this fixture USES it. Dropping the call left all 374
+    # green -- and left a genuine unconditional UNIQUE green too, because
+    # worker.py:1839 then reads as live DDL and worker.py:1844 supplies the
+    # predicate that rescues it. A correct helper is worthless if the fixture
+    # stops calling it, so assert the composition, not just the part.
+    #
+    # Asserting the PROPERTY, not a quoted phrase from worker.py. The first
+    # version keyed on "-- NO unconditional UNIQUE" -- prose this test does not
+    # own, in a file whose edits reach main with no PR under CLAUDE.md's
+    # beads-and-docs carve-out. Rewording that comment while dropping the
+    # stripping call reopened the whole defect with the suite green.
+    assert not any(ln.lstrip().startswith("--") for ln in sql.splitlines()), (
+        "the ddl fixture is no longer stripping comments; the prose explaining "
+        "the fix is being matched as if it were executable SQL"
+    )
     return sql
+
+
+def test_the_swallow_stays_removed() -> None:
+    """Round 3's fix has to be revertible loudly, not silently.
+
+    _executed_ddl() deliberately does NOT wrap ensure_config_schema() in
+    try/except: a raise part-way through leaves a capture byte-identical to a
+    clean run, so swallowing turns "half the schema never ran" into three
+    passing tests. Restoring the swallow left all 374 green -- the fix had no
+    regression test, because the defect it prevents only appears once something
+    else has already gone wrong.
+
+    Drive the same path with a raise, and require it through. TypeError
+    specifically, because that is what the documented hazard throws: both
+    psycopg2.extras helpers die inside cur.mogrify on a MagicMock cursor with
+    "sequence item 0: expected a bytes-like object". A narrow
+    `except TypeError: pass` is therefore the swallow that reproduces round 3's
+    defect, and an earlier version of this test raised RuntimeError and did not
+    see it -- a real ALTER ... ADD CONSTRAINT routed through execute_batch
+    shipped with all 375 green.
+    """
+    mod = importlib.import_module("triage.services.worker")
+    # NOT by patching psycopg2.connect -- _executed_ddl() patches that itself,
+    # so an outer patch is simply overridden and the test passes vacuously.
+    # Raise from the function under capture instead.
+    with (
+        patch.object(
+            mod,
+            "ensure_config_schema",
+            side_effect=TypeError("sequence item 0: expected bytes, MagicMock"),
+        ),
+        pytest.raises(TypeError, match="sequence item 0"),
+    ):
+        _executed_ddl()
 
 
 # The two columns whose uniqueness is supposed to hold over LIVE rows only.
