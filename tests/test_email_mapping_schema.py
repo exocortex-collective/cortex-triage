@@ -58,30 +58,89 @@ def _recording_conn() -> tuple[MagicMock, list[str]]:
     cur.__exit__.return_value = False
     conn = MagicMock()
     conn.__enter__.return_value = conn
+    # Pinned for the same reason cur's is: MagicMock.__exit__ happens to
+    # default falsey today, so an unpinned outer exit is correct by accident.
+    conn.__exit__.return_value = False
     conn.cursor.return_value = cur
     return conn, statements
 
 
 @pytest.mark.parametrize(
-    ("label", "drive"),
+    ("label", "drive", "expected"),
     [
-        ("with conn.cursor() as c", lambda c: _drive_with(c)),
-        ("bare c = conn.cursor()", lambda c: c.cursor().execute("SENTINEL 1;")),
-        ("executemany", lambda c: c.cursor().executemany("SENTINEL 2;", [()])),
-        ("nested with, twice", lambda c: _drive_twice(c)),
+        ("with conn.cursor() as c", lambda c: _drive_with(c), ["SENTINEL 0;"]),
+        (
+            "bare c = conn.cursor()",
+            lambda c: c.cursor().execute("SENTINEL 1;"),
+            ["SENTINEL 1;"],
+        ),
+        (
+            "executemany",
+            lambda c: c.cursor().executemany("SENTINEL 2;", [()]),
+            ["SENTINEL 2;"],
+        ),
+        (
+            "nested with, twice",
+            lambda c: _drive_twice(c),
+            ["SENTINEL 3;", "SENTINEL 4;"],
+        ),
     ],
 )
-def test_the_capture_reaches_every_sql_path(label: str, drive: object) -> None:
+def test_the_capture_reaches_every_sql_path(
+    label: str, drive: object, expected: list[str]
+) -> None:
     """Round 2's widenings must not be silently revertible.
 
     Reverting either one -- the executemany recorder, or conn.cursor returning
     the cursor directly -- left all 375 tests passing while DDL sent that way
     vanished. These drive each path against the mock itself, so a narrowing
     fails here rather than going quiet.
+
+    Assert the EXACT statements, not merely that something was recorded. Round
+    9: `assert statements` is satisfied by one entry however many were sent, so
+    a recorder that kept only the FIRST statement was invisible to all four
+    rows -- 389 green, and green again with a real ALTER ... ADD CONSTRAINT
+    added as a second execute. The two-statement row was doing half its job for
+    the same reason.
     """
     conn, statements = _recording_conn()
     drive(conn)  # type: ignore[operator]
-    assert statements, f"SQL sent via {label} never reached the recorder"
+    assert statements == expected, (
+        f"SQL sent via {label} did not reach the recorder intact: "
+        f"{statements!r} != {expected!r}"
+    )
+
+
+def test_the_cursor_context_manager_does_not_suppress() -> None:
+    """The THIRD swallow site, and the one no other test can see.
+
+    ensure_config_schema() runs its DDL inside
+    `with (psycopg2.connect(...) as conn, conn.cursor() as cur)`, so
+    `cur.__exit__` sits directly on the exception path of the function under
+    capture. A mock whose __exit__ returns True swallows everything raised in
+    that block. Round 9 measured it: `cur.__exit__.return_value = True` alone
+    leaves 389 green, and with a real unconditional UNIQUE routed through
+    execute_batch it is STILL 389 green -- round 3's defect restored exactly,
+    with a clean-looking 13,155-char capture and the constraint absent.
+
+    The same is true of conn.__exit__, measured the same way: an outer swallow
+    turns the real-UNIQUE case from 3 loud fixture errors into 390 green.
+
+    test_the_swallow_stays_removed cannot reach either: it replaces
+    ensure_config_schema with a raising stub, so neither `with` is entered.
+    This one raises from INSIDE both real contexts instead.
+    """
+    conn, _ = _recording_conn()
+    boom = RuntimeError("raised inside the cursor context")
+    # BOTH context managers, in the order production opens them. conn.__exit__
+    # is the OUTER one and sees the exception LAST, so it can suppress even
+    # when cur.__exit__ correctly declines to -- and the first version of this
+    # test entered only conn.cursor(), leaving that half untested while this
+    # docstring claimed both.
+    with pytest.raises(RuntimeError) as caught, conn as c2, c2.cursor() as cur:
+        cur.execute("SENTINEL;")
+        raise boom
+    assert caught.value is boom, "cur.__exit__ is suppressing the real exception"
 
 
 def _drive_with(conn: MagicMock) -> None:
@@ -118,9 +177,14 @@ def _executed_ddl() -> str:
     # `--` comment (worker.py:1846, "existing databases; this line was..."),
     # so 57 - 12 = 45 is one too many -- the count is 44. So the hazard is not
     # a truncated prefix; it is a SECOND call that never reaches the recorder.
-    # psycopg2.extras.execute_batch and execute_values go through cur.mogrify
-    # rather than the side_effect above, raise on the mock, and carry their
-    # DDL away with them.
+    # psycopg2.extras.execute_batch and execute_values both bypass the
+    # side_effect above, raise on the mock, and carry their DDL away with them
+    # -- but NOT by the same route, and an earlier version of this comment said
+    # they did. execute_batch dies in b";".join(sqls) at extras.py:1216 having
+    # called mogrify once; execute_values dies at extras.py:1287 looking up
+    # cur.connection.encoding, never reaching mogrify at all. The per-helper
+    # detail is in test_the_swallow_stays_removed, which is parametrised over
+    # both exception types for exactly this reason.
     #
     # Measured: with an ALTER ... ADD CONSTRAINT routed through execute_batch,
     # the capture is byte-identical to a clean run -- 1 call, 13,155 chars --
@@ -460,8 +524,10 @@ def _guard(ddl: str, at: int, what: str) -> None:
 
 
 # The constraint walk's selector. Round 8: this one was never hoisted, and on a
-# green run it matches ZERO times -- the DDL's only bare UNIQUE is
-# `worker_id TEXT NOT NULL UNIQUE`, which has no key list. So gutting it left
+# green run it matches ZERO times -- the DDL's two bare UNIQUEs are
+# `version INTEGER NOT NULL UNIQUE` (worker.py:1667) and
+# `worker_id TEXT NOT NULL UNIQUE` (worker.py:1907), and neither has a key
+# list, so the lookahead rejects both. So gutting it left
 # 375 green, and gutting it alongside an unnamed or reversed inline UNIQUE also
 # left 375 green. A selector that never fires on healthy input is invisible
 # until the day it needed to fire.
