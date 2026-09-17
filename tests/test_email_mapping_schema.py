@@ -64,14 +64,21 @@ def _executed_ddl() -> str:
     mod = importlib.import_module("triage.services.worker")
     cfg = MagicMock()
     # Deliberately NOT wrapped in try/except, and recording the exception was
-    # not enough either. An exception part-way through truncates the capture,
-    # and the vacuity guard cannot see that: the guard is anchored on the
-    # mappings CREATE TABLE, which this function emits BEFORE most of its DDL.
-    # Measured -- routing DDL through psycopg2.extras.execute_batch or
-    # execute_values raises on the mock and truncates to the SAME 57
-    # statements a clean run produces, so the capture looks complete from the
-    # outside and all three tests pass. If the mock ever stops satisfying a
-    # call, that is information. Let it raise.
+    # not enough either.
+    #
+    # ensure_config_schema() issues all of its DDL in ONE execute(): a single
+    # 13,155-character blob holding 45 top-level statements (57 semicolons, 12
+    # of them inside three $$ plpgsql bodies). So the hazard is not a
+    # truncated prefix -- it is a SECOND call that never reaches the recorder.
+    # psycopg2.extras.execute_batch and execute_values go through cur.mogrify
+    # rather than the side_effect above, raise on the mock, and carry their
+    # DDL away with them.
+    #
+    # Measured: with an ALTER ... ADD CONSTRAINT routed through execute_batch,
+    # the capture is byte-identical to a clean run -- 1 call, 13,155 chars --
+    # and the constraint is simply absent. Nothing downstream can notice, so
+    # the vacuity guard passes and all three tests pass. The raised TypeError
+    # was the only evidence there was, and swallowing it destroyed it.
     with patch.object(mod.psycopg2, "connect", return_value=conn):
         mod.ensure_config_schema(cfg)
     # ";" is what _guard splits on, so it must be what separates captured
@@ -152,10 +159,65 @@ def _key_columns(text: str) -> frozenset[str] | None:
         return None  # unbalanced -- not a column list we can judge
 
     def name(element: str) -> str:
-        """The column name alone, without COLLATE / opclass / DESC / NULLS."""
+        """The column name alone, without COLLATE / opclass / DESC / NULLS.
+
+        Whitespace-delimited, so it does NOT handle the space-free
+        `"mapping_type"COLLATE"C"` form that quoted identifiers make legal.
+        Tracked on cortex-migc; nothing that emits DDL in this tree produces
+        it, and pg_get_indexdef always spaces them.
+        """
         return element.split()[0].strip('"').lower()
 
     return frozenset(name(c) for c in inner.split(",") if c.strip())
+
+
+# The pair written out literally, NOT as _PAIR. A test expressing its
+# expectations in terms of _PAIR would agree with a corrupted _PAIR -- it would
+# be asserting the constant against itself, the exact shape of failure this
+# file exists to catch.
+_THE_PAIR = frozenset({"mapping_type", "email_address"})
+
+
+def test_pair_names_the_two_arbiter_columns() -> None:
+    assert _PAIR == _THE_PAIR
+
+
+@pytest.mark.parametrize(
+    ("key_list", "expected"),
+    [
+        ("(mapping_type, email_address)", _THE_PAIR),
+        ("(email_address, mapping_type)", _THE_PAIR),
+        ("(MAPPING_TYPE, EMAIL_ADDRESS)", _THE_PAIR),
+        ('("mapping_type", "email_address")', _THE_PAIR),
+        ('(mapping_type COLLATE "C", email_address COLLATE "C")', _THE_PAIR),
+        ("(mapping_type varchar_pattern_ops, email_address text_ops)", _THE_PAIR),
+        ("(mapping_type DESC, email_address NULLS LAST)", _THE_PAIR),
+        ("(mapping_type ASC NULLS FIRST, email_address DESC)", _THE_PAIR),
+        ("(\n  mapping_type,\n  email_address\n)", _THE_PAIR),
+        ("(\tmapping_type ,\temail_address )", _THE_PAIR),
+        ("(mapping_type)", frozenset({"mapping_type"})),
+        (
+            "(mapping_type, email_address, label)",
+            frozenset({"mapping_type", "email_address", "label"}),
+        ),
+        ("(email_address, deleted_at)", frozenset({"email_address", "deleted_at"})),
+        ("mapping_type, email_address)", None),
+        ("(mapping_type, email_address", None),
+        (" (mapping_type, email_address)", None),
+        ("()", frozenset()),
+    ],
+)
+def test_key_columns_normalises(key_list: str, expected: frozenset[str] | None) -> None:
+    """Assert the normaliser directly.
+
+    Round 4: on a green run _key_columns() only ever sees ONE key list --
+    idx_email_mappings_active's plain, lower-case, in-order pair -- so every
+    branch making it tolerant of order, case, quoting and per-column modifiers
+    was unasserted. Replacing its body with `return None`, gutting name(), or
+    corrupting _PAIR each left all 338 tests passing. The helper that three
+    rounds of findings all route through had no test of its own.
+    """
+    assert _key_columns(key_list) == expected
 
 
 def _guard(ddl: str, at: int, what: str) -> None:
@@ -230,7 +292,8 @@ def test_no_unconditional_unique_index_on_the_mapping_columns(ddl: str) -> None:
       so the guard never ran. COLLATE "C" is the realistic one: the sibling
       incident here was glibc collation corrupting these exact text btrees
       (cortex-rj2b), so pinning a collation on them is a plausible fix that
-      would quietly restore the defect.
+      would quietly restore the defect. Whitespace-delimited -- the space-free
+      `"col"COLLATE"C"` spelling is on cortex-migc, not covered here.
     * no index name at all (Postgres auto-names it), and a schema-qualified
       table (public.triage_email_mappings)
     """
