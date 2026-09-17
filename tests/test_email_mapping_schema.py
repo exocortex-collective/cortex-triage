@@ -67,9 +67,11 @@ def _executed_ddl() -> str:
     # not enough either.
     #
     # ensure_config_schema() issues all of its DDL in ONE execute(): a single
-    # 13,155-character blob holding 45 top-level statements (57 semicolons, 12
-    # of them inside three $$ plpgsql bodies). So the hazard is not a
-    # truncated prefix -- it is a SECOND call that never reaches the recorder.
+    # 13,155-character blob holding 44 top-level statements. Of its 57
+    # semicolons, 12 sit inside three $$ plpgsql bodies and one more inside a
+    # `--` comment (worker.py:1846, "existing databases; this line was..."),
+    # so 57 - 12 = 45 is one too many -- the count is 44. So the hazard is not
+    # a truncated prefix; it is a SECOND call that never reaches the recorder.
     # psycopg2.extras.execute_batch and execute_values go through cur.mogrify
     # rather than the side_effect above, raise on the mock, and carry their
     # DDL away with them.
@@ -108,6 +110,79 @@ def _without_comments(sql: str) -> str:
     return "\n".join(
         "" if line.lstrip().startswith("--") else line for line in sql.splitlines()
     )
+
+
+_LIVE = "WHERE deleted_at IS NULL"
+
+
+@pytest.mark.parametrize(
+    ("statement", "passes"),
+    [
+        (f"UNIQUE (mapping_type, email_address) {_LIVE};", True),
+        ("UNIQUE (mapping_type, email_address);", False),
+        ("UNIQUE (mapping_type, email_address) WHERE archive = true;", False),
+        # mentions deleted_at, under the WRONG predicate: unique over the
+        # soft-deleted rows only. Without this, weakening the regex to a
+        # bare `deleted_at` survives the whole parametrize.
+        ("UNIQUE (mapping_type, email_address) WHERE deleted_at IS NOT NULL;", False),
+        # The `;` bound. Without it the window runs on and the statement
+        # borrows the NEXT one's predicate -- the defect _guard's own docstring
+        # describes, asserted nowhere until now.
+        (
+            f"UNIQUE (mapping_type, email_address);\nCREATE INDEX i ON t(c) {_LIVE};",
+            False,
+        ),
+        (
+            f"UNIQUE (mapping_type, email_address) {_LIVE};\nCREATE INDEX i ON t(c);",
+            True,
+        ),
+    ],
+)
+def test_guard_demands_a_live_rows_predicate_in_its_own_statement(
+    statement: str, passes: bool
+) -> None:
+    """_guard()'s FAILING path never executes on a green suite.
+
+    Round 5: the assertion is reached only when a defect shape is present,
+    which by construction never happens while the schema is correct. Replacing
+    the entire body with `return`, or dropping the `;` bound so the window runs
+    to end-of-string, each left all 356 tests passing.
+    """
+    if passes:
+        _guard(statement, 0, "probe")  # must not raise
+    else:
+        with pytest.raises(AssertionError):
+            _guard(statement, 0, "probe")
+
+
+def test_without_comments_strips_whole_lines_only() -> None:
+    """Load-bearing in BOTH directions, and neither was asserted.
+
+    Round 5: degrading this to `--.*$`, or to the identity function, each left
+    all 356 tests passing. The two directions are different bugs: too greedy
+    carries a real violation away with the comment, too timid reports the
+    comment explaining the fix as the defect itself.
+
+    The identity case is worse than it sounds, and the DDL is laid out exactly
+    wrong for it. With stripping disabled, worker.py:1839
+    (`-- NO unconditional UNIQUE (mapping_type, email_address).`) MATCHES the
+    UNIQUE walk, and worker.py:1844 (`--   WHERE deleted_at IS NULL`) then
+    SUPPLIES the predicate that satisfies _guard. The prose explaining the fix
+    both triggers the check and rescues it, so the suite stays green for two
+    compounding reasons rather than one.
+    """
+    banned = "CONSTRAINT unique_email_mapping UNIQUE (mapping_type, email_address)"
+
+    # Too timid -- a whole-line comment quoting the shape must not survive.
+    assert banned not in _without_comments(f"    -- we removed {banned}\nSELECT 1;")
+
+    # Too greedy -- `--.*$` strips from the `--` inside the string literal and
+    # takes the real violation with it.
+    assert banned in _without_comments(f"note TEXT DEFAULT 'a -- b', {banned};")
+
+    # A trailing comment does not take the code beside it. (The whole line
+    # is kept, comment included -- only whole-line comments are dropped.)
+    assert banned in _without_comments(f"{banned};  -- and a note")
 
 
 @pytest.fixture(scope="module")
@@ -171,10 +246,16 @@ def _key_columns(text: str) -> frozenset[str] | None:
     return frozenset(name(c) for c in inner.split(",") if c.strip())
 
 
-# The pair written out literally, NOT as _PAIR. A test expressing its
-# expectations in terms of _PAIR would agree with a corrupted _PAIR -- it would
-# be asserting the constant against itself, the exact shape of failure this
-# file exists to catch.
+# The pair written out literally, NOT as _PAIR -- but only ONE of this
+# constant's uses actually needs that, and it is worth being precise about
+# which. test_pair_names_the_two_arbiter_columns compares _PAIR to a value,
+# so writing that value AS _PAIR would assert the constant against itself and
+# go vacuous. The parametrize below does not have that problem: its inputs are
+# literal key-list STRINGS that _key_columns() parses, so a corrupted _PAIR is
+# caught there ten times over regardless of how the expectations are spelled.
+# Measured: corrupting _PAIR while expressing every expectation as _PAIR still
+# gives 10 failed. The literal is kept for both because one spelling reads
+# better than two, not because the parametrize depends on it.
 _THE_PAIR = frozenset({"mapping_type", "email_address"})
 
 
