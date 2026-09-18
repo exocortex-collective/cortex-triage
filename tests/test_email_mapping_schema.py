@@ -48,7 +48,24 @@ def _recording_conn() -> tuple[MagicMock, list[str]]:
     # write a parameterised ALTER, and DDL sent through it was invisible here.
     cur.execute.side_effect = record
     cur.executemany.side_effect = record
-    cur.fetchone.return_value = (0,)
+    # None, not (0,). DBAPI returns None from fetchone() on an EMPTY result
+    # set, and every test in this file is about what a FRESH database gets.
+    # (0,) is a row, i.e. "something is already there" -- so the ordinary
+    # idempotent-migration idiom
+    #
+    #     if not cur.fetchone():
+    #         cur.execute("ALTER TABLE ... ADD CONSTRAINT ... UNIQUE (...)")
+    #
+    # takes the "already exists, skip" branch under capture and the "create
+    # it" branch on a real fresh server. The ALTER is never recorded, the
+    # capture is the clean 13,155-char blob, the vacuity guard passes, and an
+    # unconditional UNIQUE ships. Round 10 found this needing NO mutation of
+    # the test -- the value shipping today was already the wrong one; only the
+    # absence of any such query in ensure_config_schema was hiding it.
+    #
+    # Both idioms already exist in this codebase (postmark gmail_sync.py:1549
+    # and :229), so this is house style rather than a hypothetical.
+    cur.fetchone.return_value = None
     cur.fetchall.return_value = []
     # `cur` must be its OWN context manager, and conn.cursor() must return it
     # directly. Binding only conn.cursor().__enter__ meant a bare
@@ -111,6 +128,24 @@ def test_the_capture_reaches_every_sql_path(
     )
 
 
+def test_the_recorder_answers_as_an_empty_database() -> None:
+    """A lookup under capture must answer the way a FRESH database would.
+
+    Round 10: fetchone was pinned to (0,) -- a row, meaning "something is
+    already there". Every test in this file is about what a fresh database
+    gets, so answering as a populated one inverts the case under test. The
+    guarded-migration idiom then takes the skip branch here and the create
+    branch in production, and the ALTER is never recorded.
+
+    This needed no mutation to find: the shipping value was already wrong, and
+    only the absence of any such query in ensure_config_schema hid it.
+    """
+    conn, _ = _recording_conn()
+    with conn.cursor() as cur:
+        assert cur.fetchone() is None, "a fresh database has no row to return"
+        assert cur.fetchall() == [], "a fresh database returns no rows"
+
+
 def test_the_cursor_context_manager_does_not_suppress() -> None:
     """The THIRD swallow site, and the one no other test can see.
 
@@ -123,8 +158,12 @@ def test_the_cursor_context_manager_does_not_suppress() -> None:
     execute_batch it is STILL 389 green -- round 3's defect restored exactly,
     with a clean-looking 13,155-char capture and the constraint absent.
 
-    The same is true of conn.__exit__, measured the same way: an outer swallow
-    turns the real-UNIQUE case from 3 loud fixture errors into 390 green.
+    The same is true of conn.__exit__. Measured against the DISCARDED first
+    version of this test, which entered only conn.cursor(): an outer swallow
+    turned the real-UNIQUE case from 3 loud fixture errors into 390 green.
+    Against the test as it stands now that mutation fails here instead, which
+    is the point -- the figure describes what this test was written to stop,
+    not what it permits.
 
     test_the_swallow_stays_removed cannot reach either: it replaces
     ensure_config_schema with a raising stub, so neither `with` is entered.
