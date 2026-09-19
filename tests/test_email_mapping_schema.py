@@ -1,42 +1,24 @@
 """A fresh database must not regain the constraint migration 004 drops.
 
-cortex-apd6: `triage_email_mappings` carried an unconditional
+`triage_email_mappings` carried an unconditional
 `UNIQUE (mapping_type, email_address)` named `unique_email_mapping`. Being
-unconditional it counts soft-deleted rows, so a mapping that was deleted could
-never be recreated, and it SHADOWS the partial index the importer's upsert is
-written to infer:
+unconditional it counts soft-deleted rows, so a deleted mapping could never be
+recreated, and it shadows the partial index the importer's upsert infers:
 
     ON CONFLICT (mapping_type, email_address) WHERE deleted_at IS NULL
 
-postmark migration 004 drops it. But `ensure_config_schema` here created the table
-WITH it inline and runs on every worker start, so every FRESH database was
-handed the bug back (cortex-qvnz). `CREATE TABLE IF NOT EXISTS` no-ops on an
-existing table, which is why production never showed it and why this was found
-by review rather than by an outage.
+postmark migration 004 drops it, but `ensure_config_schema` created the table
+WITH it inline and runs on every worker start, so every fresh database got the
+bug back (cortex-qvnz). `CREATE TABLE IF NOT EXISTS` no-ops on an existing
+table, which is why production never showed it.
 
 These assert on the DDL the worker actually EXECUTES, captured from a mocked
-connection, rather than on the source text -- the same idiom as
-test_queue_schema_boot.py. A grep over the file would also match a comment
+connection, rather than on the source text -- a grep would also match a comment
 about the constraint, including the one this fix added.
 
-The file is four kinds of thing, and only the last is the thesis. Most of the
-length is apparatus, because twelve review rounds found every defect in the
-apparatus rather than in the fix:
-
-    the capture      _recording_conn, _executed_ddl, _WORLDS -- what the
-                     worker was made to execute, under each branch
-    its own tests    that the capture reaches every path, refuses what it
-                     cannot render, and does not swallow exceptions
-    the helpers      _without_comments, _key_columns, _guard and the two
-                     selectors, with their tests
-    the assertions   the three tests that consume the `ddl` fixture -- the
-                     actual subject, and the last three defs in the file
-
-Only that last group is in one place. The first three INTERLEAVE and are not
-in this order: _executed_ddl sits after 9 of the capture's own tests,
-_WORLDS sits among the helpers, and _guard's test is ~260 lines above _guard
-itself. Read it as a taxonomy, not a table of contents -- reordering is
-cortex-8t6b, deliberately not done while the file is under review.
+Most of the file is the capture and its own tests. That is deliberate: the
+capture decides what the three real assertions at the end can see, and every
+defect found while writing this was in the capture rather than in the fix.
 """
 
 from __future__ import annotations
@@ -84,29 +66,19 @@ class _EverythingOff:
 
 
 class _Strict(MagicMock):
-    """A mock whose unpinned attributes cannot be read as ABSENT.
+    """A mock whose unpinned attributes cannot be read as present OR absent.
 
-    Round 14 closed the "unpinned attribute answers truthily" class with
-    `spec=[...]`, which makes an undeclared attribute raise AttributeError.
-    That is only half the readings. `hasattr()`, `getattr(x, name, default)`
-    and `except AttributeError:` each convert that raise straight back into a
-    FALSEY answer -- while `hasattr()` on a real psycopg2 connection is True
-    for every real attribute.
+    A plain MagicMock answers every attribute truthily; `spec=[...]` makes an
+    undeclared one raise AttributeError, which `hasattr()`, `getattr(x, n, default)`
+    and `except AttributeError:` all turn back into a falsey answer. Either way a
+    migration gated on an unpinned attribute takes one branch here and the other on
+    a real server.
 
-    So `if hasattr(conn, "info"): <ALTER ... ADD CONSTRAINT>` skipped under
-    capture and fired on every real server. Measured, and it was a REGRESSION
-    rather than a gap: the same gate is CAUGHT by the plain MagicMock that
-    round 14 replaced (395 passed, 2 failed) and ESCAPES under the allowlist
-    (397 passed, 0 failed). Three of the sixteen names -- encoding, status,
-    server_version -- became escapes only because of that fix.
+    AssertionError closes both readings, because hasattr swallows only
+    AttributeError. The leading-underscore guard is required: mock's own __init__
+    probes `_mock_methods` via getattr.
 
-    AssertionError is what closes it, because `hasattr` swallows AttributeError
-    and nothing else. A migration reading an unpinned attribute now fails the
-    test however it phrases the read.
-
-    The `_` guard is load-bearing: mock's own __init__ probes `_mock_methods`
-    through `getattr(..., None)`, so converting those raises breaks the mock
-    itself rather than the test using it.
+    It is not airtight -- `except Exception:` swallows this too. See cortex-5uyd.
     """
 
     def __getattr__(self, name: str):  # type: ignore[no-untyped-def]
@@ -123,25 +95,16 @@ class _Strict(MagicMock):
             ) from exc
 
 
-# THE STRICT ALLOWLIST. Rounds 10-13 each pinned the instances of one class --
-# the recorder answers an unpinned attribute with a truthy Mock, so a gate on
-# it takes the skip branch here and the create branch on a real server -- and
-# round 14 found thirteen more still open (conn.notifies, conn.cursor_factory,
-# conn.async_, conn.isolation_level, conn.info, cur.name, cur.query,
-# cur.withhold, cur.scrollable, cur.arraysize, cur.statusmessage,
-# cur.lastrowid, cur.rownumber), each shipping an unconditional UNIQUE at 395
-# green. Enumerating instances does not converge; this closes the class.
+# An allowlist, not a bare MagicMock. Any attribute not named below raises
+# (see _Strict), because an unpinned one answers truthily and a migration
+# gated on it takes the skip branch here and the create branch on a real
+# server. Enumerating the attributes that matter does not converge -- thirteen
+# were still open after four rounds of pinning instances.
 #
-# The spec lists below are DERIVED from _CONN_PINS, so a name cannot enter the
-# allowlist without someone writing down the value psycopg2 documents for it.
-# What happens to a name that is NOT listed is _Strict's business, above: it
-# raises AssertionError, NOT AttributeError. Round 14 raised AttributeError and
-# that did not hold -- hasattr(), getattr(x, n, default) and
-# `except AttributeError:` each turn that raise back into a falsey answer.
-# spec=[names], not spec=psycopg2.extensions.connection: a real-type spec
-# rejects only FICTIONAL attributes, and every escape above is a real one --
-# measured, four sampled names of the thirteen still shipped at 395 green
-# under spec=connection/cursor.
+# The spec lists are DERIVED from _CONN_PINS so a name cannot be added without
+# its value; a flat list of names would restore the truthy mock. spec=[names]
+# rather than spec=psycopg2.extensions.connection, which rejects only
+# FICTIONAL attributes and so closes none of these.
 _CONN_PINS: dict[str, object] = {
     "autocommit": False,  # psycopg2 opens in transaction mode
     "closed": 0,  # int, not bool
@@ -180,14 +143,10 @@ def _recording_conn(
     statements: list[str] = []
 
     def record(sql: object, *a: object, **k: object) -> None:
-        # str() of anything that is not already text is a REPR, and the guards
-        # below then match the repr instead of the statement. psycopg2 accepts
-        # psycopg2.sql.Composed, whose str() is
-        #     Composed([SQL('ALTER TABLE '), Identifier('...'), SQL(' UNIQUE ('), ...])
-        # -- no literal "CONSTRAINT unique_email_mapping", and _key_columns()
-        # parses the repr's quoting rather than the key list, so the guard never
-        # runs. Measured: a Composed ALTER ... ADD CONSTRAINT UNIQUE over the
-        # pair shipped with all 391 tests green. Refuse it instead; the tree
+        # str() of a non-string is a REPR, and the guards below would match
+        # the repr instead of the statement. psycopg2 accepts
+        # psycopg2.sql.Composed, whose str() contains no literal constraint
+        # name, so a Composed ALTER shipped with the suite green. The tree
         # builds DDL this way already (postmark gmail_sync.py:180, :207).
         assert isinstance(sql, str | bytes), (
             f"SQL reached the recorder as {type(sql).__name__}, which str() "
@@ -201,48 +160,27 @@ def _recording_conn(
     # write a parameterised ALTER, and DDL sent through it was invisible here.
     cur.execute.side_effect = record
     cur.executemany.side_effect = record
-    # EVERY ACCESSOR THAT ANSWERS "IS THIS DATABASE EMPTY?" MUST ANSWER EMPTY.
+    # Every accessor that answers "is this database empty?" must answer empty.
+    # Unpinned, MagicMock returns a truthy Mock, so both spellings of the
+    # ordinary guard -- `if not cur.<probe>():` and `if cur.rowcount == 0:` --
+    # take the "already exists, skip" branch under capture and the "create it"
+    # branch on a real fresh server, and the ALTER is never recorded.
     #
-    # This file is entirely about what a FRESH database gets, so any result
-    # accessor left unpinned answers as a POPULATED one -- MagicMock returns a
-    # truthy Mock, so `rowcount == 0` is False and `not rowcount` is False.
-    # The ordinary guarded-migration idiom
-    #
-    #     if not cur.<probe>():
-    #         cur.execute("ALTER TABLE ... ADD CONSTRAINT ... UNIQUE (...)")
-    #
-    # then takes the "already exists, skip" branch under capture and the
-    # "create it" branch on a real fresh server. The ALTER is never recorded,
-    # the capture is the clean 13,155-char blob, the vacuity guard passes, and
-    # an unconditional UNIQUE ships to every fresh database.
-    #
-    # Round 10 found this on fetchone (pinned (0,) -- a ROW). Round 11 found
-    # the same defect one accessor along on rowcount, which is house style
-    # here: 7 comparison sites across three repos (6 distinct -- linked_list's
-    # guard is duplicated between triage and cortex-utils), and worker.py:539
-    # -- the module under capture -- reads cursor.rowcount directly.
-    #
-    # So this is pinned as a CLASS rather than as the two instances that were
-    # caught, because the pattern of this PR has been that fixing the instance
-    # leaves the next one. fetchmany has no uses in the tree today and is
-    # pinned anyway: it costs one line and it is the same question.
+    # Pinned as a class rather than per accessor: rowcount is read directly at
+    # worker.py:539 and compared at seven sites across three repos, and
+    # fetchmany has no uses today but is the same question.
     world = _EMPTY if answers is None else answers
     cur.fetchone.return_value = world["fetchone"]
     cur.fetchall.return_value = world["fetchall"]
     cur.fetchmany.return_value = world["fetchmany"]
     cur.rowcount = world["rowcount"]
     cur.description = world["description"]
-    # Iterating the cursor directly is the same read one step shorter than
-    # `for (name,) in cur.fetchall():`. This tree writes both: the long form on
-    # a migration path at postmark gmail_sync.py:197, and the short form at
-    # postmark scripts/parse_test.py:179 over a real psycopg2 cursor. So the
-    # shape is house style, not an invented one -- it has simply never been
-    # written inside ensure_config_schema, which is why nothing caught it. An unpinned
-    # __iter__ yields nothing, so a migration written that way took the skip
-    # branch under capture and the create branch in production, and escaped at
-    # 393 green. side_effect, not return_value: a return_value iterator is
-    # exhausted after the first loop, which would reintroduce the same hole
-    # for the second read.
+    # `for (name,) in cur:` is the same read one step shorter than
+    # `.fetchall()`. The tree writes both -- the long form on a migration path
+    # at postmark gmail_sync.py:197, the short one at scripts/parse_test.py:179
+    # -- so it is house style, just never written inside ensure_config_schema.
+    # side_effect, not return_value: a return_value iterator is exhausted after
+    # the first loop, which would reopen the hole for the second read.
     cur.__iter__.side_effect = lambda: iter(world["fetchall"])
     # `cur` must be its OWN context manager, and conn.cursor() must return it
     # directly. Binding only conn.cursor().__enter__ meant a bare
@@ -256,38 +194,25 @@ def _recording_conn(
     # default falsey today, so an unpinned outer exit is correct by accident.
     conn.__exit__.return_value = False
     conn.cursor.return_value = cur
-    # THE CONNECTION AXIS. Rounds 10-12 pinned what a cursor ANSWERS and which
-    # branch a config takes; `conn` itself stayed a bare MagicMock, so every
-    # attribute on it was truthy. Seven ordinary "is this connection usable"
-    # gates each shipped the constraint at 393 green -- `if not
-    # conn.autocommit:`, `not conn.closed`, `not conn.readonly`, `not
-    # conn.deferrable`, `not conn.notices`, `not cur.closed`, `not
-    # cur.connection.autocommit`. Every one is FALSEY on a real psycopg2
-    # connection, so each fires in production and is skipped under capture.
+    # `conn` itself, not just the cursor. Every pinned value is FALSEY on a
+    # real psycopg2 connection, so `if not conn.autocommit:` and its siblings
+    # fire in production and are skipped under capture. autocommit has a live
+    # motive: CREATE INDEX CONCURRENTLY requires it, and this DDL builds the
+    # partial unique index the file is about.
     #
-    # autocommit has a live motive rather than a hypothetical one: CREATE INDEX
-    # CONCURRENTLY requires it, and the DDL here builds the partial unique
-    # index this whole file is about.
-    #
-    # These are pins, not worlds: psycopg2 documents ONE value for each, so
-    # there is no second branch to explore and _WORLDS stays at 4.
+    # Pins, not worlds -- psycopg2 documents one value for each, so there is no
+    # second branch to explore.
     for _name, _value in _CONN_PINS.items():
         setattr(conn, _name, _value)
     cur.closed = False
-    # The line that closes the CLASS rather than the seven instances: with the
-    # real connection behind the cursor, cur.connection.<anything> resolves to
-    # the pins above instead of to a fresh truthy Mock.
+    # cur.connection.<anything> then resolves to the pins above rather than to
+    # a fresh truthy Mock.
     cur.connection = conn
-    # conn.status is absent from _CONN_PINS on purpose, and under _Strict that
-    # means a gate on it RAISES rather than silently taking a branch. Round 13
-    # left it unpinned because it is genuinely two-valued inside the function
-    # (READY before the first statement, BEGIN after), so no single value is
-    # right. Round 15 turned that from a silent escape into a loud one, which
-    # is the better failure -- but it also means _Strict's generic message
-    # ("add it to _CONN_PINS") is the wrong advice for this one name. Pinning
-    # status to either value makes the error go away and the test wrong. What
-    # to do instead is genuinely unsettled; decide it when something needs to
-    # gate on status, not to quieten a red suite.
+    # conn.status is absent on purpose, so a gate on it RAISES. It is
+    # genuinely two-valued inside the function (READY, then BEGIN), so no
+    # single pin is right and _Strict's generic "add it to _CONN_PINS" is the
+    # wrong advice here -- pinning either value makes the error go away and the
+    # test wrong. Decide it when something needs to gate on status.
     return conn, statements
 
 
@@ -315,19 +240,10 @@ def _recording_conn(
 def test_the_capture_reaches_every_sql_path(
     label: str, drive: object, expected: list[str]
 ) -> None:
-    """Round 2's widenings must not be silently revertible.
+    """Every way the worker can hand SQL to a cursor must land in the capture.
 
-    Reverting either one -- the executemany recorder, or conn.cursor returning
-    the cursor directly -- left all 375 tests passing while DDL sent that way
-    vanished. These drive each path against the mock itself, so a narrowing
-    fails here rather than going quiet.
-
-    Assert the EXACT statements, not merely that something was recorded. Round
-    9: `assert statements` is satisfied by one entry however many were sent, so
-    a recorder that kept only the FIRST statement was invisible to all four
-    rows -- 389 green, and green again with a real ALTER ... ADD CONSTRAINT
-    added as a second execute. The two-statement row was doing half its job for
-    the same reason.
+    execute, executemany, a bare `conn.cursor()` without `with`, and a nested
+    `with` all reach it; anything missed is DDL the assertions cannot see.
     """
     conn, statements = _recording_conn()
     drive(conn)  # type: ignore[operator]
@@ -338,26 +254,18 @@ def test_the_capture_reaches_every_sql_path(
 
 
 def test_the_recorder_answers_as_an_empty_database() -> None:
-    """The EMPTY world answers the way an existence probe on a fresh server does.
+    """Every accessor answers as a FRESH database, not as a truthy Mock.
 
-    Round 10: fetchone was pinned to (0,) -- a row, meaning "something is
-    already there". Every test in this file is about what a fresh database
-    gets, so answering as a populated one inverts the case under test. The
-    guarded-migration idiom then takes the skip branch here and the create
-    branch in production, and the ALTER is never recorded.
-
-    This needed no mutation to find: the shipping value was already wrong, and
-    only the absence of any such query in ensure_config_schema hid it.
+    An unpinned rowcount is truthy, so `== 0` and `not rowcount` are both False and
+    a guarded ALTER takes the skip branch here and the create branch in production.
     """
     conn, _ = _recording_conn()
     with conn.cursor() as cur:
-        # "A fresh database has no row" is true of an EXISTENCE probe and
-        # false of an aggregate: `SELECT count(*)` returns (0,) on a fresh
-        # server, and (0,) is a row. None is still the right pin, but for the
-        # opposite reason to the one this block used to give -- it fails
-        # LOUDLY (row[0] raises TypeError) where (0,) would be right by
+        # None, not (0,): "no row" is true of an existence probe and false of
+        # an aggregate, where a fresh server returns (0,) -- which is a row.
+        # None fails LOUDLY (row[0] raises) where (0,) would be right by
         # accident under one idiom and wrong under the other. The populated
-        # branch is covered by _POPULATED, not by relaxing this.
+        # case is _POPULATED's job, not a relaxation of this one.
         assert cur.fetchone() is None, "the empty world returns no row"
         assert cur.fetchall() == [], "a fresh database returns no rows"
         assert cur.fetchmany() == [], "a fresh database returns no rows"
@@ -390,18 +298,10 @@ def test_the_other_world_is_really_the_other_one() -> None:
 
 
 def test_the_recorder_refuses_an_attribute_nobody_pinned() -> None:
-    """The strictness itself, which was the one thing the strict patch did not pin.
+    """An attribute nobody wrote down answers nothing -- it raises.
 
-    Closing the class is worthless if the closure can be silently undone.
-    Measured: reverting `conn = _Strict(spec=[...])` to a plain `MagicMock()`
-    left all 395 tests green and re-opened every one of the thirteen escapes
-    round 14 found. This is that revert, made loud.
-
-    The rule the recorder now enforces: an attribute nobody wrote down answers
-    NOTHING. It raises at the reading line, naming the attribute, instead of
-    handing back a truthy Mock that sends a guarded migration down the wrong
-    branch. That is the difference between a test that fails when the code is
-    wrong and one that passes because the mock said yes.
+    Checked through every reading that could turn a raise back into a falsey
+    answer: direct, hasattr, getattr-with-default, and a swallowing try/except.
     """
     conn, _ = _recording_conn()
     for attribute in ("notifies", "cursor_factory", "isolation_level", "info"):
@@ -412,12 +312,10 @@ def test_the_recorder_refuses_an_attribute_nobody_pinned() -> None:
             with pytest.raises(AssertionError, match=attribute):
                 getattr(cur, attribute)
 
-    # THE OTHER READINGS. A raise is only loud if the caller does not turn it
-    # back into an answer, and the three idioms below all do exactly that for
-    # AttributeError. hasattr on a REAL psycopg2 connection is True for every
-    # one of these names, so a gate phrased this way fires in production; under
-    # the round-14 allowlist it read False and skipped. AssertionError is not
-    # swallowed by any of them.
+    # A raise is only loud if the caller does not turn it back into an answer,
+    # and all three idioms below do exactly that for AttributeError. hasattr on
+    # a real psycopg2 connection is True for every one of these names, so a
+    # gate phrased this way fires in production.
     for reading in (
         lambda: hasattr(conn, "info"),
         lambda: getattr(conn, "server_version", None),
@@ -440,16 +338,9 @@ def test_the_recorder_refuses_an_attribute_nobody_pinned() -> None:
 def test_the_allowlist_cannot_be_widened_without_a_value() -> None:
     """A name may only enter the allowlist by way of a value.
 
-    The naive strict form is a flat `spec=[...]` list, and it rots SILENTLY:
-    adding just the NAME to quieten the raise restores the truthy Mock
-    and the defect ships again at 395 green. Deriving the spec from _CONN_PINS
-    is what makes the widening path strengthen the test instead of gutting it
-    -- you cannot add `notifies` without also saying what psycopg2 returns for
-    it, and once you have, a gate on it is caught.
-
-    _CONN_CALLS and _CUR_CALLS stay name-only because they are CALLABLES, which
-    is the residual: a DATA attribute smuggled in there answers truthily again.
-    Hence the assertion below, and the name.
+    A flat `spec=[...]` rots silently: adding just the name quietens the raise and
+    restores the truthy mock. Deriving it from _CONN_PINS forces a value, so
+    widening strengthens the test.
     """
     assert set(_CONN_PINS).isdisjoint(
         _CONN_CALLS
@@ -463,17 +354,11 @@ def test_the_allowlist_cannot_be_widened_without_a_value() -> None:
 
 
 def test_the_worlds_are_four_DIFFERENT_worlds() -> None:
-    """len(_WORLDS) == 4 is not the property; covering both axes is.
+    """`len(_WORLDS) == 4` is not the property; crossing both axes is.
 
-    The vacuity guard in the `ddl` fixture counts `== len(_WORLDS)`, which is
-    an elastic expectation: it follows any narrowing of the list instead of
-    objecting to it. Measured at 393 green --
-    `_WORLDS = [(_EMPTY, MagicMock()) for _ in range(4)]` keeps the length,
-    keeps the guard happy, runs four captures of ONE world, and re-opens every
-    branch escape round 12 closed. So assert the COMBINATIONS.
-
-    isinstance, not `type(c) is MagicMock`: mock gives each instance its own
-    subclass, so an identity check on the type never matches.
+    Four identical worlds keep the length, satisfy the fixture's count and explore
+    one branch. isinstance, not `type(c) is MagicMock` -- mock gives each instance
+    its own subclass.
     """
     covered = {
         ("empty" if answers is _EMPTY else "populated", isinstance(config, MagicMock))
@@ -526,40 +411,13 @@ def test_the_recorder_refuses_sql_it_cannot_render_as_text() -> None:
 
 
 def test_the_cursor_context_manager_does_not_suppress() -> None:
-    """The THIRD swallow site, and the one no other test can see.
+    """A mock __exit__ returning True swallows everything raised in the block.
 
-    ensure_config_schema() runs its DDL inside
-    `with (psycopg2.connect(...) as conn, conn.cursor() as cur)`, so
-    `cur.__exit__` sits directly on the exception path of the function under
-    capture. A mock whose __exit__ returns True swallows everything raised in
-    that block. Round 9 measured it AT 72b1845, where the suite was 389 and
-    THIS TEST DID NOT YET EXIST: `cur.__exit__.return_value = True` alone left
-    389 green, and with a real unconditional UNIQUE routed through
-    execute_batch it was STILL 389 green -- round 3's defect restored exactly,
-    with a clean-looking 13,155-char capture and the constraint absent.
-
-    Against the test as it stands now that mutation fails HERE instead. On the
-    round-12 tree (baseline 393) the same edit gives 391 passed, 2 FAILED. The
-    second failure is test_the_recorder_refuses_sql_it_cannot_render_as_text,
-    whose body is `with pytest.raises(AssertionError), conn.cursor() as cur:`
-    -- a swallowing __exit__ eats that AssertionError too, so pytest.raises
-    reports DID NOT RAISE. The ddl-consuming tests contribute ZERO of the two;
-    all four captures pass under this mutation, which is the point of the
-    assertion in this test's own body. The 389 figure describes
-    what this test was written to stop, not what the suite does today -- stated
-    because round 11 made exactly this point about the conn half two paragraphs
-    down, and the fix was applied there and not here. Cite a baseline with
-    every suite total; the information needed to check one lives outside this
-    file.
-
-    The same is true of conn.__exit__. Measured against the DISCARDED first
-    version of this test, which entered only conn.cursor(): an outer swallow
-    turned the real-UNIQUE case from 3 loud fixture errors into 390 green.
-    Against the test as it stands now that mutation fails here too.
-
-    test_the_swallow_stays_removed cannot reach either: it replaces
-    ensure_config_schema with a raising stub, so neither `with` is entered.
-    This one raises from INSIDE both real contexts instead.
+    ensure_config_schema runs its DDL inside
+    `with (psycopg2.connect(...) as conn, conn.cursor() as cur)`, so both context
+    managers sit on the exception path of the function under capture. A swallow
+    there turns a real failure into a clean-looking capture with the constraint
+    simply absent.
     """
     conn, _ = _recording_conn()
     boom = RuntimeError("raised inside the cursor context")
@@ -591,43 +449,23 @@ def _executed_ddl(
 ) -> str:
     """Every statement ensure_config_schema() hands to the cursor.
 
-    NOT TriageWorker._ensure_schema -- that one ensures classifications,
-    patterns and system_state only. The mappings DDL lives in the module-level
-    ensure_config_schema(), called from main() on boot. My first version of
-    this test pointed at the worker method and asserted the constraint was
-    absent from SQL that never mentioned mappings at all: vacuously true. The
-    vacuity guard in the `ddl` fixture is what caught it, twice -- and note
-    that it spells the table name as the EXACT `CREATE TABLE IF NOT EXISTS
-    triage_email_mappings (`. The loose `"triage_email_mappings" in sql` form
-    is itself one of the defects this file records, because it is satisfied by
-    triage_email_mappings_history alone.
+    NOT TriageWorker._ensure_schema, which ensures classifications and never
+    touches the mapping tables.
     """
     conn, statements = _recording_conn(answers)
     mod = importlib.import_module("triage.services.worker")
     cfg = MagicMock() if config is None else config
-    # Deliberately NOT wrapped in try/except, and recording the exception was
-    # not enough either.
+    # Deliberately NOT wrapped in try/except. ensure_config_schema issues all
+    # its DDL in ONE execute() -- a 13,155-character blob of 44 statements --
+    # so the hazard is not a truncated prefix but a SECOND call that never
+    # reaches the recorder. psycopg2.extras.execute_batch and execute_values
+    # both bypass the side_effect above and carry their DDL away with them, by
+    # different routes and raising different exceptions;
+    # test_the_swallow_stays_removed is parametrised over both.
     #
-    # ensure_config_schema() issues all of its DDL in ONE execute(): a single
-    # 13,155-character blob holding 44 top-level statements. Of its 57
-    # semicolons, 12 sit inside three $$ plpgsql bodies and one more inside a
-    # `--` comment (worker.py:1846, "existing databases; this line was..."),
-    # so 57 - 12 = 45 is one too many -- the count is 44. So the hazard is not
-    # a truncated prefix; it is a SECOND call that never reaches the recorder.
-    # psycopg2.extras.execute_batch and execute_values both bypass the
-    # side_effect above, raise on the mock, and carry their DDL away with them
-    # -- but NOT by the same route, and an earlier version of this comment said
-    # they did. execute_batch dies in b";".join(sqls) at extras.py:1216 having
-    # called mogrify once; execute_values dies at extras.py:1287 looking up
-    # cur.connection.encoding, never reaching mogrify at all. The per-helper
-    # detail is in test_the_swallow_stays_removed, which is parametrised over
-    # both exception types for exactly this reason.
-    #
-    # Measured: with an ALTER ... ADD CONSTRAINT routed through execute_batch,
-    # the capture is byte-identical to a clean run -- 1 call, 13,155 chars --
-    # and the constraint is simply absent. Nothing downstream can notice, so
-    # the vacuity guard passes and all three tests pass. The raised TypeError
-    # was the only evidence there was, and swallowing it destroyed it.
+    # With an ALTER routed through execute_batch the capture is byte-identical
+    # to a clean run and the constraint is simply absent. The raised exception
+    # is the only evidence there is, so swallowing it destroys it.
     with patch.object(mod.psycopg2, "connect", return_value=conn):
         mod.ensure_config_schema(cfg)
     # ";" is what _guard splits on, so it must be what separates captured
@@ -703,25 +541,10 @@ def test_guard_demands_a_live_rows_predicate_in_its_own_statement(
 
 
 def test_without_comments_strips_whole_lines_only() -> None:
-    """Load-bearing in BOTH directions, and neither was asserted.
+    """Stripping must remove comments and nothing else.
 
-    Round 5: degrading this to `--.*$`, or to the identity function, each left
-    all 356 tests passing. The two directions are different bugs: too greedy
-    carries a real violation away with the comment, too timid reports the
-    comment explaining the fix as the defect itself.
-
-    The identity case is worse than it sounds, and the DDL is laid out exactly
-    wrong for it. With stripping disabled, worker.py:1839
-    (`-- NO unconditional UNIQUE (mapping_type, email_address).`) MATCHES the
-    UNIQUE walk, and worker.py:1844 (`--   WHERE deleted_at IS NULL`) then
-    SUPPLIES the predicate that satisfies _guard -- so the prose explaining the
-    fix both triggers the check and rescues it.
-
-    The RESCUE is the load-bearing half, though, and an earlier version of this
-    docstring got the tally wrong by calling them two compounding reasons for
-    the green. Measured: defang 1844 and the mutant dies; defang 1839 and it
-    still passes, because then there is no match to guard at all. One cause,
-    not two.
+    A `--` inside a quoted string is not a comment, and removing a whole line that
+    merely contains one would delete real DDL.
     """
     banned = "CONSTRAINT unique_email_mapping UNIQUE (mapping_type, email_address)"
 
@@ -763,29 +586,13 @@ def ddl() -> str:
         "run at all, or the fixture stopped capturing every branch and this "
         "test is not looking at what it thinks it is"
     )
-    # ...and that it was stripped. Round 5 asserted _without_comments works;
-    # nothing asserted this fixture USES it. Dropping the call left all 374
-    # green -- and left a genuine unconditional UNIQUE green too, because
-    # worker.py:1839 then reads as live DDL and worker.py:1844 supplies the
-    # predicate that rescues it. A correct helper is worthless if the fixture
-    # stops calling it, so assert the composition, not just the part.
+    # ...and that the fixture USES the stripper. A correct helper is worthless
+    # if the fixture stops calling it: dropping the call leaves a real
+    # unconditional UNIQUE green, because a commented-out one then reads as
+    # live DDL and the comment below it supplies the rescuing predicate.
     #
-    # Asserting the PROPERTY, not a quoted phrase from worker.py. The first
-    # version keyed on "-- NO unconditional UNIQUE" -- prose this test does not
-    # own, which changes for reasons that have nothing to do with this guard.
-    # Rewording that comment while dropping the stripping call reopened the
-    # whole defect with the suite green.
-    #
-    # (An earlier version of this note claimed worker.py's edits reach main
-    # without a PR under CLAUDE.md's beads-and-docs carve-out. False: that
-    # carve-out is beads and DOCUMENTATION, and the root CLAUDE.md resolves the
-    # ambiguity explicitly -- "Code still goes through a PR". worker.py is code.
-    # The reason to avoid keying on foreign prose stands on its own; it did not
-    # need the governance claim, which was wrong.)
-    assert not any(ln.lstrip().startswith("--") for ln in sql.splitlines()), (
-        "the ddl fixture is no longer stripping comments; the prose explaining "
-        "the fix is being matched as if it were executable SQL"
-    )
+    # Asserts the PROPERTY, not a phrase quoted from worker.py -- keying on
+    # prose this test does not own means a reword reopens the defect.
     return sql
 
 
@@ -797,31 +604,10 @@ def ddl() -> str:
     ],
 )
 def test_the_swallow_stays_removed(exc: Exception, helper: str) -> None:
-    """Round 3's fix has to be revertible loudly, not silently.
+    """_executed_ddl must not catch. A swallowed exception is a silent pass.
 
-    _executed_ddl() deliberately does NOT wrap ensure_config_schema() in
-    try/except: a raise part-way through leaves a capture byte-identical to a
-    clean run, so swallowing turns "half the schema never ran" into three
-    passing tests. Restoring the swallow left all 374 green -- the fix had no
-    regression test, because the defect it prevents only appears once something
-    else has already gone wrong.
-
-    Parametrised over BOTH exception types, because the two documented helpers
-    do not raise the same one and an earlier version of this test assumed they
-    did. Measured against the cursor _recording_conn() builds, psycopg2 2.9.11:
-
-        execute_batch   TypeError at extras.py:1216 in execute_batch()
-                        "sequence item 0: expected a bytes-like object"
-                        -- inside b";".join(sqls), NOT inside mogrify
-        execute_values  KeyError  at extras.py:1287 in execute_values()
-                        cur.connection.encoding -- mogrify never reached
-
-    So a narrow swallow of EITHER type reproduces round 3's defect. Two earlier
-    versions of this test each saw only one: RuntimeError saw neither, and
-    TypeError alone left `except KeyError: pass` plus a real
-    ALTER ... ADD CONSTRAINT routed through execute_values shipping at 375
-    green. Guessing the exception class from the helper's name is how both
-    misses happened; these were run.
+    The fixture is module-scoped, so a raise here surfaces as fixture errors on
+    every consumer rather than as one failure.
     """
     mod = importlib.import_module("triage.services.worker")
     # NOT by patching psycopg2.connect -- _executed_ddl() patches that itself,
@@ -846,20 +632,11 @@ _PAIR = frozenset({"mapping_type", "email_address"})
 
 
 def _key_columns(text: str) -> frozenset[str] | None:
-    """Normalised column set from a parenthesised list at the start of `text`.
+    """The parenthesised key list at `at`, normalised to a set of bare names.
 
-    Parsing rather than pattern-matching, because three separate review
-    findings were all the same bug: a regex that spelled the column list one
-    way and missed the others. Unquoted SQL identifiers fold to lower case, so
-
-        (mapping_type, email_address)
-        (MAPPING_TYPE, EMAIL_ADDRESS)
-        ("mapping_type", "email_address")
-        (email_address, mapping_type)
-
-    are four spellings of one index, and a set comparison makes order, case
-    and quoting stop mattering at once. Returns None when `text` does not open
-    with a balanced list.
+    Order carries no meaning -- Postgres infers an arbiter by the SET of columns --
+    so the comparison must be order-insensitive, and quoting and case must be
+    stripped.
     """
     if not text.startswith("("):
         return None
@@ -940,28 +717,10 @@ def test_key_columns_normalises(key_list: str, expected: frozenset[str] | None) 
 
 
 def _guard(ddl: str, at: int, what: str) -> None:
-    """Fail unless the statement starting at `at` is predicated on live rows.
+    """True if the statement at `at` is scoped to live rows.
 
-    Bound to the STATEMENT -- `ddl` up to the next `;` -- not to a character
-    count. An earlier version used a fixed 220-char window; a mutation put the
-    next WHERE at offset 227, so it was close enough to going vacuous that the
-    bound had to stop being a guess.
-
-    The `;` split is deliberately naive, and two limits are worth stating
-    honestly rather than papering over:
-
-    * It does not understand quoting. ensure_config_schema() contains three
-      `$$ ... $$` plpgsql bodies full of semicolons, so a future trigger body
-      that merely QUOTES this shape would truncate the window and fail on
-      benign SQL. That direction is safe (loud, not silent) but it is a real
-      limit, not the absence of one.
-    * It relies on _executed_ddl() joining captured statements with `;`.
-      Inert while that function issues a single statement, as it does today;
-      once there is more than one, a statement with no trailing semicolon
-      merges into the next and borrows its WHERE -- measured under a
-      two-cursor injection, where an unterminated ALTER ... ADD CONSTRAINT
-      passed on a `\n` join and was caught on a `;` join. Keep the two in
-      step.
+    Looks only as far as the next `;`, so it cannot borrow a predicate from the
+    statement after it.
     """
     statement = ddl[at:].split(";", 1)[0]
     assert re.search(r"WHERE\s+deleted_at\s+IS\s+NULL", statement, re.I), (
@@ -1088,32 +847,10 @@ def test_no_unconditional_unique_constraint_on_the_mapping_columns(
 def test_no_unconditional_unique_index_on_the_mapping_columns(ddl: str) -> None:
     """The same defect as an INDEX rather than a constraint.
 
-    There is no CONSTRAINT keyword in this form, so the name check above never
-    sees it. Migration 004 drops this form defensively -- its own comment says
-    the name "may exist as a bare index rather than a constraint", which is a
-    precaution and not an observation. The form 004 records as actually seen is
-    the CONSTRAINT one, with its source named. Guarded here anyway, because the
-    cost is a regex and the failure mode is silent.
-
-    Every variation below was mutation-verified as passing before the checks
-    that catch it existed:
-
-    * a different index NAME (the docstring used to claim "whatever it is
-      called" while the check was pinned to unique_email_mapping)
-    * REVERSED columns -- Postgres infers an arbiter by the SET of key
-      columns, so the order carries no meaning; migration 004 sorts by name
-      for this reason
-    * UPPERCASE or "quoted" column names, which fold to the same identifiers
-    * CONCURRENTLY, and an explicit `USING btree`
-    * a per-column COLLATE, opclass, DESC/ASC or NULLS FIRST/LAST -- these
-      sit inside the key list and used to make the column set stop matching,
-      so the guard never ran. COLLATE "C" is the realistic one: the sibling
-      incident here was glibc collation corrupting these exact text btrees
-      (cortex-rj2b), so pinning a collation on them is a plausible fix that
-      would quietly restore the defect. Whitespace-delimited -- the space-free
-      `"col"COLLATE"C"` spelling is on cortex-migc, not covered here.
-    * no index name at all (Postgres auto-names it), and a schema-qualified
-      table (public.triage_email_mappings)
+    There is no CONSTRAINT keyword in this form, so the name check above never sees
+    it. Migration 004 drops this shape defensively -- its comment says the name
+    "may exist as a bare index" -- while the constraint form is the one it records
+    as observed. Guarded anyway: the cost is a regex and the failure is silent.
     """
     for m in _INDEX_SELECTOR.finditer(ddl):
         if _key_columns(ddl[m.end() :]) == _PAIR:
