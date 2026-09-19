@@ -83,6 +83,45 @@ class _EverythingOff:
         return None
 
 
+# THE STRICT ALLOWLIST. Rounds 10-13 each pinned the instances of one class --
+# the recorder answers an unpinned attribute with a truthy Mock, so a gate on
+# it takes the skip branch here and the create branch on a real server -- and
+# round 14 found thirteen more still open (conn.notifies, conn.cursor_factory,
+# conn.async_, conn.isolation_level, conn.info, cur.name, cur.query,
+# cur.withhold, cur.scrollable, cur.arraysize, cur.statusmessage,
+# cur.lastrowid, cur.rownumber), each shipping an unconditional UNIQUE at 395
+# green. Enumerating instances does not converge; this closes the class.
+#
+# The spec lists below are DERIVED from _CONN_PINS, so a name cannot enter the
+# allowlist without someone writing down the value psycopg2 documents for it,
+# and anything not listed raises AttributeError instead of answering truthily.
+# spec=[names], not spec=psycopg2.extensions.connection: a real-type spec
+# rejects only FICTIONAL attributes, and every escape above is a real one --
+# measured, all four still shipped at 395 green under spec=connection/cursor.
+_CONN_PINS: dict[str, object] = {
+    "autocommit": False,  # psycopg2 opens in transaction mode
+    "closed": 0,  # int, not bool
+    "readonly": None,
+    "deferrable": None,
+    "notices": [],
+}
+# Callables only. A DATA attribute added here would answer with a truthy Mock
+# again -- it belongs in _CONN_PINS, which forces a value.
+_CONN_CALLS = ("cursor", "commit", "__enter__", "__exit__")
+_CUR_CALLS = (
+    "execute",
+    "executemany",
+    "fetchone",
+    "fetchall",
+    "fetchmany",
+    "__enter__",
+    "__exit__",
+    "__iter__",
+)
+# cur's data attributes come from the world dict below, plus its own two pins.
+_CUR_DATA = ("rowcount", "description", "closed", "connection")
+
+
 def _recording_conn(
     answers: dict[str, object] | None = None,
 ) -> tuple[MagicMock, list[str]]:
@@ -113,7 +152,7 @@ def _recording_conn(
         )
         statements.append(str(sql))
 
-    cur = MagicMock()
+    cur = MagicMock(spec=[*_CUR_CALLS, *_CUR_DATA])
     # BOTH execute paths. executemany is not exotic -- it is the natural way to
     # write a parameterised ALTER, and DDL sent through it was invisible here.
     cur.execute.side_effect = record
@@ -164,7 +203,7 @@ def _recording_conn(
     # MagicMock that swallowed its SQL silently.
     cur.__enter__.return_value = cur
     cur.__exit__.return_value = False
-    conn = MagicMock()
+    conn = MagicMock(spec=[*_CONN_PINS, *_CONN_CALLS])
     conn.__enter__.return_value = conn
     # Pinned for the same reason cur's is: MagicMock.__exit__ happens to
     # default falsey today, so an unpinned outer exit is correct by accident.
@@ -185,11 +224,8 @@ def _recording_conn(
     #
     # These are pins, not worlds: psycopg2 documents ONE value for each, so
     # there is no second branch to explore and _WORLDS stays at 4.
-    conn.autocommit = False
-    conn.closed = 0  # psycopg2 uses int, not bool
-    conn.readonly = None
-    conn.deferrable = None
-    conn.notices = []
+    for _name, _value in _CONN_PINS.items():
+        setattr(conn, _name, _value)
     cur.closed = False
     # The line that closes the CLASS rather than the seven instances: with the
     # real connection behind the cursor, cur.connection.<anything> resolves to
@@ -297,6 +333,55 @@ def test_the_other_world_is_really_the_other_one() -> None:
         assert list(cur) == [(1,)], "the populated world must iterate rows"
         assert list(cur) == [(1,)], "...and must still iterate on the next read"
     assert not _EverythingOff().any_flag_at_all, "the falsey config must be falsey"
+
+
+def test_the_recorder_refuses_an_attribute_nobody_pinned() -> None:
+    """The strictness itself, which was the one thing the strict patch did not pin.
+
+    Closing the class is worthless if the closure can be silently undone.
+    Measured: reverting `conn = MagicMock(spec=[...])` to a plain `MagicMock()`
+    left all 395 tests green and re-opened every one of the thirteen escapes
+    round 14 found. This is that revert, made loud.
+
+    The rule the recorder now enforces: an attribute nobody wrote down answers
+    NOTHING. It raises at the reading line, naming the attribute, instead of
+    handing back a truthy Mock that sends a guarded migration down the wrong
+    branch. That is the difference between a test that fails when the code is
+    wrong and one that passes because the mock said yes.
+    """
+    conn, _ = _recording_conn()
+    for attribute in ("notifies", "cursor_factory", "isolation_level", "info"):
+        with pytest.raises(AttributeError, match=attribute):
+            getattr(conn, attribute)
+    with conn.cursor() as cur:
+        for attribute in ("name", "query", "rownumber", "statusmessage"):
+            with pytest.raises(AttributeError, match=attribute):
+                getattr(cur, attribute)
+
+
+def test_the_allowlist_cannot_be_widened_without_a_value() -> None:
+    """A name may only enter the allowlist by way of a value.
+
+    The naive strict form is a flat `spec=[...]` list, and it rots SILENTLY:
+    adding just the NAME to quieten the AttributeError restores the truthy Mock
+    and the defect ships again at 395 green. Deriving the spec from _CONN_PINS
+    is what makes the widening path strengthen the test instead of gutting it
+    -- you cannot add `notifies` without also saying what psycopg2 returns for
+    it, and once you have, a gate on it is caught.
+
+    _CONN_CALLS and _CUR_CALLS stay name-only because they are CALLABLES, which
+    is the residual: a DATA attribute smuggled in there answers truthily again.
+    Hence the assertion below, and the name.
+    """
+    assert set(_CONN_PINS).isdisjoint(
+        _CONN_CALLS
+    ), "a name in both is ambiguous: the pin sets a value, the call list does not"
+    assert set(_CONN_PINS).isdisjoint(_CUR_CALLS)
+    # Every pinned name must actually be readable on the recorder -- otherwise
+    # the pin dict and the spec list have drifted apart.
+    conn, _ = _recording_conn()
+    for name, value in _CONN_PINS.items():
+        assert getattr(conn, name) == value
 
 
 def test_the_worlds_are_four_DIFFERENT_worlds() -> None:
