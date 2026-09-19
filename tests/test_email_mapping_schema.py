@@ -170,6 +170,34 @@ def _recording_conn(
     # default falsey today, so an unpinned outer exit is correct by accident.
     conn.__exit__.return_value = False
     conn.cursor.return_value = cur
+    # THE CONNECTION AXIS. Rounds 10-12 pinned what a cursor ANSWERS and which
+    # branch a config takes; `conn` itself stayed a bare MagicMock, so every
+    # attribute on it was truthy. Seven ordinary "is this connection usable"
+    # gates each shipped the constraint at 393 green -- `if not
+    # conn.autocommit:`, `not conn.closed`, `not conn.readonly`, `not
+    # conn.deferrable`, `not conn.notices`, `not cur.closed`, `not
+    # cur.connection.autocommit`. Every one is FALSEY on a real psycopg2
+    # connection, so each fires in production and is skipped under capture.
+    #
+    # autocommit has a live motive rather than a hypothetical one: CREATE INDEX
+    # CONCURRENTLY requires it, and the DDL here builds the partial unique
+    # index this whole file is about.
+    #
+    # These are pins, not worlds: psycopg2 documents ONE value for each, so
+    # there is no second branch to explore and _WORLDS stays at 4.
+    conn.autocommit = False
+    conn.closed = 0  # psycopg2 uses int, not bool
+    conn.readonly = None
+    conn.deferrable = None
+    conn.notices = []
+    cur.closed = False
+    # The line that closes the CLASS rather than the seven instances: with the
+    # real connection behind the cursor, cur.connection.<anything> resolves to
+    # the pins above instead of to a fresh truthy Mock.
+    cur.connection = conn
+    # conn.status is deliberately NOT pinned: it is genuinely two-valued inside
+    # the function (READY before the first statement, BEGIN after), so no single
+    # value is right and a wrong pin would be worse than none.
     return conn, statements
 
 
@@ -269,6 +297,53 @@ def test_the_other_world_is_really_the_other_one() -> None:
         assert list(cur) == [(1,)], "the populated world must iterate rows"
         assert list(cur) == [(1,)], "...and must still iterate on the next read"
     assert not _EverythingOff().any_flag_at_all, "the falsey config must be falsey"
+
+
+def test_the_worlds_are_four_DIFFERENT_worlds() -> None:
+    """len(_WORLDS) == 4 is not the property; covering both axes is.
+
+    The vacuity guard in the `ddl` fixture counts `== len(_WORLDS)`, which is
+    an elastic expectation: it follows any narrowing of the list instead of
+    objecting to it. Measured at 393 green --
+    `_WORLDS = [(_EMPTY, MagicMock()) for _ in range(4)]` keeps the length,
+    keeps the guard happy, runs four captures of ONE world, and re-opens every
+    branch escape round 12 closed. So assert the COMBINATIONS.
+
+    isinstance, not `type(c) is MagicMock`: mock gives each instance its own
+    subclass, so an identity check on the type never matches.
+    """
+    covered = {
+        ("empty" if answers is _EMPTY else "populated", isinstance(config, MagicMock))
+        for answers, config in _WORLDS
+    }
+    assert covered == {
+        ("empty", True),
+        ("empty", False),
+        ("populated", True),
+        ("populated", False),
+    }, f"_WORLDS no longer crosses both axes: {covered}"
+    assert len(_WORLDS) == 4
+
+
+def test_the_connection_answers_as_a_live_psycopg2_connection() -> None:
+    """The third axis: `conn` itself, which was a bare truthy MagicMock.
+
+    Every one of these is falsey on a real connection, so `if not <x>:` fires
+    in production and was skipped under capture. Each shipped an unconditional
+    UNIQUE at 393 green before these pins existed.
+    """
+    conn, _ = _recording_conn()
+    assert conn.autocommit is False, "psycopg2 opens in transaction mode"
+    assert not conn.closed, "an open connection is falsey-closed (int 0)"
+    assert conn.readonly is None
+    assert conn.deferrable is None
+    assert conn.notices == []
+    with conn.cursor() as cur:
+        assert not cur.closed, "a live cursor is not closed"
+        # The class-level pin: the cursor's connection is THE connection, so
+        # cur.connection.<anything> inherits every pin above.
+        assert cur.connection is conn
+        assert cur.connection.autocommit is False
 
 
 def test_the_recorder_refuses_sql_it_cannot_render_as_text() -> None:
