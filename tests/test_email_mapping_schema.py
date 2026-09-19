@@ -48,25 +48,35 @@ def _recording_conn() -> tuple[MagicMock, list[str]]:
     # write a parameterised ALTER, and DDL sent through it was invisible here.
     cur.execute.side_effect = record
     cur.executemany.side_effect = record
-    # None, not (0,). DBAPI returns None from fetchone() on an EMPTY result
-    # set, and every test in this file is about what a FRESH database gets.
-    # (0,) is a row, i.e. "something is already there" -- so the ordinary
-    # idempotent-migration idiom
+    # EVERY ACCESSOR THAT ANSWERS "IS THIS DATABASE EMPTY?" MUST ANSWER EMPTY.
     #
-    #     if not cur.fetchone():
+    # This file is entirely about what a FRESH database gets, so any result
+    # accessor left unpinned answers as a POPULATED one -- MagicMock returns a
+    # truthy Mock, so `rowcount == 0` is False and `not rowcount` is False.
+    # The ordinary guarded-migration idiom
+    #
+    #     if not cur.<probe>():
     #         cur.execute("ALTER TABLE ... ADD CONSTRAINT ... UNIQUE (...)")
     #
-    # takes the "already exists, skip" branch under capture and the "create
-    # it" branch on a real fresh server. The ALTER is never recorded, the
-    # capture is the clean 13,155-char blob, the vacuity guard passes, and an
-    # unconditional UNIQUE ships. Round 10 found this needing NO mutation of
-    # the test -- the value shipping today was already the wrong one; only the
-    # absence of any such query in ensure_config_schema was hiding it.
+    # then takes the "already exists, skip" branch under capture and the
+    # "create it" branch on a real fresh server. The ALTER is never recorded,
+    # the capture is the clean 13,155-char blob, the vacuity guard passes, and
+    # an unconditional UNIQUE ships to every fresh database.
     #
-    # Both idioms already exist in this codebase (postmark gmail_sync.py:1549
-    # and :229), so this is house style rather than a hypothetical.
-    cur.fetchone.return_value = None
-    cur.fetchall.return_value = []
+    # Round 10 found this on fetchone (pinned (0,) -- a ROW). Round 11 found
+    # the same defect one accessor along on rowcount, which is house style
+    # here: 7 comparison sites across three repos (6 distinct -- linked_list's
+    # guard is duplicated between triage and cortex-utils), and worker.py:539
+    # -- the module under capture -- reads cursor.rowcount directly.
+    #
+    # So this is pinned as a CLASS rather than as the two instances that were
+    # caught, because the pattern of this PR has been that fixing the instance
+    # leaves the next one. fetchmany has no uses in the tree today and is
+    # pinned anyway: it costs one line and it is the same question.
+    cur.fetchone.return_value = None  # DBAPI: no row
+    cur.fetchall.return_value = []  # DBAPI: no rows
+    cur.fetchmany.return_value = []  # DBAPI: no rows
+    cur.rowcount = 0  # nothing matched, nothing affected
     # `cur` must be its OWN context manager, and conn.cursor() must return it
     # directly. Binding only conn.cursor().__enter__ meant a bare
     # `cur2 = conn.cursor()` -- no `with` -- handed back a fresh unrecorded
@@ -144,6 +154,13 @@ def test_the_recorder_answers_as_an_empty_database() -> None:
     with conn.cursor() as cur:
         assert cur.fetchone() is None, "a fresh database has no row to return"
         assert cur.fetchall() == [], "a fresh database returns no rows"
+        assert cur.fetchmany() == [], "a fresh database returns no rows"
+        # Both forms, because both are idioms in this tree and an unpinned
+        # rowcount satisfies NEITHER: it is a truthy Mock, so `== 0` is False
+        # and `not rowcount` is False -- a guarded ALTER takes the skip branch
+        # under capture and the create branch on a real server.
+        assert cur.rowcount == 0, "a fresh database affected no rows"
+        assert not cur.rowcount, "an unpinned rowcount is truthy and skips the guard"
 
 
 def test_the_cursor_context_manager_does_not_suppress() -> None:
