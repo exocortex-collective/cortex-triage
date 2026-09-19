@@ -233,11 +233,11 @@ def _recording_conn(
     cur.rowcount = world["rowcount"]
     cur.description = world["description"]
     # Iterating the cursor directly is the same read one step shorter than
-    # `for (name,) in cur.fetchall():`, which this tree already does at
-    # postmark gmail_sync.py:197 -- so the short form is a plausible edit of
-    # code that exists, not an invented shape.  The citation is the LONG form
-    # deliberately; nothing in the tree writes the short one yet, which is
-    # exactly why nothing caught it. An unpinned
+    # `for (name,) in cur.fetchall():`. This tree writes both: the long form on
+    # a migration path at postmark gmail_sync.py:197, and the short form at
+    # postmark scripts/parse_test.py:179 over a real psycopg2 cursor. So the
+    # shape is house style, not an invented one -- it has simply never been
+    # written inside ensure_config_schema, which is why nothing caught it. An unpinned
     # __iter__ yields nothing, so a migration written that way took the skip
     # branch under capture and the create branch in production, and escaped at
     # 393 green. side_effect, not return_value: a return_value iterator is
@@ -283,10 +283,11 @@ def _recording_conn(
     # left it unpinned because it is genuinely two-valued inside the function
     # (READY before the first statement, BEGIN after), so no single value is
     # right. Round 15 turned that from a silent escape into a loud one, which
-    # is the better failure: _Strict's message says "add it to _CONN_PINS", and
-    # for status the honest answer is to add a fifth world instead, or to
-    # decide which value the test means. Do not pin it to make the error go
-    # away.
+    # is the better failure -- but it also means _Strict's generic message
+    # ("add it to _CONN_PINS") is the wrong advice for this one name. Pinning
+    # status to either value makes the error go away and the test wrong. What
+    # to do instead is genuinely unsettled; decide it when something needs to
+    # gate on status, not to quieten a red suite.
     return conn, statements
 
 
