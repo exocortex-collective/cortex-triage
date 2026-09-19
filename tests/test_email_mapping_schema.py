@@ -593,6 +593,10 @@ def ddl() -> str:
     #
     # Asserts the PROPERTY, not a phrase quoted from worker.py -- keying on
     # prose this test does not own means a reword reopens the defect.
+    assert not any(ln.lstrip().startswith("--") for ln in sql.splitlines()), (
+        "the ddl fixture is no longer stripping comments; the prose explaining "
+        "the fix is being matched as if it were executable SQL"
+    )
     return sql
 
 
@@ -632,7 +636,7 @@ _PAIR = frozenset({"mapping_type", "email_address"})
 
 
 def _key_columns(text: str) -> frozenset[str] | None:
-    """The parenthesised key list at `at`, normalised to a set of bare names.
+    """The parenthesised key list in `text`, normalised to a set of bare names.
 
     Order carries no meaning -- Postgres infers an arbiter by the SET of columns --
     so the comparison must be order-insensitive, and quoting and case must be
@@ -717,7 +721,7 @@ def test_key_columns_normalises(key_list: str, expected: frozenset[str] | None) 
 
 
 def _guard(ddl: str, at: int, what: str) -> None:
-    """True if the statement at `at` is scoped to live rows.
+    """Fail unless the statement at `at` is scoped to live rows.
 
     Looks only as far as the next `;`, so it cannot borrow a predicate from the
     statement after it.
