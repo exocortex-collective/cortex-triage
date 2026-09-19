@@ -83,6 +83,46 @@ class _EverythingOff:
         return None
 
 
+class _Strict(MagicMock):
+    """A mock whose unpinned attributes cannot be read as ABSENT.
+
+    Round 14 closed the "unpinned attribute answers truthily" class with
+    `spec=[...]`, which makes an undeclared attribute raise AttributeError.
+    That is only half the readings. `hasattr()`, `getattr(x, name, default)`
+    and `except AttributeError:` each convert that raise straight back into a
+    FALSEY answer -- while `hasattr()` on a real psycopg2 connection is True
+    for every real attribute.
+
+    So `if hasattr(conn, "info"): <ALTER ... ADD CONSTRAINT>` skipped under
+    capture and fired on every real server. Measured, and it was a REGRESSION
+    rather than a gap: the same gate is CAUGHT by the plain MagicMock that
+    round 14 replaced (395 passed, 2 failed) and ESCAPES under the allowlist
+    (397 passed, 0 failed). Three of the sixteen names -- encoding, status,
+    server_version -- became escapes only because of that fix.
+
+    AssertionError is what closes it, because `hasattr` swallows AttributeError
+    and nothing else. A migration reading an unpinned attribute now fails the
+    test however it phrases the read.
+
+    The `_` guard is load-bearing: mock's own __init__ probes `_mock_methods`
+    through `getattr(..., None)`, so converting those raises breaks the mock
+    itself rather than the test using it.
+    """
+
+    def __getattr__(self, name: str):  # type: ignore[no-untyped-def]
+        try:
+            return super().__getattr__(name)
+        except AttributeError as exc:
+            if name.startswith("_"):
+                raise
+            raise AssertionError(
+                f"{name!r} is not pinned on this recorder. Add it to _CONN_PINS "
+                "with the value psycopg2 documents -- an unpinned attribute "
+                "answers neither truthily nor absently, because both readings "
+                "have sent a guarded migration down the wrong branch."
+            ) from exc
+
+
 # THE STRICT ALLOWLIST. Rounds 10-13 each pinned the instances of one class --
 # the recorder answers an unpinned attribute with a truthy Mock, so a gate on
 # it takes the skip branch here and the create branch on a real server -- and
@@ -152,7 +192,7 @@ def _recording_conn(
         )
         statements.append(str(sql))
 
-    cur = MagicMock(spec=[*_CUR_CALLS, *_CUR_DATA])
+    cur = _Strict(spec=[*_CUR_CALLS, *_CUR_DATA])
     # BOTH execute paths. executemany is not exotic -- it is the natural way to
     # write a parameterised ALTER, and DDL sent through it was invisible here.
     cur.execute.side_effect = record
@@ -203,7 +243,7 @@ def _recording_conn(
     # MagicMock that swallowed its SQL silently.
     cur.__enter__.return_value = cur
     cur.__exit__.return_value = False
-    conn = MagicMock(spec=[*_CONN_PINS, *_CONN_CALLS])
+    conn = _Strict(spec=[*_CONN_PINS, *_CONN_CALLS])
     conn.__enter__.return_value = conn
     # Pinned for the same reason cur's is: MagicMock.__exit__ happens to
     # default falsey today, so an unpinned outer exit is correct by accident.
@@ -351,12 +391,36 @@ def test_the_recorder_refuses_an_attribute_nobody_pinned() -> None:
     """
     conn, _ = _recording_conn()
     for attribute in ("notifies", "cursor_factory", "isolation_level", "info"):
-        with pytest.raises(AttributeError, match=attribute):
+        with pytest.raises(AssertionError, match=attribute):
             getattr(conn, attribute)
     with conn.cursor() as cur:
         for attribute in ("name", "query", "rownumber", "statusmessage"):
-            with pytest.raises(AttributeError, match=attribute):
+            with pytest.raises(AssertionError, match=attribute):
                 getattr(cur, attribute)
+
+    # THE OTHER READINGS. A raise is only loud if the caller does not turn it
+    # back into an answer, and the three idioms below all do exactly that for
+    # AttributeError. hasattr on a REAL psycopg2 connection is True for every
+    # one of these names, so a gate phrased this way fires in production; under
+    # the round-14 allowlist it read False and skipped. AssertionError is not
+    # swallowed by any of them.
+    for reading in (
+        lambda: hasattr(conn, "info"),
+        lambda: getattr(conn, "server_version", None),
+        lambda: conn.encoding,
+    ):
+        with pytest.raises(AssertionError):
+            reading()
+
+    def swallowing_probe() -> bool:
+        """`try: conn.x / except AttributeError:` must not become False either."""
+        try:
+            return bool(conn.notifies)
+        except AttributeError:
+            return False
+
+    with pytest.raises(AssertionError):
+        swallowing_probe()
 
 
 def test_the_allowlist_cannot_be_widened_without_a_value() -> None:
