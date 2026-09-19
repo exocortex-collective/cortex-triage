@@ -18,6 +18,25 @@ These assert on the DDL the worker actually EXECUTES, captured from a mocked
 connection, rather than on the source text -- the same idiom as
 test_queue_schema_boot.py. A grep over the file would also match a comment
 about the constraint, including the one this fix added.
+
+The file is four kinds of thing, and only the last is the thesis. Most of the
+length is apparatus, because twelve review rounds found every defect in the
+apparatus rather than in the fix:
+
+    the capture      _recording_conn, _executed_ddl, _WORLDS -- what the
+                     worker was made to execute, under each branch
+    its own tests    that the capture reaches every path, refuses what it
+                     cannot render, and does not swallow exceptions
+    the helpers      _without_comments, _key_columns, _guard and the two
+                     selectors, with their tests
+    the assertions   the three tests that consume the `ddl` fixture -- the
+                     actual subject, and the last three defs in the file
+
+Only that last group is in one place. The first three INTERLEAVE and are not
+in this order: _executed_ddl sits after five of the capture's own tests,
+_WORLDS sits among the helpers, and _guard's test is ~260 lines above _guard
+itself. Read it as a taxonomy, not a table of contents -- reordering is
+cortex-8t6b, deliberately not done while the file is under review.
 """
 
 from __future__ import annotations
@@ -26,10 +45,47 @@ import importlib
 import re
 from unittest.mock import MagicMock, patch
 
+import psycopg2.sql
 import pytest
 
+# The two worlds a probe inside ensure_config_schema can be answered from.
+# "Empty" is the fresh database this file is about -- but ensure_config_schema
+# CREATES the mappings table itself, so any probe issued after that point sees
+# a table that EXISTS on a fresh server. Pinning only the empty answers made
+# every "if it is already there, alter it" step invisible.
+_EMPTY: dict[str, object] = {
+    "fetchone": None,
+    "fetchall": [],
+    "fetchmany": [],
+    "rowcount": 0,
+    "description": None,
+}
+_POPULATED: dict[str, object] = {
+    "fetchone": (1,),
+    "fetchall": [(1,)],
+    "fetchmany": [(1,)],
+    "rowcount": 1,
+    "description": [("x",)],
+}
 
-def _recording_conn() -> tuple[MagicMock, list[str]]:
+
+class _EverythingOff:
+    """A Config whose every attribute is falsey.
+
+    MagicMock answers every attribute with a truthy Mock, so a config-gated
+    statement -- `if not config.some_flag: <create it>` -- took the skip branch
+    under capture and the create branch on any deployment where that flag is
+    off or absent. Config is a dataclass with boolean fields already
+    (enable_convergence), and ensure_config_schema is handed the whole object.
+    """
+
+    def __getattr__(self, name: str) -> None:
+        return None
+
+
+def _recording_conn(
+    answers: dict[str, object] | None = None,
+) -> tuple[MagicMock, list[str]]:
     """A connection whose every SQL path lands in the returned list.
 
     Extracted from _executed_ddl so its REACH is assertable. Round 8: both of
@@ -41,6 +97,20 @@ def _recording_conn() -> tuple[MagicMock, list[str]]:
     statements: list[str] = []
 
     def record(sql: object, *a: object, **k: object) -> None:
+        # str() of anything that is not already text is a REPR, and the guards
+        # below then match the repr instead of the statement. psycopg2 accepts
+        # psycopg2.sql.Composed, whose str() is
+        #     Composed([SQL('ALTER TABLE '), Identifier('...'), SQL(' UNIQUE ('), ...])
+        # -- no literal "CONSTRAINT unique_email_mapping", and _key_columns()
+        # parses the repr's quoting rather than the key list, so the guard never
+        # runs. Measured: a Composed ALTER ... ADD CONSTRAINT UNIQUE over the
+        # pair shipped with all 391 tests green. Refuse it instead; the tree
+        # builds DDL this way already (postmark gmail_sync.py:180, :207).
+        assert isinstance(sql, str | bytes), (
+            f"SQL reached the recorder as {type(sql).__name__}, which str() "
+            "renders as a repr -- the guards below would match the repr, not "
+            "the statement"
+        )
         statements.append(str(sql))
 
     cur = MagicMock()
@@ -73,10 +143,21 @@ def _recording_conn() -> tuple[MagicMock, list[str]]:
     # caught, because the pattern of this PR has been that fixing the instance
     # leaves the next one. fetchmany has no uses in the tree today and is
     # pinned anyway: it costs one line and it is the same question.
-    cur.fetchone.return_value = None  # DBAPI: no row
-    cur.fetchall.return_value = []  # DBAPI: no rows
-    cur.fetchmany.return_value = []  # DBAPI: no rows
-    cur.rowcount = 0  # nothing matched, nothing affected
+    world = _EMPTY if answers is None else answers
+    cur.fetchone.return_value = world["fetchone"]
+    cur.fetchall.return_value = world["fetchall"]
+    cur.fetchmany.return_value = world["fetchmany"]
+    cur.rowcount = world["rowcount"]
+    cur.description = world["description"]
+    # Iterating the cursor directly is the same read one step shorter --
+    # `for (name,) in cur:` instead of `for (name,) in cur.fetchall():`, an
+    # idiom already in this tree at postmark gmail_sync.py:196. An unpinned
+    # __iter__ yields nothing, so a migration written that way took the skip
+    # branch under capture and the create branch in production, and escaped at
+    # 393 green. side_effect, not return_value: a return_value iterator is
+    # exhausted after the first loop, which would reintroduce the same hole
+    # for the second read.
+    cur.__iter__.side_effect = lambda: iter(world["fetchall"])
     # `cur` must be its OWN context manager, and conn.cursor() must return it
     # directly. Binding only conn.cursor().__enter__ meant a bare
     # `cur2 = conn.cursor()` -- no `with` -- handed back a fresh unrecorded
@@ -139,7 +220,7 @@ def test_the_capture_reaches_every_sql_path(
 
 
 def test_the_recorder_answers_as_an_empty_database() -> None:
-    """A lookup under capture must answer the way a FRESH database would.
+    """The EMPTY world answers the way an existence probe on a fresh server does.
 
     Round 10: fetchone was pinned to (0,) -- a row, meaning "something is
     already there". Every test in this file is about what a fresh database
@@ -152,7 +233,14 @@ def test_the_recorder_answers_as_an_empty_database() -> None:
     """
     conn, _ = _recording_conn()
     with conn.cursor() as cur:
-        assert cur.fetchone() is None, "a fresh database has no row to return"
+        # "A fresh database has no row" is true of an EXISTENCE probe and
+        # false of an aggregate: `SELECT count(*)` returns (0,) on a fresh
+        # server, and (0,) is a row. None is still the right pin, but for the
+        # opposite reason to the one this block used to give -- it fails
+        # LOUDLY (row[0] raises TypeError) where (0,) would be right by
+        # accident under one idiom and wrong under the other. The populated
+        # branch is covered by _POPULATED, not by relaxing this.
+        assert cur.fetchone() is None, "the empty world returns no row"
         assert cur.fetchall() == [], "a fresh database returns no rows"
         assert cur.fetchmany() == [], "a fresh database returns no rows"
         # Both forms, because both are idioms in this tree and an unpinned
@@ -163,6 +251,42 @@ def test_the_recorder_answers_as_an_empty_database() -> None:
         assert not cur.rowcount, "an unpinned rowcount is truthy and skips the guard"
 
 
+def test_the_other_world_is_really_the_other_one() -> None:
+    """_POPULATED and _EverythingOff have to differ from the defaults.
+
+    Both are only ever consumed by the ddl fixture, so degrading either to
+    match the empty/truthy default reopens the escape with the suite green:
+    measured at 391, an ALTER ... ADD CONSTRAINT gated on `if cur.fetchone()
+    is not None:` or on `if not config.some_flag:` shipped untouched.
+    """
+    conn, _ = _recording_conn(_POPULATED)
+    with conn.cursor() as cur:
+        assert cur.fetchone() is not None, "the populated world must return a row"
+        assert cur.fetchall() and cur.fetchmany(), "...and rows"
+        assert cur.rowcount == 1, "...and a non-zero rowcount"
+        assert cur.description, "...and a row description"
+        # Fresh iterator per call, so a second `for row in cur:` sees rows too.
+        assert list(cur) == [(1,)], "the populated world must iterate rows"
+        assert list(cur) == [(1,)], "...and must still iterate on the next read"
+    assert not _EverythingOff().any_flag_at_all, "the falsey config must be falsey"
+
+
+def test_the_recorder_refuses_sql_it_cannot_render_as_text() -> None:
+    """A Composed statement must be loud here, not silently reprd."""
+    composed = psycopg2.sql.SQL(
+        "ALTER TABLE {} ADD CONSTRAINT {} UNIQUE ({}, {})"
+    ).format(
+        *map(
+            psycopg2.sql.Identifier,
+            ("triage_email_mappings", "uem2", "mapping_type", "email_address"),
+        )
+    )
+    assert "CONSTRAINT uem2" not in str(composed), "str() is not the statement"
+    conn, _ = _recording_conn()
+    with pytest.raises(AssertionError), conn.cursor() as cur:
+        cur.execute(composed)
+
+
 def test_the_cursor_context_manager_does_not_suppress() -> None:
     """The THIRD swallow site, and the one no other test can see.
 
@@ -170,10 +294,25 @@ def test_the_cursor_context_manager_does_not_suppress() -> None:
     `with (psycopg2.connect(...) as conn, conn.cursor() as cur)`, so
     `cur.__exit__` sits directly on the exception path of the function under
     capture. A mock whose __exit__ returns True swallows everything raised in
-    that block. Round 9 measured it: `cur.__exit__.return_value = True` alone
-    leaves 389 green, and with a real unconditional UNIQUE routed through
-    execute_batch it is STILL 389 green -- round 3's defect restored exactly,
+    that block. Round 9 measured it AT 72b1845, where the suite was 389 and
+    THIS TEST DID NOT YET EXIST: `cur.__exit__.return_value = True` alone left
+    389 green, and with a real unconditional UNIQUE routed through
+    execute_batch it was STILL 389 green -- round 3's defect restored exactly,
     with a clean-looking 13,155-char capture and the constraint absent.
+
+    Against the test as it stands now that mutation fails HERE instead. On the
+    round-12 tree (baseline 393) the same edit gives 391 passed, 2 FAILED. The
+    second failure is test_the_recorder_refuses_sql_it_cannot_render_as_text,
+    whose body is `with pytest.raises(AssertionError), conn.cursor() as cur:`
+    -- a swallowing __exit__ eats that AssertionError too, so pytest.raises
+    reports DID NOT RAISE. The ddl-consuming tests contribute ZERO of the two;
+    all four captures pass under this mutation, which is the point of the test
+    below. The 389 figure describes
+    what this test was written to stop, not what the suite does today -- stated
+    because round 11 made exactly this point about the conn half two paragraphs
+    down, and the fix was applied there and not here. Cite a baseline with
+    every suite total; the information needed to check one lives outside this
+    file.
 
     The same is true of conn.__exit__. Measured against the DISCARDED first
     version of this test, which entered only conn.cursor(): an outer swallow
@@ -211,7 +350,9 @@ def _drive_twice(conn: MagicMock) -> None:
         c.executemany("SENTINEL 4;", [()])
 
 
-def _executed_ddl() -> str:
+def _executed_ddl(
+    answers: dict[str, object] | None = None, config: object | None = None
+) -> str:
     """Every statement ensure_config_schema() hands to the cursor.
 
     NOT TriageWorker._ensure_schema -- that one ensures classifications,
@@ -219,11 +360,15 @@ def _executed_ddl() -> str:
     ensure_config_schema(), called from main() on boot. My first version of
     this test pointed at the worker method and asserted the constraint was
     absent from SQL that never mentioned mappings at all: vacuously true. The
-    `triage_email_mappings in sql` guard below is what caught it, twice.
+    vacuity guard in the `ddl` fixture is what caught it, twice -- and note
+    that it spells the table name as the EXACT `CREATE TABLE IF NOT EXISTS
+    triage_email_mappings (`. The loose `"triage_email_mappings" in sql` form
+    is itself one of the defects this file records, because it is satisfied by
+    triage_email_mappings_history alone.
     """
-    conn, statements = _recording_conn()
+    conn, statements = _recording_conn(answers)
     mod = importlib.import_module("triage.services.worker")
-    cfg = MagicMock()
+    cfg = MagicMock() if config is None else config
     # Deliberately NOT wrapped in try/except, and recording the exception was
     # not enough either.
     #
@@ -356,16 +501,31 @@ def test_without_comments_strips_whole_lines_only() -> None:
     assert banned in _without_comments(f"{banned};  -- and a note")
 
 
+# Every combination of the two axes the capture used to fix silently: what a
+# probe is answered with, and what the config says. A statement reachable in
+# ANY of them is a statement a fresh database can get.
+_WORLDS = [
+    (answers, config)
+    for answers in (_EMPTY, _POPULATED)
+    for config in (MagicMock(), _EverythingOff())
+]
+
+
 @pytest.fixture(scope="module")
 def ddl() -> str:
-    sql = _without_comments(_executed_ddl())
+    sql = _without_comments(
+        ";\n".join(_executed_ddl(answers, config) for answers, config in _WORLDS)
+    )
     # The exact CREATE, not a substring: "triage_email_mappings" is also a
     # prefix of triage_email_mappings_history, so the loose form was satisfied
     # by the history table alone -- with the mappings DDL deleted entirely,
     # this guard passed and the constraint test passed vacuously.
-    assert "CREATE TABLE IF NOT EXISTS triage_email_mappings (" in sql, (
-        "the mappings DDL was not executed at all -- this test is not looking "
-        "at what it thinks it is"
+    assert sql.count("CREATE TABLE IF NOT EXISTS triage_email_mappings (") == len(
+        _WORLDS
+    ), (
+        "the mappings DDL was not executed once per world -- either it did not "
+        "run at all, or the fixture stopped capturing every branch and this "
+        "test is not looking at what it thinks it is"
     )
     # ...and that it was stripped. Round 5 asserted _without_comments works;
     # nothing asserted this fixture USES it. Dropping the call left all 374
@@ -697,9 +857,14 @@ def test_no_unconditional_unique_index_on_the_mapping_columns(ddl: str) -> None:
     """The same defect as an INDEX rather than a constraint.
 
     There is no CONSTRAINT keyword in this form, so the name check above never
-    sees it -- and migration 004 drops it explicitly, which is the evidence it
-    occurs in the wild. Every variation below was mutation-verified as passing
-    before the checks that catch it existed:
+    sees it. Migration 004 drops this form defensively -- its own comment says
+    the name "may exist as a bare index rather than a constraint", which is a
+    precaution and not an observation. The form 004 records as actually seen is
+    the CONSTRAINT one, with its source named. Guarded here anyway, because the
+    cost is a regex and the failure mode is silent.
+
+    Every variation below was mutation-verified as passing before the checks
+    that catch it existed:
 
     * a different index NAME (the docstring used to claim "whatever it is
       called" while the check was pinned to unique_email_mapping)
