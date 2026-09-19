@@ -33,7 +33,7 @@ apparatus rather than in the fix:
                      actual subject, and the last three defs in the file
 
 Only that last group is in one place. The first three INTERLEAVE and are not
-in this order: _executed_ddl sits after five of the capture's own tests,
+in this order: _executed_ddl sits after 9 of the capture's own tests,
 _WORLDS sits among the helpers, and _guard's test is ~260 lines above _guard
 itself. Read it as a taxonomy, not a table of contents -- reordering is
 cortex-8t6b, deliberately not done while the file is under review.
@@ -133,11 +133,15 @@ class _Strict(MagicMock):
 # green. Enumerating instances does not converge; this closes the class.
 #
 # The spec lists below are DERIVED from _CONN_PINS, so a name cannot enter the
-# allowlist without someone writing down the value psycopg2 documents for it,
-# and anything not listed raises AttributeError instead of answering truthily.
+# allowlist without someone writing down the value psycopg2 documents for it.
+# What happens to a name that is NOT listed is _Strict's business, above: it
+# raises AssertionError, NOT AttributeError. Round 14 raised AttributeError and
+# that did not hold -- hasattr(), getattr(x, n, default) and
+# `except AttributeError:` each turn that raise back into a falsey answer.
 # spec=[names], not spec=psycopg2.extensions.connection: a real-type spec
 # rejects only FICTIONAL attributes, and every escape above is a real one --
-# measured, all four still shipped at 395 green under spec=connection/cursor.
+# measured, four sampled names of the thirteen still shipped at 395 green
+# under spec=connection/cursor.
 _CONN_PINS: dict[str, object] = {
     "autocommit": False,  # psycopg2 opens in transaction mode
     "closed": 0,  # int, not bool
@@ -228,9 +232,12 @@ def _recording_conn(
     cur.fetchmany.return_value = world["fetchmany"]
     cur.rowcount = world["rowcount"]
     cur.description = world["description"]
-    # Iterating the cursor directly is the same read one step shorter --
-    # `for (name,) in cur:` instead of `for (name,) in cur.fetchall():`, an
-    # idiom already in this tree at postmark gmail_sync.py:196. An unpinned
+    # Iterating the cursor directly is the same read one step shorter than
+    # `for (name,) in cur.fetchall():`, which this tree already does at
+    # postmark gmail_sync.py:197 -- so the short form is a plausible edit of
+    # code that exists, not an invented shape.  The citation is the LONG form
+    # deliberately; nothing in the tree writes the short one yet, which is
+    # exactly why nothing caught it. An unpinned
     # __iter__ yields nothing, so a migration written that way took the skip
     # branch under capture and the create branch in production, and escaped at
     # 393 green. side_effect, not return_value: a return_value iterator is
@@ -271,9 +278,15 @@ def _recording_conn(
     # real connection behind the cursor, cur.connection.<anything> resolves to
     # the pins above instead of to a fresh truthy Mock.
     cur.connection = conn
-    # conn.status is deliberately NOT pinned: it is genuinely two-valued inside
-    # the function (READY before the first statement, BEGIN after), so no single
-    # value is right and a wrong pin would be worse than none.
+    # conn.status is absent from _CONN_PINS on purpose, and under _Strict that
+    # means a gate on it RAISES rather than silently taking a branch. Round 13
+    # left it unpinned because it is genuinely two-valued inside the function
+    # (READY before the first statement, BEGIN after), so no single value is
+    # right. Round 15 turned that from a silent escape into a loud one, which
+    # is the better failure: _Strict's message says "add it to _CONN_PINS", and
+    # for status the honest answer is to add a fifth world instead, or to
+    # decide which value the test means. Do not pin it to make the error go
+    # away.
     return conn, statements
 
 
@@ -379,7 +392,7 @@ def test_the_recorder_refuses_an_attribute_nobody_pinned() -> None:
     """The strictness itself, which was the one thing the strict patch did not pin.
 
     Closing the class is worthless if the closure can be silently undone.
-    Measured: reverting `conn = MagicMock(spec=[...])` to a plain `MagicMock()`
+    Measured: reverting `conn = _Strict(spec=[...])` to a plain `MagicMock()`
     left all 395 tests green and re-opened every one of the thirteen escapes
     round 14 found. This is that revert, made loud.
 
@@ -427,7 +440,7 @@ def test_the_allowlist_cannot_be_widened_without_a_value() -> None:
     """A name may only enter the allowlist by way of a value.
 
     The naive strict form is a flat `spec=[...]` list, and it rots SILENTLY:
-    adding just the NAME to quieten the AttributeError restores the truthy Mock
+    adding just the NAME to quieten the raise restores the truthy Mock
     and the defect ships again at 395 green. Deriving the spec from _CONN_PINS
     is what makes the widening path strengthen the test instead of gutting it
     -- you cannot add `notifies` without also saying what psycopg2 returns for
@@ -530,8 +543,8 @@ def test_the_cursor_context_manager_does_not_suppress() -> None:
     whose body is `with pytest.raises(AssertionError), conn.cursor() as cur:`
     -- a swallowing __exit__ eats that AssertionError too, so pytest.raises
     reports DID NOT RAISE. The ddl-consuming tests contribute ZERO of the two;
-    all four captures pass under this mutation, which is the point of the test
-    below. The 389 figure describes
+    all four captures pass under this mutation, which is the point of the
+    assertion in this test's own body. The 389 figure describes
     what this test was written to stop, not what the suite does today -- stated
     because round 11 made exactly this point about the conn half two paragraphs
     down, and the fix was applied there and not here. Cite a baseline with
@@ -541,9 +554,7 @@ def test_the_cursor_context_manager_does_not_suppress() -> None:
     The same is true of conn.__exit__. Measured against the DISCARDED first
     version of this test, which entered only conn.cursor(): an outer swallow
     turned the real-UNIQUE case from 3 loud fixture errors into 390 green.
-    Against the test as it stands now that mutation fails here instead, which
-    is the point -- the figure describes what this test was written to stop,
-    not what it permits.
+    Against the test as it stands now that mutation fails here too.
 
     test_the_swallow_stays_removed cannot reach either: it replaces
     ensure_config_schema with a raising stub, so neither `with` is entered.
@@ -880,11 +891,7 @@ def _key_columns(text: str) -> frozenset[str] | None:
 # constant's uses actually needs that, and it is worth being precise about
 # which. test_pair_names_the_two_arbiter_columns compares _PAIR to a value,
 # so writing that value AS _PAIR would assert the constant against itself and
-# go vacuous. The parametrize below does not have that problem: its inputs are
-# literal key-list STRINGS that _key_columns() parses, so a corrupted _PAIR is
-# caught there ten times over regardless of how the expectations are spelled.
-# Measured: corrupting _PAIR while expressing every expectation as _PAIR still
-# gives 10 failed. The literal is kept for both because one spelling reads
+# go vacuous. The literal is kept for both because one spelling reads
 # better than two, not because the parametrize depends on it.
 _THE_PAIR = frozenset({"mapping_type", "email_address"})
 
