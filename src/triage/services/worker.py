@@ -1835,9 +1835,16 @@ def ensure_config_schema(config: Config) -> None:
                     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                     created_by TEXT,
                     updated_by TEXT,
-                    deleted_at TIMESTAMPTZ,
-                    CONSTRAINT unique_email_mapping
-                        UNIQUE (mapping_type, email_address)
+                    deleted_at TIMESTAMPTZ
+                    -- NO unconditional UNIQUE (mapping_type, email_address).
+                    -- It counts soft-deleted rows, so a mapping that was
+                    -- deleted could never be recreated, and it SHADOWS the
+                    -- partial index below that the importer's
+                    -- ON CONFLICT (mapping_type, email_address)
+                    --   WHERE deleted_at IS NULL
+                    -- is written to infer. postmark migration 004 drops it on
+                    -- existing databases; this line was silently putting it
+                    -- back on every fresh one (cortex-qvnz, from cortex-apd6).
                 );
 
                 CREATE UNIQUE INDEX IF NOT EXISTS idx_email_mappings_active

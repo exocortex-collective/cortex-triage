@@ -6,10 +6,14 @@ Synapse is a declarative rule language for email classification in Cortex Triage
 
 Synapse uses a firewall-style architecture inspired by iptables:
 - Rules are organized into **chains**
-- Evaluation starts at the `main` chain
-- Rules are evaluated top-to-bottom, **first match wins**
+- Within a chain, rules are evaluated top-to-bottom, **first match wins**
 - Rules can **jump** to other chains for sub-evaluation
 - Unmatched emails fall through to the next rule
+
+Unlike iptables, **chains run in parallel**: every chain marked `auto_run: true`
+is evaluated independently against every email and the results are merged (see
+[Parallel Chains and the Merge](#parallel-chains-and-the-merge)). `main` is the
+only chain that is `auto_run` by default.
 
 ## Quick Start
 
@@ -426,6 +430,72 @@ chains:
 - If the target chain doesn't match, evaluation **continues** to the next rule
 - Circular jumps are detected and prevented
 
+## Parallel Chains and the Merge
+
+A chain is either a *root* chain or a *subroutine*:
+
+```yaml
+chains:
+  main:
+    auto_run: true       # evaluated against every email
+    rules: [...]
+
+  receipts:
+    auto_run: false      # default - only reachable via `jump: receipts`
+    rules: [...]
+
+  expense_scan:
+    auto_run: true       # ALSO evaluated against every email, independently
+    rules: [...]
+```
+
+`main` defaults to `auto_run: true`; **every other chain defaults to `false`**.
+A chain with `auto_run: false` and no inbound `jump` is dead code.
+
+Each `auto_run` chain produces at most one action (first match wins inside it).
+Those actions, plus a virtual result for the sender's priority email mapping, are
+merged:
+
+| Field | Merge rule |
+|-------|-----------|
+| `label`, `add_label`, `remove_label` | **Union.** Purely additive — an email can end up labelled by several chains. |
+| `archive`, `mark_read` | **Conservative: `all()`** over the chains that have an opinion. One `false` suppresses it. |
+| `star`, `important` | **Aggressive: `any()`.** One `true` wins. |
+| `force_archive`, `force_mark_read` | Veto → forces `true`. |
+| `force_no_star`, `force_no_important` | Veto → forces `false`. |
+
+Omitting one of the four OPINION flags means "no opinion". Setting it to
+`false` is a **vote**, and a single dissenting vote blocks `archive` /
+`mark_read` for the whole email.
+
+The four **vetoes** above behave differently: they are gated on truthiness, so
+`force_no_star: false` is indistinguishable from omitting it. Only `true` does
+anything.
+
+### Writing an additive scan chain
+
+```yaml
+  expense_scan:
+    auto_run: true
+    rules:
+      - match:
+          subject_contains: ["receipt", "invoice"]
+        action:
+          add_label: "Expense/2026"
+          # NO archive, NO mark_read - deliberately silent.
+```
+
+Adding `archive: false` there would look harmless and would instead stop every
+other chain from archiving those emails. If a chain genuinely needs to override
+the others, use `force_archive` / `force_mark_read`.
+
+### Last resorts
+
+1. Fallback email mappings fire only if **no** chain produced a label. A chain
+   that matched without emitting a label does not suppress them.
+2. `default_label` fires only if nothing at all — no chain, no fallback mapping —
+   produced a label.
+
 ## LLM Classification
 
 For emails that don't match simple rules, use LLM classification:
@@ -623,17 +693,50 @@ chains:
 
 1. **Order matters**: Put specific rules before general ones
 2. **Use chains**: Group related rules for clarity
-3. **Catch-all last**: End chains with `match: {}` to handle unmatched emails
+3. **No catch-all in `main`**: a `match: {}` rule that applies a default label
+   counts as "produced a label" and silently suppresses every fallback email
+   mapping. Let `default_label` handle the unmatched case. Catch-alls inside a
+   *subroutine* chain reached by `jump` are fine.
 4. **Lists for OR**: Use lists instead of multiple rules for OR conditions
 5. **LLM as fallback**: Use LLM classification only for ambiguous cases
 6. **Test your rules**: Validate with `validate_rules()` before deploying
 
 ## Configuration
 
-Set the rules file path via environment variable:
+**There is no rules file.** `RULES_PATH` is dead — the triage worker loads the
+active config from Postgres (`triage_config_versions` / `triage_chains` /
+`triage_rules`).
+
+This YAML is the wire format of the Gateway `/config` API:
+
+The gateway's external port has required a bearer token since 2026-09-15
+(`CORTEX_API_TOKEN`; only `/health`, `/metrics` and `/oauth/callback` are
+exempt -- `/metrics` because Prometheus scrapes it), so
+these 401 without the header. Peer services calling the internal port do not
+need it.
 
 ```bash
-export RULES_PATH=/path/to/rules.yaml
+AUTH="Authorization: Bearer $CORTEX_API_TOKEN"
+
+curl -s -H "$AUTH" http://<gateway>/config > /tmp/rules.yaml   # export active
+curl -s -X POST http://<gateway>/config/validate -H "$AUTH" \
+  -H 'Content-Type: text/plain' --data-binary @/tmp/rules.yaml
+curl -s -X PUT http://<gateway>/config -H "$AUTH" \
+  -H 'Content-Type: text/plain' -H 'X-Created-By: you@context' \
+  -H 'X-Notes: what changed' --data-binary @/tmp/rules.yaml
 ```
 
-Or use the default: `config/rules.yaml`
+The PUT activates the new version and signals the worker to reload; no restart.
+
+Two things to know before you use it:
+
+- **Email mappings are NOT managed here.** `priority_email_mappings` /
+  `fallback_email_mappings` appear in the export but the importer is
+  upsert-only — removing one from the YAML is a silent no-op. Use the Gateway
+  `/mappings` CRUD API instead.
+- **A new version re-labels historical mail.** The worker converges old
+  classifications to the active config version during idle time, newest first.
+  That is by design; see `docs/project-spec.md` → "Convergence".
+
+Full workflow and current hazards: `~/Projects/cortex/CLAUDE.md` → "Triage
+Config Management".
