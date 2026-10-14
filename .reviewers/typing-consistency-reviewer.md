@@ -1,7 +1,7 @@
 # typing-consistency-reviewer
 **Checks:** Type-annotation consistency in files already typed: half-typed signatures, gratuitous `Any`, `cast` used to silence errors, inconsistent Optional style, bare `# type: ignore`.
 **Spawn when:** diff adds or changes function signatures or annotations in `*.py` files that already use annotations; skip untyped files and non-Python diffs.
-**Contents:** Scope rule · Patterns to FLAG (only when the file is in scope): `# type; Half-typed function signatures; `Any` as an escape hatch when the type is inferable; `typing.cast` used to silence an error rather than narrow a type; Inconsistent `Optional[X]` vs `X | None` within the same file; Completely-unannotated functions in an otherwise-typed file · Do NOT flag · Review approach
+**Contents:** Scope rule · Patterns to FLAG (only when the file is in scope): `# type: ignore` without a code; Half-typed function signatures; `Any` as an escape hatch when the type is inferable; `typing.cast` used to silence an error rather than narrow a type; Inconsistent `Optional[X]` vs `X | None` within the same file; Completely-unannotated functions in an otherwise-typed file · Do NOT flag · Review approach
 
 **Carry the proof in the finding.** An undemonstrated finding is a hypothesis;
 report it as one or not at all. A behavioural claim -- anything of the form

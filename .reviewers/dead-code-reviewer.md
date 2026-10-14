@@ -1,7 +1,7 @@
 # dead-code-reviewer
 **Checks:** Dead code a PR introduces or strands: unused functions/constants/exports/fixtures, commented-out code, stale `__all__`, partial refactors.
 **Spawn when:** diff deletes or renames a function/class/constant, removes call sites, adds module-level definitions, or leaves commented-out code in `*.py`; skip docs-only diffs.
-**Contents:** What to flag: Unused module-level functions, classes, constants; Unused exported names; Unused fixtures in `conftest.py`; Commented-out code; Partial refactors; Stale `__all__` entries; Unused parameters with default values; `if False; `def f() · Review approach · Do NOT flag
+**Contents:** What to flag: Unused module-level functions, classes, constants; Unused exported names; Unused fixtures in `conftest.py`; Commented-out code; Partial refactors; Stale `__all__` entries; Unused parameters with default values; `if False:` dead branches; `def f(): pass` stubs · Review approach · Do NOT flag
 
 **Carry the proof in the finding.** An undemonstrated finding is a hypothesis;
 report it as one or not at all. A behavioural claim -- anything of the form
