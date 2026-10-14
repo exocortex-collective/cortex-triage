@@ -37,8 +37,8 @@ behavioural claim: "this exits 0 on failure" is checkable and must be checked;
 "this design is confusing" is not and must say so.
 
 **If you declare `mixed`, be able to name which recent findings were which** --
-otherwise it is undeclared wearing a better word. The evidence comments under
-each reviewer's evidence comments do exactly that, and are the audit trail.
+otherwise it is undeclared wearing a better word. The evidence comments in
+each reviewer's file do exactly that, and are the audit trail.
 
 **Review the fix as suspiciously as the thing it replaced, and your own most
 suspiciously of all.** On PR #80 every round's finding lived inside the previous
