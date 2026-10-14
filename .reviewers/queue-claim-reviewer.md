@@ -13,10 +13,10 @@ verification: mixed
 4. A handler path (return/continue/except) that leaves a claimed job neither completed, failed nor retried.
 5. Ignoring the False return of `complete()` (claim lost) as success.
 
-**Proof:** mutate in a scratch copy (never the working tree): remove `claimed_by = NULL` from one reset, run `uv run pytest tests/test_claim_token_reset.py`, print counts. grep: `grep -n "UPDATE queue" -A4 src/triage/services/*.py` and quote n.
+**Proof:** mutate in a scratch copy (never the working tree): remove `claimed_by = NULL` from one reset, run `uv run pytest tests/test_claim_token_reset.py`, print counts. To show a reset is unguarded, run `grep -n "UPDATE queue" -A4 src/triage/services/*.py` and quote the matching lines.
 
 **Do NOT flag**
-- teach_bot.py's `retry.fail_or_retry` import (its claim lives in `cortex_utils.learning.apply`; cortex-xluv).
+- teach_bot.py's `retry.fail_or_retry` import and its call without a claim token (its claim lives in `cortex_utils.learning.apply`; cortex-xluv).
 - Claim logic inside cortex-utils (reviewed there).
 - Resets already guarded and listed in `EXPECTED`.
 - Priority/backfill values (queue-priority conventions are not this lens).
