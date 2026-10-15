@@ -12,6 +12,9 @@ from unittest.mock import MagicMock, patch
 
 from cortex_utils.triage_config.models import Email
 
+from triage.services.labeling_worker import LabelingJob, LabelingWorker
+from triage.services.worker import TriageWorker
+
 
 def _email(label_ids: list[str]) -> Email:
     return Email(
@@ -26,8 +29,6 @@ def _email(label_ids: list[str]) -> Email:
 
 
 def _triage_worker() -> Any:
-    from triage.services.worker import TriageWorker
-
     return TriageWorker(MagicMock(), MagicMock(), MagicMock(), MagicMock())
 
 
@@ -93,8 +94,6 @@ class _FakeCursor:
 
 
 def _labeling_worker(classifications: dict[str, dict], spam: set[str]) -> Any:
-    from triage.services.labeling_worker import LabelingWorker
-
     gmail = MagicMock()
     gmail.get_label_id.side_effect = lambda name: f"id:{name}"
     gmail.get_existing_label_id.side_effect = lambda name: f"id:{name}"
@@ -119,8 +118,6 @@ TXN = {
 
 class TestLabelingStripsSpam:
     def _batch(self, spam: set[str], current: list[str]) -> Any:
-        from triage.services.labeling_worker import LabelingJob
-
         worker = _labeling_worker({"g1": TXN}, spam)
         worker._get_current_cortex_labels = MagicMock(return_value={"g1": current})
         worker._process_normal_batch([LabelingJob(job_id=1, gmail_id="g1")])
@@ -134,8 +131,6 @@ class TestLabelingStripsSpam:
         worker._complete_jobs.assert_called_once_with([1])
 
     def test_spam_without_a_classification_is_still_stripped(self) -> None:
-        from triage.services.labeling_worker import LabelingJob
-
         worker = _labeling_worker({}, {"g1"})
         worker._get_current_cortex_labels = MagicMock(
             return_value={"g1": ["Cortex/Uncategorized"]}
