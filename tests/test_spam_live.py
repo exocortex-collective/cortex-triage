@@ -15,12 +15,11 @@ from contextlib import contextmanager
 from typing import Any
 from unittest.mock import MagicMock
 
+import psycopg2
 import pytest
 
-psycopg2 = pytest.importorskip("psycopg2")
-
-from triage.services.labeling_worker import SPAM_TARGET, LabelingWorker  # noqa: E402
-from triage.services.worker import TriageWorker  # noqa: E402
+from triage.services.labeling_worker import SPAM_TARGET, LabelingWorker
+from triage.services.worker import TriageWorker
 
 DSN = os.environ.get("CORTEX_TEST_DSN")
 
@@ -129,6 +128,23 @@ def test_convergence_still_picks_a_message_with_null_label_ids(conn: Any) -> Non
         )
     worker = _triage_worker(conn)
     assert worker._converge_priority_and_get_next_email() == {"gmail_id": "nolabels"}
+
+
+def test_convergence_skips_priority_senders(conn: Any) -> None:
+    with conn.cursor() as cur:
+        cur.execute("INSERT INTO emails_parsed VALUES ('ham', 'vip@example.com')")
+        cur.execute(
+            "INSERT INTO triage_email_mappings VALUES"
+            " ('vip@example.com', 'priority', NULL)"
+        )
+    worker = _triage_worker(conn)
+    assert worker._converge_priority_and_get_next_email() == {"gmail_id": "nolabels"}
+
+
+def test_labeling_spam_lookup_is_scoped_to_the_batch(conn: Any) -> None:
+    worker = LabelingWorker(MagicMock(), MagicMock())
+    _bind(worker, conn)
+    assert set(worker._get_latest_classifications(["ham"])) == {"ham"}
 
 
 def test_labeling_targets_spam_with_no_labels(conn: Any) -> None:
