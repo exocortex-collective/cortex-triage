@@ -554,6 +554,7 @@ class TriageWorker:
                         FROM classifications c
                         JOIN emails_raw er ON er.gmail_id = c.gmail_id
                         WHERE c.config_version_id < %s
+                          AND NOT 'SPAM' = ANY(COALESCE(er.label_ids, '{}'))
                           AND NOT EXISTS (
                             SELECT 1
                             FROM emails_parsed ep
@@ -1295,6 +1296,15 @@ class TriageWorker:
                     service="triage-worker", error_type="email_not_found"
                 ).inc()
                 return False
+
+            # Spam never reaches the rules or an LLM, and is not classified: a
+            # phishing mail looks transactional to every model (cortex-kvyn).
+            # The labeling worker strips Cortex labels from spam, and
+            # gmail-sync re-enqueues triage if the SPAM label is removed.
+            if "SPAM" in email.label_ids:
+                logger.info(f"Skipping spam: {gmail_id}")
+                self._complete_job(job["id"])
+                return True
 
             # Fetch body from API if not in parsed table
             if not email.body:
