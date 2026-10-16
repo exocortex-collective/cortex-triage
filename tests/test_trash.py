@@ -61,3 +61,17 @@ def test_repair_also_trashes() -> None:
     worker._get_gmail_current_labels = MagicMock(return_value=["Cortex/A"])
     worker._process_repair_job(LabelingJob(job_id=1, gmail_id="g1", repair=True))
     worker.gmail.batch_modify.assert_called_once_with(["g1"], ["id:TRASH"], [])
+
+
+def test_untrashed_email_is_not_trashed() -> None:
+    worker = _labeling_worker({"g1": {"label": "Cortex/A", "trash": None}}, set())
+    worker._get_current_cortex_labels = MagicMock(return_value={"g1": []})
+    worker._process_normal_batch([LabelingJob(job_id=1, gmail_id="g1")])
+    worker.gmail.batch_modify.assert_called_once_with(["g1"], ["id:Cortex/A"], [])
+
+
+def test_repair_does_not_trash_untrashed_email() -> None:
+    worker = _labeling_worker({"g1": {"label": "Cortex/A", "trash": None}}, set())
+    worker._get_gmail_current_labels = MagicMock(return_value=[])
+    worker._process_repair_job(LabelingJob(job_id=1, gmail_id="g1", repair=True))
+    worker.gmail.batch_modify.assert_called_once_with(["g1"], ["id:Cortex/A"], [])
