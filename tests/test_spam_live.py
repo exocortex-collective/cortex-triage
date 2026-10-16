@@ -132,8 +132,6 @@ def test_convergence_still_picks_a_message_with_null_label_ids(conn: Any) -> Non
 
 
 def test_convergence_no_longer_skips_priority_senders(conn: Any) -> None:
-    # Priority mappings merge with the chains, so their mail is re-triaged
-    # like any other (triage-70be); the old bulk shortcut skipped it.
     with conn.cursor() as cur:
         cur.execute("INSERT INTO emails_parsed VALUES ('ham', 'vip@example.com')")
         cur.execute(

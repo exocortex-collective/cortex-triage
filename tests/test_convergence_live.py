@@ -18,7 +18,7 @@ import pytest
 from cortex_utils.triage_config import load_rules_from_string
 from psycopg2.extras import Json
 
-from tests.test_footprint import BASE
+from tests.test_footprint import BASE, FB
 from triage.engine.footprint import build_footprint, chain_hashes
 from triage.services.worker import TriageWorker
 
@@ -99,9 +99,15 @@ def _worker(conn: Any, batch: int = 500) -> Any:
 
 
 def _versions(conn: Any) -> dict[str, int]:
-    with conn.cursor() as cur:
-        cur.execute("SELECT gmail_id, config_version_id FROM classifications")
-        return dict(cur.fetchall())
+    """Committed versions, read on a second connection so an uncommitted
+    stamp does not count."""
+    other = psycopg2.connect(DSN, options="-c search_path=t_converge")
+    try:
+        with other.cursor() as cur:
+            cur.execute("SELECT gmail_id, config_version_id FROM classifications")
+            return dict(cur.fetchall())
+    finally:
+        other.close()
 
 
 def test_unaffected_mail_is_stamped_and_affected_mail_returned(conn: Any) -> None:
@@ -132,3 +138,29 @@ def test_a_config_change_on_the_path_is_re_triaged(conn: Any) -> None:
     worker.rules = load_rules_from_string(BASE.replace("{label: Hit}", "{label: H2}"))
     assert worker._converge_and_get_next_email() == {"gmail_id": "new_clean"}
     assert _versions(conn)["new_clean"] == 1
+
+
+def test_the_selector_checks_rows_against_their_sender(conn: Any) -> None:
+    mapped = load_rules_from_string(FB)  # a fallback mapping for SENDER
+    clean = build_footprint(mapped, chain_hashes(mapped), [("main", 1)], SENDER)
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE classifications SET footprint = %s WHERE footprint IS NOT NULL",
+            (Json(clean),),
+        )
+    conn.commit()
+    worker = _worker(conn)
+    worker.rules = mapped
+    assert worker._converge_and_get_next_email() == {"gmail_id": "affected"}
+    assert _versions(conn)["new_clean"] == 2
+
+
+def test_giving_up_stamps_the_loaded_version_not_the_active_one(conn: Any) -> None:
+    with conn.cursor() as cur:
+        cur.execute(
+            "CREATE TABLE triage_config_versions (version INT, is_active BOOLEAN);"
+            " INSERT INTO triage_config_versions VALUES (3, TRUE);"
+        )
+    conn.commit()
+    _worker(conn)._mark_convergence_failed("affected")
+    assert _versions(conn)["affected"] == 2

@@ -459,7 +459,7 @@ class TriageWorker:
             return False
 
     def _mark_convergence_failed(self, gmail_id: str) -> None:
-        """Mark a convergence email as processed (update to current version).
+        """Give up on a convergence email: stamp it with the loaded version.
 
         This prevents infinite retry loops for emails that fail convergence.
         """
@@ -469,13 +469,10 @@ class TriageWorker:
                     cursor.execute(
                         """
                         UPDATE classifications
-                        SET config_version_id = (
-                            SELECT version FROM triage_config_versions
-                            WHERE is_active = TRUE LIMIT 1
-                        )
+                        SET config_version_id = %s
                         WHERE gmail_id = %s
                         """,
-                        (gmail_id,),
+                        (self.config_version, gmail_id),
                     )
                 conn.commit()
         except Exception as e:
@@ -485,7 +482,7 @@ class TriageWorker:
             )
 
     def _converge_and_get_next_email(self) -> dict[str, Any] | None:
-        """Stamp mail the active config cannot change; return the next to re-triage.
+        """Stamp mail the loaded config cannot change; return the next to re-triage.
 
         Scans the newest mail behind the worker's loaded version. Rows whose footprint
         says the config change cannot reach them are stamped current without

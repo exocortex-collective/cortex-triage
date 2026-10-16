@@ -35,6 +35,10 @@ chains:
         action: {label: Deep}
 """
 
+# BASE plus a fallback mapping for the test sender, so the footprint depends on
+# which address it was built for.
+FB = BASE + "fallback_email_mappings:\n  a@example.com: {label: FB}\n"
+
 
 def _email(from_addr: str, subject: str) -> Email:
     return Email(
@@ -139,7 +143,7 @@ def test_a_missing_or_foreign_footprint_is_always_affected() -> None:
 def test_the_worker_stores_the_footprint_of_what_it_evaluated() -> None:
     from triage.services.worker import TriageWorker
 
-    config = load_rules_from_string(BASE)
+    config = load_rules_from_string(FB)
     llm = MagicMock()
     llm.check_email_intent.return_value = False
     worker = TriageWorker(MagicMock(), config, llm, MagicMock())
@@ -154,6 +158,7 @@ def test_the_worker_stores_the_footprint_of_what_it_evaluated() -> None:
     footprint = worker._store_classification.call_args.args[3]
     assert footprint == build_footprint(config, chain_hashes(config), [("main", 1)], A)
     assert not is_affected(footprint, config, chain_hashes(config), A)
+    assert is_affected(footprint, config, chain_hashes(config), "b@example.com")
 
 
 EXT = """
@@ -405,9 +410,11 @@ def test_a_changed_or_removed_mapping_is_affected() -> None:
     mapped = _with_mapping("priority", A, "P")
     assert _affected(mapped, mapped.replace("label: P", "label: Q"), A, "a hit")
     assert _affected(mapped, BASE, A, "a hit")
+    archived = mapped.replace("{label: P}", "{label: P, archive: true}")
+    assert _affected(mapped, archived, A, "a hit")
 
 
-RELOADED = BASE.replace("default_label: Uncategorized", "default_label: Reloaded")
+RELOADED = FB.replace("{label: FB}", "{label: FB2}")
 
 
 def _reloading_worker(monkeypatch: pytest.MonkeyPatch) -> Any:
@@ -415,7 +422,7 @@ def _reloading_worker(monkeypatch: pytest.MonkeyPatch) -> Any:
     from triage.services import worker as worker_module
 
     monkeypatch.setattr(worker_module, "register_worker", MagicMock())
-    old = load_rules_from_string(BASE)
+    old = load_rules_from_string(FB)
     llm = MagicMock()
     worker = worker_module.TriageWorker(
         MagicMock(poll_interval=0), old, llm, MagicMock(), config_version=1
@@ -438,13 +445,13 @@ def _reloading_worker(monkeypatch: pytest.MonkeyPatch) -> Any:
 
 
 def _assert_stored_under_the_old_rules(worker: Any) -> None:
-    old = load_rules_from_string(BASE)
+    old = load_rules_from_string(FB)
     worker.llm.check_email_intent.assert_called()
     result, footprint = (
         worker._store_classification.call_args.args[1],
         worker._store_classification.call_args.args[3],
     )
-    assert result.action.add_label == ["Cortex/Uncategorized"]
+    assert result.action.add_label == ["Cortex/FB"]
     assert footprint == build_footprint(old, chain_hashes(old), [("main", None)], A)
     assert worker._store_classification.call_args.args[4] == 1
 

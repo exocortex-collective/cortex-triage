@@ -15,7 +15,7 @@ import hashlib
 import json
 from typing import Any
 
-from cortex_utils.triage_config.models import Rule, RulesConfig
+from cortex_utils.triage_config.models import EmailMappingAction, Rule, RulesConfig
 
 from triage.engine.rules import lookup_email_mapping
 
@@ -69,7 +69,7 @@ def _global_identity(config: RulesConfig) -> str:
 
 
 def _mapping_identity(config: RulesConfig, from_addr: str) -> str:
-    def entry(mappings: dict[str, Any]) -> Any:
+    def entry(mappings: dict[str, EmailMappingAction]) -> dict[str, Any] | None:
         mapping = lookup_email_mapping(from_addr, mappings)
         return mapping.model_dump(mode="json") if mapping else None
 
