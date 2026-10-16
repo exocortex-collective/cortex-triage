@@ -143,3 +143,12 @@ def test_the_worker_ensures_the_trash_schema_at_startup() -> None:
     ):
         worker._ensure_schema()
     ensure.assert_called_once()
+
+
+def test_spam_never_reaches_the_gate(cleared: Any) -> None:
+    worker = _labeling_worker(
+        {"g1": {"label": "Cortex/A", "trash": True}, "g2": {"trash": True}}, {"g1"}
+    )
+    result = worker._get_latest_classifications(["g1", "g2"])
+    assert cleared.call_args.args[1] == ["g2"]
+    assert not result["g1"].get("trash")

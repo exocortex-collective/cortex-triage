@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 import threading
+import uuid
 from collections.abc import Iterator
 from typing import Any
 
@@ -22,6 +23,8 @@ pytestmark = pytest.mark.skipif(
     not DSN, reason="set CORTEX_TEST_DSN to a throwaway Postgres to run these"
 )
 
+SCHEMA = f"t_trash_{uuid.uuid4().hex[:8]}"  # reviewers share one Postgres
+
 SENDERS = {
     "new1": "New@Example.com",
     "new2": "new@example.com",
@@ -33,11 +36,11 @@ SENDERS = {
 
 @pytest.fixture
 def conn() -> Iterator[Any]:
-    c = psycopg2.connect(DSN, options="-c search_path=t_trash")
+    c = psycopg2.connect(DSN, options=f"-c search_path={SCHEMA}")
     c.autocommit = True
     with c.cursor() as cur:
-        cur.execute("DROP SCHEMA IF EXISTS t_trash CASCADE")
-        cur.execute("CREATE SCHEMA t_trash")
+        cur.execute(f"DROP SCHEMA IF EXISTS {SCHEMA} CASCADE")
+        cur.execute(f"CREATE SCHEMA {SCHEMA}")
         cur.execute("CREATE TABLE emails_parsed (gmail_id TEXT, from_addr TEXT)")
         for gmail_id, addr in SENDERS.items():
             cur.execute("INSERT INTO emails_parsed VALUES (%s, %s)", (gmail_id, addr))
@@ -59,7 +62,7 @@ def conn() -> Iterator[Any]:
         c.rollback()
         c.autocommit = True
         with c.cursor() as cur:
-            cur.execute("DROP SCHEMA IF EXISTS t_trash CASCADE")
+            cur.execute(f"DROP SCHEMA IF EXISTS {SCHEMA} CASCADE")
         c.close()
 
 
@@ -141,7 +144,7 @@ def test_the_schema_can_be_ensured_again(conn: Any) -> None:
 
 
 def test_the_gate_waits_for_an_answer_in_progress(conn: Any) -> None:
-    other = psycopg2.connect(DSN, options="-c search_path=t_trash")
+    other = psycopg2.connect(DSN, options=f"-c search_path={SCHEMA}")
     try:
         with other.cursor() as cur:
             cur.execute("BEGIN")
@@ -155,5 +158,17 @@ def test_the_gate_waits_for_an_answer_in_progress(conn: Any) -> None:
         other.commit()
         assert done.wait(5)
         gate.join()
+    finally:
+        other.close()
+
+
+def test_the_gate_commits_what_it_records(conn: Any) -> None:
+    trash_gate.gate(conn, ["new1"])
+    other = psycopg2.connect(DSN, options=f"-c search_path={SCHEMA}")
+    try:
+        assert _rows(
+            other, "SELECT status FROM triage_trash_queue" " WHERE gmail_id = 'new1'"
+        ) == [("pending",)]
+        assert _rows(other, "SELECT kind FROM triage_questions") == [("trash_sender",)]
     finally:
         other.close()
