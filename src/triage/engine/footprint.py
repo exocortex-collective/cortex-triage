@@ -1,7 +1,8 @@
 """Which part of the config decided a classification (triage-70be).
 
 A footprint records a hash of the global settings (label_prefix, default_label,
-which chains auto_run) and, for every chain an email entered, how far
+which chains auto_run), a hash of the sender's own priority and fallback
+mappings, and, for every chain an email entered, how far
 evaluation got plus a hash of everything up to that point: the rules
 themselves and the intent, category and prompt definitions they call. A config
 change can only alter an email's result if it changes one of those hashes, so
@@ -14,7 +15,9 @@ import hashlib
 import json
 from typing import Any
 
-from cortex_utils.triage_config.models import Rule, RulesConfig
+from cortex_utils.triage_config.models import EmailMappingAction, Rule, RulesConfig
+
+from triage.engine.rules import lookup_email_mapping
 
 FOOTPRINT_VERSION = 1
 
@@ -65,6 +68,19 @@ def _global_identity(config: RulesConfig) -> str:
     return _digest([config.label_prefix, config.default_label, auto_run])
 
 
+def _mapping_identity(config: RulesConfig, from_addr: str) -> str:
+    def entry(mappings: dict[str, EmailMappingAction]) -> dict[str, Any] | None:
+        mapping = lookup_email_mapping(from_addr, mappings)
+        return mapping.model_dump(mode="json") if mapping else None
+
+    return _digest(
+        [
+            entry(config.priority_email_mappings),
+            entry(config.fallback_email_mappings),
+        ]
+    )
+
+
 def chain_hashes(config: RulesConfig) -> dict[str, list[str]]:
     """Cumulative hash of each chain's rules: entry i covers rules 0..i."""
     hashes: dict[str, list[str]] = {}
@@ -95,23 +111,34 @@ def build_footprint(
     config: RulesConfig,
     hashes: dict[str, list[str]],
     path: list[tuple[str, int | None]],
+    from_addr: str,
 ) -> dict[str, Any]:
     entries = []
     for chain, stop in path:
         entry = [chain, stop, _entry_hash(hashes, chain, stop)]
         if entry not in entries:
             entries.append(entry)
-    return {"v": FOOTPRINT_VERSION, "g": _global_identity(config), "c": entries}
+    return {
+        "v": FOOTPRINT_VERSION,
+        "g": _global_identity(config),
+        "m": _mapping_identity(config, from_addr),
+        "c": entries,
+    }
 
 
 def is_affected(
-    footprint: dict[str, Any] | None, config: RulesConfig, hashes: dict[str, list[str]]
+    footprint: dict[str, Any] | None,
+    config: RulesConfig,
+    hashes: dict[str, list[str]],
+    from_addr: str,
 ) -> bool:
     """Could re-triaging under `config` give a different result? True when unsure."""
     try:
         if not footprint or footprint.get("v") != FOOTPRINT_VERSION:
             return True
         if footprint.get("g") != _global_identity(config):
+            return True
+        if footprint.get("m") != _mapping_identity(config, from_addr):
             return True
         for chain, stop, digest in footprint["c"]:
             if digest is None or _entry_hash(hashes, chain, stop) != digest:
