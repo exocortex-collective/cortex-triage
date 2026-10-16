@@ -463,7 +463,7 @@ merged:
 | `star`, `important` | **Aggressive: `any()`.** One `true` wins. |
 | `force_archive`, `force_mark_read` | Veto → forces `true`. |
 | `force_no_star`, `force_no_important` | Veto → forces `false`. |
-| `trash` | **Any chain** setting it asks for Gmail Trash. The labeling worker trashes only for a sender Devon has confirmed; a new sender's mail waits in `triage_trash_queue` behind a `trash_sender` question in `triage_questions` (`services/trash_gate.py`, cortex-gco6). Triage never untrashes. |
+| `trash` | **Any chain** setting it asks for Gmail Trash, held until Devon approves the sender (see CLAUDE.md, cortex-gco6). |
 
 Omitting one of the four OPINION flags means "no opinion". Setting it to
 `false` is a **vote**, and a single dissenting vote blocks `archive` /

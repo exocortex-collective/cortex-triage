@@ -94,7 +94,7 @@ Each `auto_run` chain contributes an opinion. Merging (`merge.py`):
 | `star`, `important` | **Aggressive: `any()`.** One `true` wins. |
 | `force_archive`, `force_mark_read` | Veto — forces `true` regardless of the merge. |
 | `force_no_star`, `force_no_important` | Veto — forces `false` regardless of the merge. |
-| `trash` | **Any chain** setting it asks for Gmail Trash. The labeling worker trashes only for a sender Devon has confirmed; a new sender's mail waits in `triage_trash_queue` behind a `trash_sender` question in `triage_questions` (`services/trash_gate.py`, cortex-gco6). Triage never untrashes. |
+| `trash` | **Any chain** setting it asks for Gmail Trash, held until Devon approves the sender (see CLAUDE.md, cortex-gco6). |
 
 A chain has "no opinion" on a flag when the field is absent (`None`). For the
 four OPINION flags -- `archive`, `mark_read`, `star`, `important` -- `false` is

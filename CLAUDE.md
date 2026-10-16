@@ -81,7 +81,7 @@ cancelled by another:
 | `archive`, `mark_read` | **Conservative — `all()` of the chains that have an opinion.** One dissenting chain suppresses it. |
 | `star`, `important` | **Aggressive — `any()`.** One chain asserting it wins. |
 | `force_archive`, `force_mark_read`, `force_no_star`, `force_no_important` | **Vetoes.** Applied last, override the merged value unconditionally. |
-| `trash` | **Any chain** setting it asks for Gmail Trash. The labeling worker trashes only for a sender Devon has confirmed; a new sender's mail waits in `triage_trash_queue` behind a `trash_sender` question in `triage_questions` (`services/trash_gate.py`, cortex-gco6). Triage never untrashes. |
+| `trash` | **Any chain** setting it asks for Gmail Trash. The labeling worker trashes only mail Devon has approved, by confirming its sender or approving it one-off; an undecided sender's mail waits in `triage_trash_queue` behind a `trash_sender` question in `triage_questions` (`services/trash_gate.py`, cortex-gco6). Triage never untrashes. |
 
 A chain expresses "no opinion" by leaving the field unset (`None`), and for the
 four OPINION flags -- `archive`, `mark_read`, `star`, `important` -- `false` is

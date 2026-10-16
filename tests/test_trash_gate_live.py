@@ -89,8 +89,8 @@ def test_decisions_and_one_off_approvals_are_honoured(conn: Any) -> None:
     assert allowed == {"ok", "once"}
     assert _rows(conn, "SELECT gmail_id, status FROM triage_trash_queue") == [
         ("no", "kept"),
-        ("ok", "trashed"),
-        ("once", "trashed"),
+        ("ok", "cleared"),
+        ("once", "cleared"),
     ]
     assert _rows(conn, "SELECT * FROM triage_questions") == []
 
@@ -129,5 +129,33 @@ def test_a_held_email_never_downgrades_an_approval(conn: Any, monkeypatch: Any) 
     monkeypatch.setattr(trash_gate, "decide", lambda d, s, a: "ask")  # stale read
     trash_gate.gate(conn, ["new1"])
     assert _rows(
-        conn, "SELECT status FROM triage_trash_queue" " WHERE gmail_id = 'new1'"
+        conn, "SELECT status FROM triage_trash_queue WHERE gmail_id = 'new1'"
     ) == [("approved",)]
+
+
+def test_a_decision_releases_or_keeps_held_mail(conn: Any) -> None:
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO triage_trash_queue (gmail_id, from_addr, status) VALUES"
+            " ('ok', 'ok@example.com', 'pending'), ('no', 'no@example.com', 'pending')"
+        )
+    conn.commit()
+    assert trash_gate.gate(conn, ["ok", "no"]) == {"ok"}
+    assert _rows(
+        conn,
+        "SELECT gmail_id, status FROM triage_trash_queue"
+        " WHERE gmail_id IN ('ok', 'no')",
+    ) == [("no", "kept"), ("ok", "cleared")]
+
+
+def test_no_question_for_a_sender_decided_mid_gate(conn: Any, monkeypatch: Any) -> None:
+    """The answer route may decide the sender between the gate's read and write."""
+    monkeypatch.setattr(trash_gate, "decide", lambda d, s, a: "ask")  # stale read
+    trash_gate.gate(conn, ["ok"])
+    assert _rows(conn, "SELECT * FROM triage_questions") == []
+
+
+def test_the_schema_can_be_ensured_again(conn: Any) -> None:
+    trash_gate.ensure_trash_schema(conn)
+    trash_gate.ensure_trash_schema(conn)
+    assert trash_gate.gate(conn, ["new1"]) == set()

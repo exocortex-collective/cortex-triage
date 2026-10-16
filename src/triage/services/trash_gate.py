@@ -28,7 +28,7 @@ CREATE TABLE IF NOT EXISTS triage_trash_queue (
     gmail_id TEXT PRIMARY KEY,
     from_addr TEXT,
     status TEXT NOT NULL
-        CHECK (status IN ('pending', 'approved', 'trashed', 'kept')),
+        CHECK (status IN ('pending', 'approved', 'cleared', 'kept')),
     queued_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -47,11 +47,13 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_triage_questions_open
     ON triage_questions (kind, from_addr) WHERE status = 'open';
 """
 
-QUEUE_STATUS = {"trash": "trashed", "keep": "kept", "ask": "pending"}
+# cleared: handed to the labeling worker to trash; Gmail has not been called yet.
+QUEUE_STATUS = {"trash": "cleared", "keep": "kept", "ask": "pending"}
 
 
 def ensure_trash_schema(conn: Any) -> None:
     with conn.cursor() as cur:
+        # Two services starting together would race CREATE ... IF NOT EXISTS.
         cur.execute("SELECT pg_advisory_xact_lock(hashtext('triage_trash_schema'))")
         cur.execute(SCHEMA)
     conn.commit()
@@ -59,7 +61,7 @@ def ensure_trash_schema(conn: Any) -> None:
 
 def decide(sender_decision: str | None, queue_status: str | None, addr: str) -> str:
     """trash, keep or ask, for one email a rule wants trashed."""
-    if sender_decision == "approved" or queue_status in ("approved", "trashed"):
+    if sender_decision == "approved" or queue_status in ("approved", "cleared"):
         return "trash"
     if sender_decision == "rejected" or not addr:
         return "keep"
@@ -67,7 +69,8 @@ def decide(sender_decision: str | None, queue_status: str | None, addr: str) -> 
 
 
 def gate(conn: Any, gmail_ids: list[str]) -> set[str]:
-    """Record each email's place in the trash queue; return those to trash now."""
+    """Queue each email, open one question per undecided sender, commit; return
+    the ids to trash now."""
     with conn.cursor() as cur:
         cur.execute(
             """
@@ -99,7 +102,12 @@ def gate(conn: Any, gmail_ids: list[str]) -> set[str]:
             execute_values(
                 cur,
                 """
-                INSERT INTO triage_questions (id, kind, from_addr) VALUES %s
+                INSERT INTO triage_questions (id, kind, from_addr)
+                SELECT v.id, v.kind, v.from_addr
+                FROM (VALUES %s) AS v(id, kind, from_addr)
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM triage_trash_senders s
+                    WHERE s.email_address = v.from_addr)
                 ON CONFLICT (kind, from_addr) WHERE status = 'open' DO NOTHING
                 """,
                 [(f"q-{secrets.token_hex(6)}", "trash_sender", a) for a in asking],

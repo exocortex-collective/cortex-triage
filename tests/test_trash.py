@@ -126,10 +126,20 @@ def test_repair_does_not_trash_untrashed_email() -> None:
 def test_decide_trashes_only_what_was_approved() -> None:
     for d, s, a in itertools.product(
         (None, "approved", "rejected"),
-        (None, "pending", "approved", "trashed", "kept"),
+        (None, "pending", "approved", "cleared", "kept"),
         ("", "x@example.com"),
     ):
         verdict = trash_gate.decide(d, s, a)
-        approved = d == "approved" or s in ("approved", "trashed")
+        approved = d == "approved" or s in ("approved", "cleared")
         assert (verdict == "trash") == approved, (d, s, a)
         assert verdict != "ask" or (a and d is None), (d, s, a)
+
+
+def test_the_worker_ensures_the_trash_schema_at_startup() -> None:
+    worker = _labeling_worker({}, set())
+    with (
+        patch("triage.services.labeling_worker.ensure_queue_schema"),
+        patch("triage.services.trash_gate.ensure_trash_schema") as ensure,
+    ):
+        worker._ensure_schema()
+    ensure.assert_called_once()
