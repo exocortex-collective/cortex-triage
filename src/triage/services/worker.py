@@ -1225,15 +1225,17 @@ class TriageWorker:
         """Execute an action on an email by enqueueing for batch processing."""
         return self._enqueue_labeling(gmail_id, priority)
 
-    def _footprint(self, path: list[tuple[str, int | None]]) -> dict[str, Any] | None:
+    def _footprint(
+        self, rules: RulesConfig, path: list[tuple[str, int | None]]
+    ) -> dict[str, Any] | None:
         """Footprint of one evaluation, or None (always re-triage) if it fails."""
         try:
-            if self._hashes_for is not self.rules:
-                self._hashes = chain_hashes(self.rules)
-                self._hashes_for = self.rules
-            return build_footprint(self.rules, self._hashes, path)
+            if self._hashes_for is not rules:
+                self._hashes = chain_hashes(rules)
+                self._hashes_for = rules
+            return build_footprint(rules, self._hashes, path)
         except Exception as e:  # advisory only: never fail a triage job over it
-            logger.warning(f"Footprint not recorded: {e}")
+            logger.warning(f"Footprint not recorded: {e}", exc_info=True)
             return None
 
     def _store_classification(
@@ -1328,17 +1330,18 @@ class TriageWorker:
                 email.body = self._get_body_from_api(gmail_id)
 
             # Evaluate rules across all auto_run chains (may raise LLMError)
+            rules = self.rules  # a SIGHUP reload may swap self.rules mid-job
             path: list[tuple[str, int | None]] = []
             merged_action, chain_results = evaluate_parallel(
-                self.rules, email, self.llm, path
+                rules, email, self.llm, path
             )
 
             # If no chains produced labels, apply default label from config
             matched_chains = [r.chain for r in chain_results if r.matched and r.chain]
             if merged_action is None or not merged_action.add_label:
-                default_label = self.rules.default_label
-                if self.rules.label_prefix:
-                    default_label = f"{self.rules.label_prefix}/{default_label}"
+                default_label = rules.default_label
+                if rules.label_prefix:
+                    default_label = f"{rules.label_prefix}/{default_label}"
                 if merged_action is None:
                     merged_action = Action(add_label=[default_label])
                 else:
@@ -1388,7 +1391,7 @@ class TriageWorker:
 
             # Store classification
             self._store_classification(
-                email, merged_result, action_executed, self._footprint(path)
+                email, merged_result, action_executed, self._footprint(rules, path)
             )
 
             # Track classification method for metrics
@@ -1488,9 +1491,10 @@ class TriageWorker:
                                 if not email.body:
                                     email.body = self._get_body_from_api(gmail_id)
 
+                                rules = self.rules
                                 path: list[tuple[str, int | None]] = []
                                 merged_action, chain_results = evaluate_parallel(
-                                    self.rules, email, self.llm, path
+                                    rules, email, self.llm, path
                                 )
                                 matched_chains = [
                                     r.chain
@@ -1499,10 +1503,10 @@ class TriageWorker:
                                 ]
                                 # Apply default label if no chains produced labels
                                 if merged_action is None or not merged_action.add_label:
-                                    default_label = self.rules.default_label
-                                    if self.rules.label_prefix:
+                                    default_label = rules.default_label
+                                    if rules.label_prefix:
                                         default_label = (
-                                            f"{self.rules.label_prefix}/{default_label}"
+                                            f"{rules.label_prefix}/{default_label}"
                                         )
                                     if merged_action is None:
                                         merged_action = Action(
@@ -1575,7 +1579,7 @@ class TriageWorker:
                                     email,
                                     result,
                                     action_executed,
-                                    self._footprint(path),
+                                    self._footprint(rules, path),
                                 )
                                 method = "llm" if result.llm_category else "rule"
                                 EMAILS_CLASSIFIED.labels(method=method).inc()

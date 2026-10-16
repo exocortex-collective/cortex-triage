@@ -330,10 +330,65 @@ def test_the_worker_rehashes_when_its_rules_are_reloaded() -> None:
 
     old, new = load_rules_from_string(BASE), load_rules_from_string(BEFORE_HIT)
     worker = TriageWorker(MagicMock(), old, MagicMock(), MagicMock())
-    assert worker._footprint([("main", 1)]) == build_footprint(
+    assert worker._footprint(old, [("main", 1)]) == build_footprint(
         old, chain_hashes(old), [("main", 1)]
     )
-    worker.rules = new
-    assert worker._footprint([("main", 1)]) == build_footprint(
+    assert worker._footprint(new, [("main", 1)]) == build_footprint(
         new, chain_hashes(new), [("main", 1)]
     )
+
+
+def test_a_reload_mid_job_does_not_relabel_the_footprint() -> None:
+    from triage.services.worker import TriageWorker
+
+    old, new = load_rules_from_string(BASE), load_rules_from_string(AFTER_HIT)
+    llm = MagicMock()
+    worker = TriageWorker(MagicMock(), old, llm, MagicMock())
+
+    def reload_during_evaluation(*args: object, **kwargs: object) -> bool:
+        worker.rules = new  # what reload_rules() does from the SIGHUP handler
+        return False
+
+    llm.check_email_intent.side_effect = reload_during_evaluation
+    worker._get_email_data = MagicMock(  # type: ignore[method-assign]
+        return_value=_email("a@example.com", "nothing")
+    )
+    worker._execute_action = MagicMock(return_value=True)  # type: ignore[method-assign]
+    worker._store_classification = MagicMock()  # type: ignore[method-assign]
+    worker._complete_job = MagicMock()  # type: ignore[method-assign]
+    assert worker.process_job({"id": 1, "payload": {"gmail_id": "g"}})
+    llm.check_email_intent.assert_called()
+    footprint = worker._store_classification.call_args.args[3]
+    assert footprint == build_footprint(old, chain_hashes(old), [("main", None)])
+    assert is_affected(footprint, new, chain_hashes(new))
+
+
+UNEVALUATED = """
+version: 1
+label_prefix: Cortex
+default_label: Uncategorized
+chains:
+  main:
+    auto_run: true
+    rules:
+      - match: {from_addr: ghost@example.com}
+        jump: ghost
+      - match: {from_addr: loop@example.com}
+        jump: loop
+  loop:
+    rules:
+      - match: {from_addr: loop@example.com}
+        jump: main
+"""
+
+
+@pytest.mark.parametrize(
+    ("from_addr", "unevaluated"),
+    [("ghost@example.com", "ghost"), ("loop@example.com", "main")],
+    ids=["missing-chain", "cycle"],
+)
+def test_the_matcher_records_a_chain_it_could_not_evaluate(
+    from_addr: str, unevaluated: str
+) -> None:
+    path = _path(load_rules_from_string(UNEVALUATED), from_addr, "s")
+    assert (unevaluated, -1) in path

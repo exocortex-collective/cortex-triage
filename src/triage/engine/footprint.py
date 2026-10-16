@@ -20,7 +20,7 @@ FOOTPRINT_VERSION = 1
 
 
 def _digest(value: Any) -> str:
-    raw = json.dumps(value, sort_keys=True, default=str).encode()
+    raw = json.dumps(value, sort_keys=True).encode()
     return hashlib.sha256(raw).hexdigest()[:16]
 
 
@@ -56,10 +56,6 @@ def _rule_identity(rule: Rule, config: RulesConfig) -> str:
     if body.get("llm") or body.get("variables"):
         refs["prompts"] = {
             k: v.model_dump(mode="json") for k, v in config.prompts.items()
-        }
-        refs["body_extraction_prompts"] = {
-            k: v.model_dump(mode="json")
-            for k, v in config.body_extraction_prompts.items()
         }
     return _digest([body, refs])
 
