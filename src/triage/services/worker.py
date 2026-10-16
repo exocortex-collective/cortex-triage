@@ -58,6 +58,7 @@ from triage.db.worker_status import (
     update_config_version,
     update_heartbeat,
 )
+from triage.engine.footprint import build_footprint, chain_hashes
 from triage.engine.matcher import evaluate_parallel
 from triage.models.patterns import EmailPattern
 from triage.services.lifecycle import (
@@ -363,6 +364,8 @@ class TriageWorker:
         self.last_priority_convergence = 0.0  # Track last bulk priority update
         self.config_version = config_version  # Track which DB config version is loaded
         self.jobs_processed = 0  # Track cumulative job count for status updates
+        self._hashes: dict[str, list[str]] = {}
+        self._hashes_for: RulesConfig | None = None
 
     def stop(self) -> None:
         """Signal the worker to stop."""
@@ -756,6 +759,10 @@ class TriageWorker:
                         -- Unique constraint: one classification per email
                         CONSTRAINT unique_gmail_id UNIQUE (gmail_id)
                     );
+
+                    -- Which part of the config decided it (triage-70be)
+                    ALTER TABLE classifications
+                        ADD COLUMN IF NOT EXISTS footprint JSONB;
 
                     CREATE INDEX IF NOT EXISTS idx_classifications_email
                     ON classifications(email_id);
@@ -1218,11 +1225,25 @@ class TriageWorker:
         """Execute an action on an email by enqueueing for batch processing."""
         return self._enqueue_labeling(gmail_id, priority)
 
+    def _footprint(
+        self, rules: RulesConfig, path: list[tuple[str, int | None]]
+    ) -> dict[str, Any] | None:
+        """Footprint of one evaluation, or None (always re-triage) if it fails."""
+        try:
+            if self._hashes_for is not rules:
+                self._hashes = chain_hashes(rules)
+                self._hashes_for = rules
+            return build_footprint(rules, self._hashes, path)
+        except Exception as e:  # advisory only: never fail a triage job over it
+            logger.warning(f"Footprint not recorded: {e}", exc_info=True)
+            return None
+
     def _store_classification(
         self,
         email: Email,
         result: EvaluationResult,
         action_executed: bool,
+        footprint: dict[str, Any] | None,
     ) -> None:
         """Store classification result (idempotent - updates if exists)."""
         with self._get_conn() as conn, conn.cursor() as cur:
@@ -1231,8 +1252,8 @@ class TriageWorker:
                     INSERT INTO classifications (
                         email_id, gmail_id, matched_chain, matched_rule_index,
                         config_version_id, llm_category, llm_confidence,
-                        llm_reasoning, action_taken, action_executed
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        llm_reasoning, action_taken, action_executed, footprint
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     ON CONFLICT (gmail_id) DO UPDATE SET
                         matched_chain = EXCLUDED.matched_chain,
                         matched_rule_index = EXCLUDED.matched_rule_index,
@@ -1242,6 +1263,7 @@ class TriageWorker:
                         llm_reasoning = EXCLUDED.llm_reasoning,
                         action_taken = EXCLUDED.action_taken,
                         action_executed = EXCLUDED.action_executed,
+                        footprint = EXCLUDED.footprint,
                         classified_at = NOW()
                 """,
                 (
@@ -1255,6 +1277,7 @@ class TriageWorker:
                     result.llm_reasoning,
                     Json(result.action.model_dump() if result.action else None),
                     action_executed,
+                    Json(footprint) if footprint is not None else None,
                 ),
             )
             conn.commit()
@@ -1307,16 +1330,18 @@ class TriageWorker:
                 email.body = self._get_body_from_api(gmail_id)
 
             # Evaluate rules across all auto_run chains (may raise LLMError)
+            rules = self.rules  # a SIGHUP reload may swap self.rules mid-job
+            path: list[tuple[str, int | None]] = []
             merged_action, chain_results = evaluate_parallel(
-                self.rules, email, self.llm
+                rules, email, self.llm, path
             )
 
             # If no chains produced labels, apply default label from config
             matched_chains = [r.chain for r in chain_results if r.matched and r.chain]
             if merged_action is None or not merged_action.add_label:
-                default_label = self.rules.default_label
-                if self.rules.label_prefix:
-                    default_label = f"{self.rules.label_prefix}/{default_label}"
+                default_label = rules.default_label
+                if rules.label_prefix:
+                    default_label = f"{rules.label_prefix}/{default_label}"
                 if merged_action is None:
                     merged_action = Action(add_label=[default_label])
                 else:
@@ -1365,7 +1390,9 @@ class TriageWorker:
                     logger.info(f"Decision trace for {gmail_id}:\n{trace_str}")
 
             # Store classification
-            self._store_classification(email, merged_result, action_executed)
+            self._store_classification(
+                email, merged_result, action_executed, self._footprint(rules, path)
+            )
 
             # Track classification method for metrics
             method = "llm" if merged_result.llm_category else "rule"
@@ -1464,8 +1491,10 @@ class TriageWorker:
                                 if not email.body:
                                     email.body = self._get_body_from_api(gmail_id)
 
+                                rules = self.rules
+                                path: list[tuple[str, int | None]] = []
                                 merged_action, chain_results = evaluate_parallel(
-                                    self.rules, email, self.llm
+                                    rules, email, self.llm, path
                                 )
                                 matched_chains = [
                                     r.chain
@@ -1474,10 +1503,10 @@ class TriageWorker:
                                 ]
                                 # Apply default label if no chains produced labels
                                 if merged_action is None or not merged_action.add_label:
-                                    default_label = self.rules.default_label
-                                    if self.rules.label_prefix:
+                                    default_label = rules.default_label
+                                    if rules.label_prefix:
                                         default_label = (
-                                            f"{self.rules.label_prefix}/{default_label}"
+                                            f"{rules.label_prefix}/{default_label}"
                                         )
                                     if merged_action is None:
                                         merged_action = Action(
@@ -1547,7 +1576,10 @@ class TriageWorker:
                                         )
 
                                 self._store_classification(
-                                    email, result, action_executed
+                                    email,
+                                    result,
+                                    action_executed,
+                                    self._footprint(rules, path),
                                 )
                                 method = "llm" if result.llm_category else "rule"
                                 EMAILS_CLASSIFIED.labels(method=method).inc()
