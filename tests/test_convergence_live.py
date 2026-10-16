@@ -47,6 +47,7 @@ CLEAN = build_footprint(RULES, chain_hashes(RULES), [("main", 1)], SENDER)
 # first. "affected" has no footprint, so it must be re-triaged; "old_clean" is
 # older than it and must not be reached in the same scan.
 EMAILS = [
+    ("newer", 600, 3, None, SENDER),
     ("current", 500, 2, None, SENDER),
     ("new_clean", 400, 1, CLEAN, SENDER),
     ("affected", 300, 1, None, SENDER),
@@ -113,6 +114,7 @@ def _versions(conn: Any) -> dict[str, int]:
 def test_unaffected_mail_is_stamped_and_affected_mail_returned(conn: Any) -> None:
     assert _worker(conn)._converge_and_get_next_email() == {"gmail_id": "affected"}
     assert _versions(conn) == {
+        "newer": 3,
         "current": 2,
         "new_clean": 2,
         "affected": 1,
@@ -164,3 +166,10 @@ def test_giving_up_stamps_the_loaded_version_not_the_active_one(conn: Any) -> No
     conn.commit()
     _worker(conn)._mark_convergence_failed("affected")
     assert _versions(conn)["affected"] == 2
+
+
+def test_the_kill_switch_stops_convergence(conn: Any) -> None:
+    worker = _worker(conn)
+    worker.config.enable_convergence = False
+    assert worker._converge_and_get_next_email() is None
+    assert _versions(conn)["new_clean"] == 1

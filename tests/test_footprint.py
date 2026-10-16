@@ -6,6 +6,7 @@ from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
+from cortex_utils.llm import LLMError
 from cortex_utils.triage_config import load_rules_from_string
 from cortex_utils.triage_config.models import Email, RulesConfig
 
@@ -464,45 +465,46 @@ def test_process_job_keeps_the_rules_it_started_with(
     _assert_stored_under_the_old_rules(worker)
 
 
+def _converge_once(worker: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Run one idle iteration of run() that converges the email 'g'."""
+    for name in (
+        "_ensure_schema",
+        "_check_and_process_signals",
+        "_cleanup_stale_workers",
+    ):
+        monkeypatch.setattr(worker, name, MagicMock())
+    monkeypatch.setattr(worker, "_process_batch", MagicMock(return_value=(0, 0)))
+
+    def one_email() -> dict[str, str]:
+        worker.running = False
+        return {"gmail_id": "g"}
+
+    monkeypatch.setattr(worker, "_converge_and_get_next_email", one_email)
+    worker.run()
+
+
 def test_convergence_keeps_the_rules_it_started_with(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     worker = _reloading_worker(monkeypatch)
-    for name in (
-        "_ensure_schema",
-        "_check_and_process_signals",
-        "_cleanup_stale_workers",
-    ):
-        monkeypatch.setattr(worker, name, MagicMock())
-    monkeypatch.setattr(worker, "_process_batch", MagicMock(return_value=(0, 0)))
-
-    def one_email() -> dict[str, str]:
-        worker.running = False
-        return {"gmail_id": "g"}
-
-    monkeypatch.setattr(worker, "_converge_and_get_next_email", one_email)
-    worker.run()
+    _converge_once(worker, monkeypatch)
     _assert_stored_under_the_old_rules(worker)
 
 
-def test_convergence_gives_up_on_mail_it_cannot_load(
-    monkeypatch: pytest.MonkeyPatch,
+@pytest.mark.parametrize(
+    ("attribute", "failure"),
+    [
+        ("_get_email_data", MagicMock(return_value=None)),
+        ("_get_email_data", MagicMock(side_effect=RuntimeError("db"))),
+        ("_execute_action", MagicMock(side_effect=LLMError("llm"))),
+    ],
+    ids=["not-found", "exception", "llm-error"],
+)
+def test_convergence_gives_up_on_mail_it_cannot_triage(
+    monkeypatch: pytest.MonkeyPatch, attribute: str, failure: MagicMock
 ) -> None:
     worker = _reloading_worker(monkeypatch)
-    for name in (
-        "_ensure_schema",
-        "_check_and_process_signals",
-        "_cleanup_stale_workers",
-    ):
-        monkeypatch.setattr(worker, name, MagicMock())
-    monkeypatch.setattr(worker, "_process_batch", MagicMock(return_value=(0, 0)))
-    monkeypatch.setattr(worker, "_get_email_data", MagicMock(return_value=None))
+    monkeypatch.setattr(worker, attribute, failure)
     monkeypatch.setattr(worker, "_mark_convergence_failed", MagicMock())
-
-    def one_email() -> dict[str, str]:
-        worker.running = False
-        return {"gmail_id": "g"}
-
-    monkeypatch.setattr(worker, "_converge_and_get_next_email", one_email)
-    worker.run()
+    _converge_once(worker, monkeypatch)
     worker._mark_convergence_failed.assert_called_once_with("g")
