@@ -364,6 +364,8 @@ class TriageWorker:
         self.last_priority_convergence = 0.0  # Track last bulk priority update
         self.config_version = config_version  # Track which DB config version is loaded
         self.jobs_processed = 0  # Track cumulative job count for status updates
+        self._hashes: dict[str, list[str]] = {}
+        self._hashes_for: RulesConfig | None = None
 
     def stop(self) -> None:
         """Signal the worker to stop."""
@@ -1223,19 +1225,23 @@ class TriageWorker:
         """Execute an action on an email by enqueueing for batch processing."""
         return self._enqueue_labeling(gmail_id, priority)
 
-    def _footprint(self, path: list[tuple[str, int | None]]) -> dict[str, Any]:
-        """Footprint of one evaluation; chain hashes cached per loaded config."""
-        if getattr(self, "_hashes_for", None) is not self.rules:
-            self._hashes = chain_hashes(self.rules)
-            self._hashes_for = self.rules
-        return build_footprint(self.rules, self._hashes, path)
+    def _footprint(self, path: list[tuple[str, int | None]]) -> dict[str, Any] | None:
+        """Footprint of one evaluation, or None (always re-triage) if it fails."""
+        try:
+            if self._hashes_for is not self.rules:
+                self._hashes = chain_hashes(self.rules)
+                self._hashes_for = self.rules
+            return build_footprint(self.rules, self._hashes, path)
+        except Exception as e:  # advisory only: never fail a triage job over it
+            logger.warning(f"Footprint not recorded: {e}")
+            return None
 
     def _store_classification(
         self,
         email: Email,
         result: EvaluationResult,
         action_executed: bool,
-        footprint: dict[str, Any] | None = None,
+        footprint: dict[str, Any] | None,
     ) -> None:
         """Store classification result (idempotent - updates if exists)."""
         with self._get_conn() as conn, conn.cursor() as cur:

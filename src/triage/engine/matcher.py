@@ -1201,21 +1201,6 @@ def _evaluate_chain_inner(
     _path: list[tuple[str, int | None]] | None,
     stop: list[int | None],
 ) -> EvaluationResult:
-    """Evaluate a chain of rules against an email.
-
-    Args:
-        config: The rules configuration.
-        chain_name: Name of the chain to evaluate.
-        email: The email to evaluate.
-        llm_client: Optional LLM client for intent/classification.
-        _visited: Set of visited chains (for cycle detection).
-        _intents: Pre-computed intents dict (for efficiency in recursive calls).
-        _email_categories: Pre-computed email_categories dict.
-        _trace: Accumulated decision trace.
-
-    Returns:
-        EvaluationResult with match details and action.
-    """
     if _visited is None:
         _visited = set()
     if _trace is None:

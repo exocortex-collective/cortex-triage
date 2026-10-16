@@ -1,10 +1,11 @@
 """Which part of the config decided a classification (triage-70be).
 
-A footprint records, for every chain an email entered, how far evaluation got
-and a hash of everything up to that point: the rules themselves plus the
-intent, category and prompt definitions they call. A config change can only
-alter an email's result if it changes one of those hashes, so convergence can
-re-triage just the emails whose footprint no longer matches.
+A footprint records a hash of the global settings (label_prefix, default_label,
+which chains auto_run) and, for every chain an email entered, how far
+evaluation got plus a hash of everything up to that point: the rules
+themselves and the intent, category and prompt definitions they call. A config
+change can only alter an email's result if it changes one of those hashes, so
+convergence can re-triage just the emails whose footprint no longer matches.
 """
 
 from __future__ import annotations
@@ -13,7 +14,7 @@ import hashlib
 import json
 from typing import Any
 
-from cortex_utils.triage_config.models import RulesConfig
+from cortex_utils.triage_config.models import Rule, RulesConfig
 
 FOOTPRINT_VERSION = 1
 
@@ -32,6 +33,8 @@ def _llm_refs(condition: Any, config: RulesConfig, refs: dict[str, Any]) -> None
         return
     for key in ("email_intent", "subject_intent"):
         name = condition.get(key)
+        if isinstance(name, dict):  # intent defined inline; already in the rule
+            continue
         if name:
             spec = config.intents.get(name)
             refs[f"intent:{name}"] = spec.model_dump(mode="json") if spec else None
@@ -46,7 +49,7 @@ def _llm_refs(condition: Any, config: RulesConfig, refs: dict[str, Any]) -> None
         _llm_refs(condition.get(key), config, refs)
 
 
-def _rule_identity(rule: Any, config: RulesConfig) -> str:
+def _rule_identity(rule: Rule, config: RulesConfig) -> str:
     body = rule.model_dump(mode="json")
     refs: dict[str, Any] = {}
     _llm_refs(body.get("match"), config, refs)
@@ -83,7 +86,9 @@ def _entry_hash(
     hashes: dict[str, list[str]], chain: str, stop: int | None
 ) -> str | None:
     cumulative = hashes.get(chain)
-    if cumulative is None or stop == -1:
+    if stop == -1:  # not evaluated: a cycle, or a jump to a missing chain
+        return _digest([chain, "unevaluated", cumulative is not None])
+    if cumulative is None:
         return None
     if stop is None:
         return cumulative[-1] if cumulative else _digest([chain, "empty"])
@@ -107,11 +112,14 @@ def is_affected(
     footprint: dict[str, Any] | None, config: RulesConfig, hashes: dict[str, list[str]]
 ) -> bool:
     """Could re-triaging under `config` give a different result? True when unsure."""
-    if not footprint or footprint.get("v") != FOOTPRINT_VERSION:
-        return True
-    if footprint.get("g") != _global_identity(config):
-        return True
-    for chain, stop, digest in footprint.get("c", []):
-        if digest is None or _entry_hash(hashes, chain, stop) != digest:
+    try:
+        if not footprint or footprint.get("v") != FOOTPRINT_VERSION:
             return True
+        if footprint.get("g") != _global_identity(config):
+            return True
+        for chain, stop, digest in footprint["c"]:
+            if digest is None or _entry_hash(hashes, chain, stop) != digest:
+                return True
+    except (AttributeError, KeyError, TypeError, ValueError, IndexError):
+        return True  # a malformed footprint proves nothing
     return False
