@@ -18,6 +18,8 @@ Vetoes (override merge result regardless of other chains):
   - force_mark_read: Force mark-read regardless of other chains.
   - force_no_star: Force no star regardless of other chains.
   - force_no_important: Force not important regardless of other chains.
+
+Trash (true wins): moves the email to Gmail Trash if ANY chain says so.
 """
 
 from cortex_utils.triage_config.models import Action, EvaluationResult
@@ -53,6 +55,7 @@ def merge_actions(results: list[EvaluationResult]) -> Action | None:
     has_force_mark_read = False
     has_force_no_star = False
     has_force_no_important = False
+    trash = None
 
     for r in matched:
         action = r.action
@@ -91,6 +94,8 @@ def merge_actions(results: list[EvaluationResult]) -> Action | None:
             has_force_no_star = True
         if action.force_no_important:
             has_force_no_important = True
+        if action.trash:
+            trash = True
 
     # Merge conservative flags (false wins)
     archive = all(archive_opinions) if archive_opinions else None
@@ -132,4 +137,5 @@ def merge_actions(results: list[EvaluationResult]) -> Action | None:
         mark_read=mark_read,
         star=star,
         important=important,
+        trash=trash,
     )

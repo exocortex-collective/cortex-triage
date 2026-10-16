@@ -530,7 +530,7 @@ class LabelingWorker:
 
         Returns dict mapping gmail_id -> action_taken dict (or None if not found).
         The action_taken dict contains: label, add_label, remove_label, archive,
-        mark_read, star.
+        mark_read, star, trash.
 
         A message in Gmail's SPAM gets SPAM_TARGET whatever its classification
         says, so reconciling it removes every managed label and touches no
@@ -748,6 +748,8 @@ class LabelingWorker:
                 add_labels.append("STARRED")
             if important:
                 add_labels.append("IMPORTANT")
+            if classification.get("trash"):
+                add_labels.append("TRASH")
             if archive:
                 remove_labels.append("INBOX")
             if mark_read:
@@ -856,6 +858,8 @@ class LabelingWorker:
 
         if star:
             add_labels.append("STARRED")
+        if classification.get("trash"):
+            add_labels.append("TRASH")
         if archive:
             remove_labels.append("INBOX")
         if mark_read:
