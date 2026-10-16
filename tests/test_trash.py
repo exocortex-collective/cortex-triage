@@ -152,3 +152,22 @@ def test_spam_never_reaches_the_gate(cleared: Any) -> None:
     result = worker._get_latest_classifications(["g1", "g2"])
     assert cleared.call_args.args[1] == ["g2"]
     assert not result["g1"].get("trash")
+
+
+def test_a_batch_trashes_only_what_the_gate_cleared() -> None:
+    worker = _labeling_worker(
+        {
+            "g1": {"label": "Cortex/A", "trash": True},
+            "g2": {"label": "Cortex/A", "trash": True},
+        },
+        set(),
+    )
+    worker._get_current_cortex_labels = MagicMock(return_value={"g1": [], "g2": []})
+    with patch("triage.services.trash_gate.gate", return_value={"g1"}):
+        worker._process_normal_batch(
+            [LabelingJob(job_id=1, gmail_id="g1"), LabelingJob(job_id=2, gmail_id="g2")]
+        )
+    calls = {
+        tuple(c.args[0]): c.args[1] for c in worker.gmail.batch_modify.call_args_list
+    }
+    assert calls == {("g1",): ["id:Cortex/A", "id:TRASH"], ("g2",): ["id:Cortex/A"]}
