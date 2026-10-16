@@ -106,10 +106,12 @@ chain.
 ### Convergence (automatic backfill on rule change)
 
 `classifications.config_version_id` tracks which config version labelled each
-email. When the triage queue is idle the worker picks the **newest** email
-behind the active version and re-triages it in-process, one per poll, walking
-backwards through history (`_converge_priority_and_get_next_email`). Emails from
-priority-mapped senders are bulk-updated in place every 5 minutes instead.
+email, and `classifications.footprint` records which part of the config decided
+it (`engine/footprint.py`). When the triage queue is idle the worker scans the
+newest mail behind its loaded version (`_converge_and_get_next_email`): mail
+whose footprint the new config cannot reach is stamped current without
+re-running, and the first mail it can reach is re-triaged in-process. Mail with
+no footprint (classified before footprints existed) is always re-triaged.
 
 So **publishing a new config version silently re-labels historical mail.** No
 manual re-enqueue is needed after a rules change. Disable with

@@ -17,6 +17,7 @@ from unittest.mock import MagicMock
 
 import psycopg2
 import pytest
+from cortex_utils.triage_config import load_rules_from_string
 
 from triage.services.labeling_worker import SPAM_TARGET, LabelingWorker
 from triage.services.worker import TriageWorker
@@ -41,7 +42,7 @@ CREATE TABLE triage_email_mappings (
     email_address TEXT, mapping_type TEXT, deleted_at TIMESTAMPTZ
 );
 CREATE TABLE classifications (
-    gmail_id TEXT, config_version_id INT, action_taken JSONB,
+    gmail_id TEXT, config_version_id INT, action_taken JSONB, footprint JSONB,
     classified_at TIMESTAMPTZ DEFAULT now()
 );
 INSERT INTO triage_config_versions VALUES (2, TRUE, 'Cortex');
@@ -96,16 +97,16 @@ def _bind(worker: Any, conn: Any) -> None:
 
 
 def _triage_worker(conn: Any) -> Any:
-    config = MagicMock(enable_convergence=True, priority_convergence_interval=3600)
-    worker = TriageWorker(config, MagicMock(), MagicMock(), MagicMock())
-    worker.last_priority_convergence = float("inf")  # skip the bulk-update step
+    config = MagicMock(enable_convergence=True, convergence_batch_size=500)
+    rules = load_rules_from_string("version: 1\nchains: {}\n")
+    worker = TriageWorker(config, rules, MagicMock(), MagicMock(), config_version=2)
     _bind(worker, conn)
     return worker
 
 
 def test_convergence_never_picks_spam(conn: Any) -> None:
     worker = _triage_worker(conn)
-    assert worker._converge_priority_and_get_next_email() == {"gmail_id": "ham"}
+    assert worker._converge_and_get_next_email() == {"gmail_id": "ham"}
 
 
 def test_convergence_returns_nothing_when_only_spam_is_behind(conn: Any) -> None:
@@ -114,7 +115,7 @@ def test_convergence_returns_nothing_when_only_spam_is_behind(conn: Any) -> None
         cur.execute(
             "UPDATE classifications SET config_version_id = 1 WHERE gmail_id = 'spam'"
         )
-    assert _triage_worker(conn)._converge_priority_and_get_next_email() is None
+    assert _triage_worker(conn)._converge_and_get_next_email() is None
 
 
 def test_convergence_still_picks_a_message_with_null_label_ids(conn: Any) -> None:
@@ -127,10 +128,12 @@ def test_convergence_still_picks_a_message_with_null_label_ids(conn: Any) -> Non
             " WHERE gmail_id = 'nolabels'"
         )
     worker = _triage_worker(conn)
-    assert worker._converge_priority_and_get_next_email() == {"gmail_id": "nolabels"}
+    assert worker._converge_and_get_next_email() == {"gmail_id": "nolabels"}
 
 
-def test_convergence_skips_priority_senders(conn: Any) -> None:
+def test_convergence_no_longer_skips_priority_senders(conn: Any) -> None:
+    # Priority mappings merge with the chains, so their mail is re-triaged
+    # like any other (triage-70be); the old bulk shortcut skipped it.
     with conn.cursor() as cur:
         cur.execute("INSERT INTO emails_parsed VALUES ('ham', 'vip@example.com')")
         cur.execute(
@@ -138,7 +141,7 @@ def test_convergence_skips_priority_senders(conn: Any) -> None:
             " ('vip@example.com', 'priority', NULL)"
         )
     worker = _triage_worker(conn)
-    assert worker._converge_priority_and_get_next_email() == {"gmail_id": "nolabels"}
+    assert worker._converge_and_get_next_email() == {"gmail_id": "ham"}
 
 
 def test_labeling_spam_lookup_is_scoped_to_the_batch(conn: Any) -> None:

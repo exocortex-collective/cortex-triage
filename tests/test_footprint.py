@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
@@ -73,8 +74,10 @@ def test_the_path_records_where_each_chain_stopped(
 
 def _affected(old_yaml: str, new_yaml: str, from_addr: str, subject: str) -> bool:
     old, new = load_rules_from_string(old_yaml), load_rules_from_string(new_yaml)
-    fp = build_footprint(old, chain_hashes(old), _path(old, from_addr, subject))
-    return is_affected(fp, new, chain_hashes(new))
+    fp = build_footprint(
+        old, chain_hashes(old), _path(old, from_addr, subject), from_addr
+    )
+    return is_affected(fp, new, chain_hashes(new), from_addr)
 
 
 ZZ = "      - match: {subject_contains: zz}\n        action: {label: Z}\n"
@@ -127,10 +130,10 @@ def test_is_affected_matches_what_a_change_can_reach(
 
 def test_a_missing_or_foreign_footprint_is_always_affected() -> None:
     config = load_rules_from_string(BASE)
-    good = build_footprint(config, chain_hashes(config), [("main", 1)])
-    assert not is_affected(good, config, chain_hashes(config))
-    assert is_affected(None, config, chain_hashes(config))
-    assert is_affected({**good, "v": 999}, config, chain_hashes(config))
+    good = build_footprint(config, chain_hashes(config), [("main", 1)], A)
+    assert not is_affected(good, config, chain_hashes(config), A)
+    assert is_affected(None, config, chain_hashes(config), A)
+    assert is_affected({**good, "v": 999}, config, chain_hashes(config), A)
 
 
 def test_the_worker_stores_the_footprint_of_what_it_evaluated() -> None:
@@ -144,12 +147,13 @@ def test_the_worker_stores_the_footprint_of_what_it_evaluated() -> None:
         return_value=_email("a@example.com", "a hit")
     )
     worker._execute_action = MagicMock(return_value=True)  # type: ignore[method-assign]
+    worker._get_body_from_api = MagicMock(return_value="")  # type: ignore[method-assign]
     worker._store_classification = MagicMock()  # type: ignore[method-assign]
     worker._complete_job = MagicMock()  # type: ignore[method-assign]
     assert worker.process_job({"id": 1, "payload": {"gmail_id": "g"}})
     footprint = worker._store_classification.call_args.args[3]
-    assert footprint == build_footprint(config, chain_hashes(config), [("main", 1)])
-    assert not is_affected(footprint, config, chain_hashes(config))
+    assert footprint == build_footprint(config, chain_hashes(config), [("main", 1)], A)
+    assert not is_affected(footprint, config, chain_hashes(config), A)
 
 
 EXT = """
@@ -193,8 +197,8 @@ def _fp_affected(
     old_yaml: str, new_yaml: str, path: list[tuple[str, int | None]]
 ) -> bool:
     old, new = load_rules_from_string(old_yaml), load_rules_from_string(new_yaml)
-    fp = build_footprint(old, chain_hashes(old), path)
-    return is_affected(fp, new, chain_hashes(new))
+    fp = build_footprint(old, chain_hashes(old), path, A)
+    return is_affected(fp, new, chain_hashes(new), A)
 
 
 WHOLE = [("main", None)]
@@ -276,7 +280,7 @@ def test_is_affected_follows_what_the_rules_call(
 
 def test_a_chain_entered_twice_is_recorded_once() -> None:
     config = load_rules_from_string(BASE)
-    fp = build_footprint(config, chain_hashes(config), [("main", 1), ("main", 1)])
+    fp = build_footprint(config, chain_hashes(config), [("main", 1), ("main", 1)], A)
     assert len(fp["c"]) == 1
 
 
@@ -294,11 +298,11 @@ def test_a_chain_entered_twice_is_recorded_once() -> None:
 )
 def test_a_malformed_footprint_is_affected_not_an_error(entries: object) -> None:
     config = load_rules_from_string(BASE)
-    good = build_footprint(config, chain_hashes(config), [("main", 1)])
-    assert not is_affected(good, config, chain_hashes(config))
-    assert is_affected({**good, "c": entries}, config, chain_hashes(config))
+    good = build_footprint(config, chain_hashes(config), [("main", 1)], A)
+    assert not is_affected(good, config, chain_hashes(config), A)
+    assert is_affected({**good, "c": entries}, config, chain_hashes(config), A)
     assert is_affected(
-        {k: v for k, v in good.items() if k != "c"}, config, chain_hashes(config)
+        {k: v for k, v in good.items() if k != "c"}, config, chain_hashes(config), A
     )
 
 
@@ -319,6 +323,7 @@ def test_a_footprint_failure_does_not_fail_the_job(
         return_value=_email("a@example.com", "a hit")
     )
     worker._execute_action = MagicMock(return_value=True)  # type: ignore[method-assign]
+    worker._get_body_from_api = MagicMock(return_value="")  # type: ignore[method-assign]
     worker._store_classification = MagicMock()  # type: ignore[method-assign]
     worker._complete_job = MagicMock()  # type: ignore[method-assign]
     assert worker.process_job({"id": 1, "payload": {"gmail_id": "g"}})
@@ -330,37 +335,12 @@ def test_the_worker_rehashes_when_its_rules_are_reloaded() -> None:
 
     old, new = load_rules_from_string(BASE), load_rules_from_string(BEFORE_HIT)
     worker = TriageWorker(MagicMock(), old, MagicMock(), MagicMock())
-    assert worker._footprint(old, [("main", 1)]) == build_footprint(
-        old, chain_hashes(old), [("main", 1)]
+    assert worker._footprint(old, [("main", 1)], A) == build_footprint(
+        old, chain_hashes(old), [("main", 1)], A
     )
-    assert worker._footprint(new, [("main", 1)]) == build_footprint(
-        new, chain_hashes(new), [("main", 1)]
+    assert worker._footprint(new, [("main", 1)], A) == build_footprint(
+        new, chain_hashes(new), [("main", 1)], A
     )
-
-
-def test_a_reload_mid_job_does_not_relabel_the_footprint() -> None:
-    from triage.services.worker import TriageWorker
-
-    old, new = load_rules_from_string(BASE), load_rules_from_string(AFTER_HIT)
-    llm = MagicMock()
-    worker = TriageWorker(MagicMock(), old, llm, MagicMock())
-
-    def reload_during_evaluation(*args: object, **kwargs: object) -> bool:
-        worker.rules = new  # what reload_rules() does from the SIGHUP handler
-        return False
-
-    llm.check_email_intent.side_effect = reload_during_evaluation
-    worker._get_email_data = MagicMock(  # type: ignore[method-assign]
-        return_value=_email("a@example.com", "nothing")
-    )
-    worker._execute_action = MagicMock(return_value=True)  # type: ignore[method-assign]
-    worker._store_classification = MagicMock()  # type: ignore[method-assign]
-    worker._complete_job = MagicMock()  # type: ignore[method-assign]
-    assert worker.process_job({"id": 1, "payload": {"gmail_id": "g"}})
-    llm.check_email_intent.assert_called()
-    footprint = worker._store_classification.call_args.args[3]
-    assert footprint == build_footprint(old, chain_hashes(old), [("main", None)])
-    assert is_affected(footprint, new, chain_hashes(new))
 
 
 UNEVALUATED = """
@@ -392,3 +372,130 @@ def test_the_matcher_records_a_chain_it_could_not_evaluate(
 ) -> None:
     path = _path(load_rules_from_string(UNEVALUATED), from_addr, "s")
     assert (unevaluated, -1) in path
+
+
+def _with_mapping(kind: str, addr: str, label: str) -> str:
+    return BASE + f"{kind}_email_mappings:\n  {addr}: {{label: {label}}}\n"
+
+
+@pytest.mark.parametrize(
+    ("new", "affected"),
+    [
+        (_with_mapping("priority", A, "P"), True),
+        (_with_mapping("fallback", A, "F"), True),
+        (_with_mapping("priority", "A@Example.com", "P"), True),
+        (_with_mapping("priority", "other@example.com", "P"), False),
+        (_with_mapping("fallback", "other@example.com", "F"), False),
+    ],
+    ids=[
+        "own-priority-added",
+        "own-fallback-added",
+        "own-mapping-other-case",
+        "other-priority-added",
+        "other-fallback-added",
+    ],
+)
+def test_only_the_senders_own_mappings_are_in_the_footprint(
+    new: str, affected: bool
+) -> None:
+    assert _affected(BASE, new, A, "a hit") is affected
+
+
+def test_a_changed_or_removed_mapping_is_affected() -> None:
+    mapped = _with_mapping("priority", A, "P")
+    assert _affected(mapped, mapped.replace("label: P", "label: Q"), A, "a hit")
+    assert _affected(mapped, BASE, A, "a hit")
+
+
+RELOADED = BASE.replace("default_label: Uncategorized", "default_label: Reloaded")
+
+
+def _reloading_worker(monkeypatch: pytest.MonkeyPatch) -> Any:
+    """A worker whose rules are swapped for RELOADED mid-evaluation."""
+    from triage.services import worker as worker_module
+
+    monkeypatch.setattr(worker_module, "register_worker", MagicMock())
+    old = load_rules_from_string(BASE)
+    llm = MagicMock()
+    worker = worker_module.TriageWorker(
+        MagicMock(poll_interval=0), old, llm, MagicMock(), config_version=1
+    )
+
+    def reload_during_evaluation(*args: object, **kwargs: object) -> bool:
+        worker.rules = load_rules_from_string(RELOADED)
+        worker.config_version = 2
+        return False
+
+    llm.check_email_intent.side_effect = reload_during_evaluation
+    worker._get_email_data = MagicMock(  # type: ignore[method-assign]
+        return_value=_email(A, "nothing")
+    )
+    worker._execute_action = MagicMock(return_value=True)  # type: ignore[method-assign]
+    worker._get_body_from_api = MagicMock(return_value="")  # type: ignore[method-assign]
+    worker._store_classification = MagicMock()  # type: ignore[method-assign]
+    worker._complete_job = MagicMock()  # type: ignore[method-assign]
+    return worker
+
+
+def _assert_stored_under_the_old_rules(worker: Any) -> None:
+    old = load_rules_from_string(BASE)
+    worker.llm.check_email_intent.assert_called()
+    result, footprint = (
+        worker._store_classification.call_args.args[1],
+        worker._store_classification.call_args.args[3],
+    )
+    assert result.action.add_label == ["Cortex/Uncategorized"]
+    assert footprint == build_footprint(old, chain_hashes(old), [("main", None)], A)
+    assert worker._store_classification.call_args.args[4] == 1
+
+
+def test_process_job_keeps_the_rules_it_started_with(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    worker = _reloading_worker(monkeypatch)
+    assert worker.process_job({"id": 1, "payload": {"gmail_id": "g"}})
+    _assert_stored_under_the_old_rules(worker)
+
+
+def test_convergence_keeps_the_rules_it_started_with(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    worker = _reloading_worker(monkeypatch)
+    for name in (
+        "_ensure_schema",
+        "_check_and_process_signals",
+        "_cleanup_stale_workers",
+    ):
+        monkeypatch.setattr(worker, name, MagicMock())
+    monkeypatch.setattr(worker, "_process_batch", MagicMock(return_value=(0, 0)))
+
+    def one_email() -> dict[str, str]:
+        worker.running = False
+        return {"gmail_id": "g"}
+
+    monkeypatch.setattr(worker, "_converge_and_get_next_email", one_email)
+    worker.run()
+    _assert_stored_under_the_old_rules(worker)
+
+
+def test_convergence_gives_up_on_mail_it_cannot_load(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    worker = _reloading_worker(monkeypatch)
+    for name in (
+        "_ensure_schema",
+        "_check_and_process_signals",
+        "_cleanup_stale_workers",
+    ):
+        monkeypatch.setattr(worker, name, MagicMock())
+    monkeypatch.setattr(worker, "_process_batch", MagicMock(return_value=(0, 0)))
+    monkeypatch.setattr(worker, "_get_email_data", MagicMock(return_value=None))
+    monkeypatch.setattr(worker, "_mark_convergence_failed", MagicMock())
+
+    def one_email() -> dict[str, str]:
+        worker.running = False
+        return {"gmail_id": "g"}
+
+    monkeypatch.setattr(worker, "_converge_and_get_next_email", one_email)
+    worker.run()
+    worker._mark_convergence_failed.assert_called_once_with("g")
