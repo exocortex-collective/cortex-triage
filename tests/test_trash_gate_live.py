@@ -7,6 +7,7 @@ unless CORTEX_TEST_DSN points at a throwaway Postgres.
 from __future__ import annotations
 
 import os
+import threading
 from collections.abc import Iterator
 from typing import Any
 
@@ -118,21 +119,6 @@ def test_an_answered_question_does_not_stop_a_new_one(conn: Any) -> None:
     ]
 
 
-def test_a_held_email_never_downgrades_an_approval(conn: Any, monkeypatch: Any) -> None:
-    """The answer route may approve between the gate's read and its write."""
-    with conn.cursor() as cur:
-        cur.execute(
-            "INSERT INTO triage_trash_queue (gmail_id, from_addr, status)"
-            " VALUES ('new1', 'new@example.com', 'approved')"
-        )
-    conn.commit()
-    monkeypatch.setattr(trash_gate, "decide", lambda d, s, a: "ask")  # stale read
-    trash_gate.gate(conn, ["new1"])
-    assert _rows(
-        conn, "SELECT status FROM triage_trash_queue WHERE gmail_id = 'new1'"
-    ) == [("approved",)]
-
-
 def test_a_decision_releases_or_keeps_held_mail(conn: Any) -> None:
     with conn.cursor() as cur:
         cur.execute(
@@ -148,14 +134,26 @@ def test_a_decision_releases_or_keeps_held_mail(conn: Any) -> None:
     ) == [("no", "kept"), ("ok", "cleared")]
 
 
-def test_no_question_for_a_sender_decided_mid_gate(conn: Any, monkeypatch: Any) -> None:
-    """The answer route may decide the sender between the gate's read and write."""
-    monkeypatch.setattr(trash_gate, "decide", lambda d, s, a: "ask")  # stale read
-    trash_gate.gate(conn, ["ok"])
-    assert _rows(conn, "SELECT * FROM triage_questions") == []
-
-
 def test_the_schema_can_be_ensured_again(conn: Any) -> None:
     trash_gate.ensure_trash_schema(conn)
     trash_gate.ensure_trash_schema(conn)
     assert trash_gate.gate(conn, ["new1"]) == set()
+
+
+def test_the_gate_waits_for_an_answer_in_progress(conn: Any) -> None:
+    other = psycopg2.connect(DSN, options="-c search_path=t_trash")
+    try:
+        with other.cursor() as cur:
+            cur.execute("BEGIN")
+            cur.execute("SELECT pg_advisory_xact_lock(hashtext('triage_trash_gate'))")
+        done = threading.Event()
+        gate = threading.Thread(
+            target=lambda: (trash_gate.gate(conn, ["new1"]), done.set())
+        )
+        gate.start()
+        assert not done.wait(0.5)
+        other.commit()
+        assert done.wait(5)
+        gate.join()
+    finally:
+        other.close()

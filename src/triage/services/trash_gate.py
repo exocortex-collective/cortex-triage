@@ -48,6 +48,10 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_triage_questions_open
 """
 
 # cleared: handed to the labeling worker to trash; Gmail has not been called yet.
+# The gateway's answer route takes the same lock, so a decision never lands
+# between the gate's read and its write.
+LOCK = "SELECT pg_advisory_xact_lock(hashtext('triage_trash_gate'))"
+
 QUEUE_STATUS = {"trash": "cleared", "keep": "kept", "ask": "pending"}
 
 
@@ -72,6 +76,7 @@ def gate(conn: Any, gmail_ids: list[str]) -> set[str]:
     """Queue each email, open one question per undecided sender, commit; return
     the ids to trash now."""
     with conn.cursor() as cur:
+        cur.execute(LOCK)
         cur.execute(
             """
             SELECT g.gmail_id, COALESCE(lower(p.from_addr), ''), s.decision, q.status
@@ -92,8 +97,6 @@ def gate(conn: Any, gmail_ids: list[str]) -> set[str]:
                SET status = EXCLUDED.status, from_addr = EXCLUDED.from_addr,
                    updated_at = now()
              WHERE triage_trash_queue.status IS DISTINCT FROM EXCLUDED.status
-               AND NOT (triage_trash_queue.status = 'approved'
-                        AND EXCLUDED.status = 'pending')
             """,
             [(g, addr or None, QUEUE_STATUS[verdict]) for g, addr, verdict in rows],
         )
@@ -102,12 +105,7 @@ def gate(conn: Any, gmail_ids: list[str]) -> set[str]:
             execute_values(
                 cur,
                 """
-                INSERT INTO triage_questions (id, kind, from_addr)
-                SELECT v.id, v.kind, v.from_addr
-                FROM (VALUES %s) AS v(id, kind, from_addr)
-                WHERE NOT EXISTS (
-                    SELECT 1 FROM triage_trash_senders s
-                    WHERE s.email_address = v.from_addr)
+                INSERT INTO triage_questions (id, kind, from_addr) VALUES %s
                 ON CONFLICT (kind, from_addr) WHERE status = 'open' DO NOTHING
                 """,
                 [(f"q-{secrets.token_hex(6)}", "trash_sender", a) for a in asking],
