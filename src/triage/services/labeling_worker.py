@@ -45,6 +45,7 @@ from triage.gmail import (
     QUOTA_MESSAGES_BATCH_MODIFY,
     get_rate_limiter,
 )
+from triage.services import trash_gate
 
 logger = get_logger(__name__)
 
@@ -533,6 +534,9 @@ class LabelingWorker:
         A message in Gmail's SPAM gets SPAM_TARGET whatever its classification
         says, so reconciling it removes every managed label and touches no
         system label (cortex-kvyn).
+
+        trash survives only for mail trash_gate clears; the rest waits for
+        Devon to confirm its sender (cortex-gco6).
         """
         if not gmail_ids:
             return {}
@@ -560,6 +564,12 @@ class LabelingWorker:
 
         result = {gmail_id: action_taken for gmail_id, action_taken in rows}
         result.update({gmail_id: dict(SPAM_TARGET) for gmail_id in spam})
+        wanted = [g for g, action in result.items() if action and action.get("trash")]
+        if wanted:
+            with self._get_conn() as conn:
+                allowed = trash_gate.gate(conn, wanted)
+            for g in wanted:
+                result[g] = {**result[g], "trash": g in allowed}
         return result
 
     def _get_gmail_current_labels(self, gmail_id: str) -> list[str] | None:
@@ -913,6 +923,7 @@ class LabelingWorker:
         # the steady-state path.
         with self._get_conn() as conn:
             ensure_queue_schema(conn)
+            trash_gate.ensure_trash_schema(conn)
 
     def run(self) -> None:
         """Main processing loop."""

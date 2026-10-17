@@ -94,7 +94,7 @@ Each `auto_run` chain contributes an opinion. Merging (`merge.py`):
 | `star`, `important` | **Aggressive: `any()`.** One `true` wins. |
 | `force_archive`, `force_mark_read` | Veto — forces `true` regardless of the merge. |
 | `force_no_star`, `force_no_important` | Veto — forces `false` regardless of the merge. |
-| `trash` | **Any chain** setting it moves the email to Gmail Trash. Triage never untrashes, so removing the rule later does not restore mail. |
+| `trash` | **Any chain** setting it asks for Gmail Trash, held until Devon approves it (see CLAUDE.md, cortex-gco6). |
 
 A chain has "no opinion" on a flag when the field is absent (`None`). For the
 four OPINION flags -- `archive`, `mark_read`, `star`, `important` -- `false` is

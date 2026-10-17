@@ -49,4 +49,4 @@ jobs:
         run: uv run pytest --maxfail=1 --disable-warnings -q
 
       - name: Fail if the live-Postgres tests were skipped
-        run: uv run pytest tests/test_spam_live.py tests/test_footprint_live.py tests/test_convergence_live.py -q -p no:skipping
+        run: uv run pytest tests/test_spam_live.py tests/test_footprint_live.py tests/test_convergence_live.py tests/test_trash_gate_live.py -q -p no:skipping
