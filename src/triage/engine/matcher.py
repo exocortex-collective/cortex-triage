@@ -1161,22 +1161,46 @@ def evaluate_chain(
     _intents: dict | None = None,
     _email_categories: dict | None = None,
     _trace: list[str] | None = None,
+    _path: list[tuple[str, int | None]] | None = None,
 ) -> EvaluationResult:
     """Evaluate a chain of rules against an email.
 
-    Args:
-        config: The rules configuration.
-        chain_name: Name of the chain to evaluate.
-        email: The email to evaluate.
-        llm_client: Optional LLM client for intent/classification.
-        _visited: Set of visited chains (for cycle detection).
-        _intents: Pre-computed intents dict (for efficiency in recursive calls).
-        _email_categories: Pre-computed email_categories dict.
-        _trace: Accumulated decision trace.
-
-    Returns:
-        EvaluationResult with match details and action.
+    If _path is given it receives (chain, stop) for every chain entered, where
+    stop is the index of the rule evaluation ended on, None when every rule was
+    evaluated, and -1 when the chain was not evaluated (cycle or missing).
+    Rules after stop cannot have affected the result (triage-70be).
     """
+    stop: list[int | None] = [-1]
+    try:
+        return _evaluate_chain_inner(
+            config,
+            chain_name,
+            email,
+            llm_client,
+            _visited,
+            _intents,
+            _email_categories,
+            _trace,
+            _path,
+            stop,
+        )
+    finally:
+        if _path is not None:
+            _path.append((chain_name, stop[0]))
+
+
+def _evaluate_chain_inner(
+    config: RulesConfig,
+    chain_name: str,
+    email: Email,
+    llm_client: LLMClient | None,
+    _visited: set[str] | None,
+    _intents: dict | None,
+    _email_categories: dict | None,
+    _trace: list[str] | None,
+    _path: list[tuple[str, int | None]] | None,
+    stop: list[int | None],
+) -> EvaluationResult:
     if _visited is None:
         _visited = set()
     if _trace is None:
@@ -1203,6 +1227,7 @@ def evaluate_chain(
     }
 
     for i, rule in enumerate(chain):
+        stop[0] = i
         rule_trace: list[str] = []
         # Check if rule matches
         matched = matches_condition(
@@ -1247,6 +1272,7 @@ def evaluate_chain(
                 intents,
                 email_categories,
                 _trace,
+                _path,
             )
             if result.matched:
                 return result
@@ -1350,6 +1376,7 @@ def evaluate_chain(
             )
 
     # No rules matched
+    stop[0] = None
     _trace.append(f"chain '{chain_name}': no rules matched")
     return EvaluationResult(matched=False, trace=_trace)
 
@@ -1475,6 +1502,7 @@ def evaluate_parallel(
     config: RulesConfig,
     email: Email,
     llm_client: LLMClient | None = None,
+    path: list[tuple[str, int | None]] | None = None,
 ) -> tuple[Action | None, list[EvaluationResult]]:
     """Evaluate all auto_run chains in parallel and merge results.
 
@@ -1537,6 +1565,7 @@ def evaluate_parallel(
             intents,
             email_categories,
             trace,
+            path,
         )
         results.append(result)
 

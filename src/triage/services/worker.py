@@ -58,6 +58,7 @@ from triage.db.worker_status import (
     update_config_version,
     update_heartbeat,
 )
+from triage.engine.footprint import build_footprint, chain_hashes, is_affected
 from triage.engine.matcher import evaluate_parallel
 from triage.models.patterns import EmailPattern
 from triage.services.lifecycle import (
@@ -104,7 +105,7 @@ class Config:
     )
     # Convergence settings (idle-time config updates)
     enable_convergence: bool = True  # Enable/disable idle-time convergence
-    priority_convergence_interval: int = 300  # seconds between bulk priority updates
+    convergence_batch_size: int = 500  # rows checked against footprints per idle poll
 
 
 # Pattern quality filter: confidence threshold for irregular patterns
@@ -360,9 +361,10 @@ class TriageWorker:
         self._claim_token = worker_identity("triage-worker")
         self.last_signal_poll = time.time()
         self.last_cleanup = time.time()  # Track when we last cleaned up stale workers
-        self.last_priority_convergence = 0.0  # Track last bulk priority update
         self.config_version = config_version  # Track which DB config version is loaded
         self.jobs_processed = 0  # Track cumulative job count for status updates
+        self._hashes: dict[str, list[str]] = {}
+        self._hashes_for: RulesConfig | None = None
 
     def stop(self) -> None:
         """Signal the worker to stop."""
@@ -457,7 +459,7 @@ class TriageWorker:
             return False
 
     def _mark_convergence_failed(self, gmail_id: str) -> None:
-        """Mark a convergence email as processed (update to current version).
+        """Give up on a convergence email: stamp it with the loaded version.
 
         This prevents infinite retry loops for emails that fail convergence.
         """
@@ -467,13 +469,10 @@ class TriageWorker:
                     cursor.execute(
                         """
                         UPDATE classifications
-                        SET config_version_id = (
-                            SELECT version FROM triage_config_versions
-                            WHERE is_active = TRUE LIMIT 1
-                        )
+                        SET config_version_id = %s
                         WHERE gmail_id = %s
                         """,
-                        (gmail_id,),
+                        (self.config_version, gmail_id),
                     )
                 conn.commit()
         except Exception as e:
@@ -482,99 +481,57 @@ class TriageWorker:
                 exc_info=True,
             )
 
-    def _converge_priority_and_get_next_email(self) -> dict[str, Any] | None:
-        """Converge priority emails and get next email for idle-time processing.
+    def _converge_and_get_next_email(self) -> dict[str, Any] | None:
+        """Stamp mail the loaded config cannot change; return the next to re-triage.
 
-        Two-step process:
-        1. Bulk-update priority sender emails (no re-processing needed)
-        2. Pick oldest non-priority email with outdated config version
-
-        Returns:
-            Dict with gmail_id, or None if nothing to converge
+        Scans the newest mail behind the worker's loaded version. Rows whose footprint
+        says the config change cannot reach them are stamped current without
+        re-running (triage-70be); the first row it can reach is returned for
+        idle-time re-triage. Returns None when nothing in the batch needs it.
         """
         if not self.config.enable_convergence:
             return None
+        rules, version = self.rules, self.config_version
 
         try:
-            with self._get_conn() as conn:
-                with conn.cursor() as cursor:
-                    # Get current active config version
+            with self._get_conn() as conn, conn.cursor() as cursor:
+                # Behind the version this worker's rules came from, and stamped
+                # with it: a worker that has not yet reloaded stamps only what
+                # its own rules can vouch for.
+                cursor.execute(
+                    """
+                    SELECT er.gmail_id, ep.from_addr, c.footprint
+                    FROM classifications c
+                    JOIN emails_raw er ON er.gmail_id = c.gmail_id
+                    LEFT JOIN emails_parsed ep ON ep.gmail_id = c.gmail_id
+                    WHERE c.config_version_id < %s
+                      AND NOT 'SPAM' = ANY(COALESCE(er.label_ids, '{}'))
+                    ORDER BY er.internal_date DESC
+                    LIMIT %s
+                    """,
+                    (version, self.config.convergence_batch_size),
+                )
+                hashes = self._chain_hashes(rules)
+                unaffected: list[str] = []
+                next_email = None
+                for gmail_id, from_addr, footprint in cursor.fetchall():
+                    if is_affected(footprint, rules, hashes, from_addr):
+                        next_email = {"gmail_id": gmail_id}
+                        break
+                    unaffected.append(gmail_id)
+
+                if unaffected:
                     cursor.execute(
-                        """
-                        SELECT version FROM triage_config_versions
-                        WHERE is_active = TRUE LIMIT 1
-                        """
+                        "UPDATE classifications SET config_version_id = %s"
+                        " WHERE gmail_id = ANY(%s)",
+                        (version, unaffected),
                     )
-                    row = cursor.fetchone()
-                    if not row:
-                        return None
-
-                    current_version = row[0]
-
-                    # Step 1: Bulk UPDATE priority sender emails (no re-processing)
-                    # These always match priority mapping regardless of rules
-                    # Only run this periodically to avoid DB load
-                    now = time.time()
-                    if (
-                        now - self.last_priority_convergence
-                        >= self.config.priority_convergence_interval
-                    ):
-                        cursor.execute(
-                            """
-                            UPDATE classifications c
-                            SET config_version_id = %s
-                            WHERE c.config_version_id < %s
-                              AND EXISTS (
-                                SELECT 1
-                                FROM emails_parsed ep
-                                JOIN triage_email_mappings tem
-                                  ON LOWER(ep.from_addr) = LOWER(tem.email_address)
-                                WHERE ep.gmail_id = c.gmail_id
-                                  AND tem.mapping_type = 'priority'
-                                  AND tem.deleted_at IS NULL
-                              )
-                            """,
-                            (current_version, current_version),
-                        )
-                        bulk_updated = cursor.rowcount
-
-                        if bulk_updated > 0:
-                            logger.info(
-                                f"Convergence: bulk updated {bulk_updated} priority "
-                                f"sender emails to version {current_version}"
-                            )
-                        self.last_priority_convergence = now
-
-                    # Step 2: Pick newest non-priority email with old config version
-                    # Process it directly (not via queue) - true idle-time convergence
-                    # Use email received date (internal_date), not classification date
-                    cursor.execute(
-                        """
-                        SELECT er.id as email_id, er.gmail_id
-                        FROM classifications c
-                        JOIN emails_raw er ON er.gmail_id = c.gmail_id
-                        WHERE c.config_version_id < %s
-                          AND NOT EXISTS (
-                            SELECT 1
-                            FROM emails_parsed ep
-                            JOIN triage_email_mappings tem
-                              ON LOWER(ep.from_addr) = LOWER(tem.email_address)
-                            WHERE ep.gmail_id = c.gmail_id
-                              AND tem.mapping_type = 'priority'
-                              AND tem.deleted_at IS NULL
-                          )
-                        ORDER BY er.internal_date DESC
-                        LIMIT 1
-                        """,
-                        (current_version,),
+                    logger.info(
+                        f"Convergence: {cursor.rowcount} emails unaffected by "
+                        f"version {version}, stamped without re-triage"
                     )
-                    row = cursor.fetchone()
-
                 conn.commit()
-
-                if row:
-                    return {"gmail_id": row[1]}
-                return None
+                return next_email
 
         except Exception as e:
             logger.error(f"Failed to get convergence email: {e}", exc_info=True)
@@ -755,6 +712,10 @@ class TriageWorker:
                         -- Unique constraint: one classification per email
                         CONSTRAINT unique_gmail_id UNIQUE (gmail_id)
                     );
+
+                    -- Which part of the config decided it (triage-70be)
+                    ALTER TABLE classifications
+                        ADD COLUMN IF NOT EXISTS footprint JSONB;
 
                     CREATE INDEX IF NOT EXISTS idx_classifications_email
                     ON classifications(email_id);
@@ -1217,11 +1178,29 @@ class TriageWorker:
         """Execute an action on an email by enqueueing for batch processing."""
         return self._enqueue_labeling(gmail_id, priority)
 
+    def _chain_hashes(self, rules: RulesConfig) -> dict[str, list[str]]:
+        if self._hashes_for is not rules:
+            self._hashes = chain_hashes(rules)
+            self._hashes_for = rules
+        return self._hashes
+
+    def _footprint(
+        self, rules: RulesConfig, path: list[tuple[str, int | None]], from_addr: str
+    ) -> dict[str, Any] | None:
+        """Footprint of one evaluation, or None (always re-triage) if it fails."""
+        try:
+            return build_footprint(rules, self._chain_hashes(rules), path, from_addr)
+        except Exception as e:  # advisory only: never fail a triage job over it
+            logger.warning(f"Footprint not recorded: {e}", exc_info=True)
+            return None
+
     def _store_classification(
         self,
         email: Email,
         result: EvaluationResult,
         action_executed: bool,
+        footprint: dict[str, Any] | None,
+        config_version: int | None,
     ) -> None:
         """Store classification result (idempotent - updates if exists)."""
         with self._get_conn() as conn, conn.cursor() as cur:
@@ -1230,8 +1209,8 @@ class TriageWorker:
                     INSERT INTO classifications (
                         email_id, gmail_id, matched_chain, matched_rule_index,
                         config_version_id, llm_category, llm_confidence,
-                        llm_reasoning, action_taken, action_executed
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        llm_reasoning, action_taken, action_executed, footprint
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     ON CONFLICT (gmail_id) DO UPDATE SET
                         matched_chain = EXCLUDED.matched_chain,
                         matched_rule_index = EXCLUDED.matched_rule_index,
@@ -1241,6 +1220,7 @@ class TriageWorker:
                         llm_reasoning = EXCLUDED.llm_reasoning,
                         action_taken = EXCLUDED.action_taken,
                         action_executed = EXCLUDED.action_executed,
+                        footprint = EXCLUDED.footprint,
                         classified_at = NOW()
                 """,
                 (
@@ -1248,12 +1228,13 @@ class TriageWorker:
                     email.gmail_id,
                     result.chain,
                     result.rule_index,
-                    self.config_version,
+                    config_version,
                     result.llm_category,
                     result.llm_confidence,
                     result.llm_reasoning,
                     Json(result.action.model_dump() if result.action else None),
                     action_executed,
+                    Json(footprint) if footprint is not None else None,
                 ),
             )
             conn.commit()
@@ -1296,21 +1277,29 @@ class TriageWorker:
                 ).inc()
                 return False
 
+            if "SPAM" in email.label_ids:
+                logger.info(f"Skipping spam: {gmail_id}")
+                self._complete_job(job["id"])
+                return True
+
             # Fetch body from API if not in parsed table
             if not email.body:
                 email.body = self._get_body_from_api(gmail_id)
 
             # Evaluate rules across all auto_run chains (may raise LLMError)
+            # A SIGHUP reload may swap both mid-job.
+            rules, version = self.rules, self.config_version
+            path: list[tuple[str, int | None]] = []
             merged_action, chain_results = evaluate_parallel(
-                self.rules, email, self.llm
+                rules, email, self.llm, path
             )
 
             # If no chains produced labels, apply default label from config
             matched_chains = [r.chain for r in chain_results if r.matched and r.chain]
             if merged_action is None or not merged_action.add_label:
-                default_label = self.rules.default_label
-                if self.rules.label_prefix:
-                    default_label = f"{self.rules.label_prefix}/{default_label}"
+                default_label = rules.default_label
+                if rules.label_prefix:
+                    default_label = f"{rules.label_prefix}/{default_label}"
                 if merged_action is None:
                     merged_action = Action(add_label=[default_label])
                 else:
@@ -1359,7 +1348,13 @@ class TriageWorker:
                     logger.info(f"Decision trace for {gmail_id}:\n{trace_str}")
 
             # Store classification
-            self._store_classification(email, merged_result, action_executed)
+            self._store_classification(
+                email,
+                merged_result,
+                action_executed,
+                self._footprint(rules, path, email.from_addr),
+                version,
+            )
 
             # Track classification method for metrics
             method = "llm" if merged_result.llm_category else "rule"
@@ -1439,7 +1434,7 @@ class TriageWorker:
 
                 if processed == 0 and failed == 0:
                     # Queue is idle - try convergence (idle-time processing)
-                    convergence_job = self._converge_priority_and_get_next_email()
+                    convergence_job = self._converge_and_get_next_email()
                     if convergence_job:
                         gmail_id = convergence_job["gmail_id"]
                         start_time = time.time()
@@ -1454,12 +1449,15 @@ class TriageWorker:
                                     service="triage-worker",
                                     error_type="email_not_found",
                                 ).inc()
+                                self._mark_convergence_failed(gmail_id)
                             else:
                                 if not email.body:
                                     email.body = self._get_body_from_api(gmail_id)
 
+                                rules, version = self.rules, self.config_version
+                                path: list[tuple[str, int | None]] = []
                                 merged_action, chain_results = evaluate_parallel(
-                                    self.rules, email, self.llm
+                                    rules, email, self.llm, path
                                 )
                                 matched_chains = [
                                     r.chain
@@ -1468,10 +1466,10 @@ class TriageWorker:
                                 ]
                                 # Apply default label if no chains produced labels
                                 if merged_action is None or not merged_action.add_label:
-                                    default_label = self.rules.default_label
-                                    if self.rules.label_prefix:
+                                    default_label = rules.default_label
+                                    if rules.label_prefix:
                                         default_label = (
-                                            f"{self.rules.label_prefix}/{default_label}"
+                                            f"{rules.label_prefix}/{default_label}"
                                         )
                                     if merged_action is None:
                                         merged_action = Action(
@@ -1541,7 +1539,11 @@ class TriageWorker:
                                         )
 
                                 self._store_classification(
-                                    email, result, action_executed
+                                    email,
+                                    result,
+                                    action_executed,
+                                    self._footprint(rules, path, email.from_addr),
+                                    version,
                                 )
                                 method = "llm" if result.llm_category else "rule"
                                 EMAILS_CLASSIFIED.labels(method=method).inc()
@@ -1835,9 +1837,16 @@ def ensure_config_schema(config: Config) -> None:
                     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                     created_by TEXT,
                     updated_by TEXT,
-                    deleted_at TIMESTAMPTZ,
-                    CONSTRAINT unique_email_mapping
-                        UNIQUE (mapping_type, email_address)
+                    deleted_at TIMESTAMPTZ
+                    -- NO unconditional UNIQUE (mapping_type, email_address).
+                    -- It counts soft-deleted rows, so a mapping that was
+                    -- deleted could never be recreated, and it SHADOWS the
+                    -- partial index below that the importer's
+                    -- ON CONFLICT (mapping_type, email_address)
+                    --   WHERE deleted_at IS NULL
+                    -- is written to infer. postmark migration 004 drops it on
+                    -- existing databases; this line was silently putting it
+                    -- back on every fresh one (cortex-qvnz, from cortex-apd6).
                 );
 
                 CREATE UNIQUE INDEX IF NOT EXISTS idx_email_mappings_active

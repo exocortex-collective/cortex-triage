@@ -31,32 +31,144 @@ Triage consumes emails from postmark's queue and routes them to workflows using 
 
 ## Rules Engine
 
-### Mental Model: Firewall Rules
+### Mental Model: Firewall Rules, Run in Parallel
 
-Like iptables/nftables:
+Like iptables/nftables **within** a chain:
 - **Rules evaluated in order** - first match wins (or jumps to chain)
 - **Chains** - named rulesets for sub-evaluation
 - **Match conditions** - from, to, subject patterns, has_attachment, etc.
 - **Actions** - dispatch to workflow, apply label, enqueue, call webhook
 
+Unlike iptables **across** chains: there is no single packet walking one table.
+Every chain marked `auto_run: true` is evaluated independently against every
+email, and the results are merged. An email can therefore carry labels from
+several chains at once.
+
 ### Rule Evaluation
 
+Implemented by `evaluate_parallel()` in `src/triage/engine/matcher.py`. This is
+what the worker calls.
+
 ```
-1. Load rules from YAML
-2. Start at "main" chain
-3. For each rule in order:
-   a. Evaluate match conditions against email
-   b. If match:
-      - If "jump": evaluate that chain, then continue or stop based on result
-      - If "action": execute action and STOP (first match wins)
-   c. If no match: continue to next rule
-4. If no rules match: fall through (no action taken)
+1. Load the active config from Postgres (triage_config_versions / triage_chains
+   / triage_rules). Nothing is read from disk.
+2. If the sender has a PRIORITY email mapping, emit its action as a result.
+   (This does NOT short-circuit - it is one vote among many.)
+3. For each chain with auto_run: true:
+     Walk its rules in order; first match wins within that chain.
+     'jump' descends into a non-auto_run chain and returns.
+     Emit that chain's result.
+4. If NO result so far produced a label, and the sender has a FALLBACK email
+   mapping, emit its action as a result.
+5. If STILL no result produced a label, emit config.default_label.
+6. Merge every result with CRDT semantics (src/triage/engine/merge.py).
 ```
+
+`main` defaults to `auto_run: true`. Every other chain defaults to `false` and
+is reachable only via `jump`.
+
+More than one chain can be `auto_run`, and that is the point of the design
+rather than a hypothetical: their results merge, they do not race. To see
+which chains are `auto_run` in the live config, ask it rather than trusting a
+number written here:
+
+```bash
+curl -s -H "Authorization: Bearer $CORTEX_API_TOKEN" "$CORTEX_GATEWAY/config" \
+  | python3 -c 'import sys,yaml; d=yaml.safe_load(sys.stdin); \
+      print([n for n,c in d["chains"].items() if c.get("auto_run")])'
+```
+
+> `evaluate()` in the same module is the legacy serial path (first match wins
+> globally, priority mappings short-circuit). It is **not** used by the worker.
+> Don't reason about production behaviour from it.
+
+### CRDT Action Merge
+
+Each `auto_run` chain contributes an opinion. Merging (`merge.py`):
+
+| Field | Merge rule |
+|-------|-----------|
+| `label`, `add_label` | **Union**, de-duplicated, order preserved. Purely additive. |
+| `remove_label` | Union. |
+| `archive`, `mark_read` | **Conservative: `all()`** over the chains that have an opinion. One `false` suppresses it. |
+| `star`, `important` | **Aggressive: `any()`.** One `true` wins. |
+| `force_archive`, `force_mark_read` | Veto — forces `true` regardless of the merge. |
+| `force_no_star`, `force_no_important` | Veto — forces `false` regardless of the merge. |
+| `trash` | **Any chain** setting it asks for Gmail Trash, held until Devon approves it (see CLAUDE.md, cortex-gco6). |
+
+A chain has "no opinion" on a flag when the field is absent (`None`). For the
+four OPINION flags -- `archive`, `mark_read`, `star`, `important` -- `false` is
+an opinion, not an absence (`merge.py:76-83` gates each on `is not None`).
+
+The four **vetoes** in the table above are the exception: `force_archive`,
+`force_mark_read`, `force_no_star` and `force_no_important` are gated on plain
+truthiness (`merge.py:86-93`), so for those `false` and absent are the same
+thing -- and neither is emitted in the merged `Action`.
+
+**Consequences worth internalising before writing rules:**
+
+1. **Multiple terminal labels are normal.** Two `auto_run` chains that both label
+   an email produce both labels. There is no "one classification per email".
+2. **A scan chain can suppress another chain's archiving.** If chain A says
+   `archive: true` and chain B says `archive: false`, the email stays in the
+   inbox. This is the single most common surprise.
+3. **Therefore: an additive scan chain should set ONLY `add_label` and express
+   no opinion on `archive` / `mark_read`.** Omit the fields entirely. If you
+   really must override everyone, use `force_archive` — that's what it's for.
+4. **Fallback mappings are label-gated, not match-gated.** A chain that matches
+   but emits no label (e.g. an archive-only rule) does not suppress the sender's
+   fallback mapping.
+5. **`default_label` is the true last resort.** Do not put a `match: {}`
+   catch-all in `main` that applies `Uncategorized` — it counts as "produced a
+   label", which silently kills every fallback mapping and lets Uncategorized sit
+   alongside a real label.
+
+### Convergence: Automatic Backfill on Config Change
+
+`classifications.config_version_id` records which config version classified each
+email. The worker converges history to its loaded version during idle time
+(`_converge_and_get_next_email` in `services/worker.py`):
+
+- Runs only when `_process_batch()` returned zero jobs, so it never delays live
+  mail.
+- Scans up to `convergence_batch_size` (500) of the **newest** classifications
+  behind the version (`ORDER BY emails_raw.internal_date DESC`), skipping spam.
+- Each has a **footprint** (`classifications.footprint`, `engine/footprint.py`):
+  a hash of the global settings, of the sender's own priority/fallback
+  mappings, and for every chain the email entered, of the rules up to where
+  evaluation stopped plus the intents, categories and prompts they call.
+  `is_affected` compares it with the loaded config; when nothing differs, the
+  new config cannot change the result. Unsure (no footprint, malformed) counts
+  as affected.
+- Unaffected mail is stamped current with one `UPDATE`, without re-running.
+  The first affected email is re-triaged in-process, not via the queue.
+- Failures are marked converged (`_mark_convergence_failed`) so one bad email
+  can't wedge the walk.
+
+**This means a new config version silently re-labels historical mail, newest
+first, until everything has converged.** No manual re-enqueue is needed after a
+rules change. Budget for the Gmail API writes on labels that actually change.
+
+- Kill switch: `ENABLE_CONVERGENCE=false`.
+- Progress: `GET /triage/convergence/status` on the gateway.
+- Targeted alternative: `POST /triage/rerun` (by `gmail_ids`, `label`, or
+  `senders`) when you want a subset re-done *now*.
+- Mapping changes get their own targeted re-enqueue: the gateway's `/mappings`
+  writes re-enqueue that sender's mail at priority -200, delayed 60s so the
+  worker's `mappings_reload` signal lands first.
 
 ### Rules Configuration (YAML)
 
+This YAML is **not a file on disk**. It is the wire format of the Gateway
+`/config` API — `GET /config` exports it from Postgres, `PUT /config` imports it
+back as a new version. See `~/Projects/cortex/CLAUDE.md` → "Triage Config
+Management" for the workflow and its hazards.
+
+Note that `GET /config` emits every optional match field explicitly as `null`
+(~88% of the export by line count, cortex-1oy2). Partial `match:` objects are
+accepted on write, so hand-written rules should list only the fields they mean.
+
 ```yaml
-# rules.yaml
 version: 1
 
 chains:
