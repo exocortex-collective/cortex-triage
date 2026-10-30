@@ -81,6 +81,7 @@ cancelled by another:
 | `archive`, `mark_read` | **Conservative — `all()` of the chains that have an opinion.** One dissenting chain suppresses it. |
 | `star`, `important` | **Aggressive — `any()`.** One chain asserting it wins. |
 | `force_archive`, `force_mark_read`, `force_no_star`, `force_no_important` | **Vetoes.** Applied last, override the merged value unconditionally. |
+| `trash` | **Any chain** setting it asks for Gmail Trash. The labeling worker trashes only mail Devon has approved, by confirming its sender or approving it one-off; an undecided sender's mail waits in `triage_trash_queue` behind a `trash_sender` question in `triage_questions` (`services/trash_gate.py`, cortex-gco6). Triage never untrashes. |
 
 A chain expresses "no opinion" by leaving the field unset (`None`), and for the
 four OPINION flags -- `archive`, `mark_read`, `star`, `important` -- `false` is
@@ -106,10 +107,12 @@ chain.
 ### Convergence (automatic backfill on rule change)
 
 `classifications.config_version_id` tracks which config version labelled each
-email. When the triage queue is idle the worker picks the **newest** email
-behind the active version and re-triages it in-process, one per poll, walking
-backwards through history (`_converge_priority_and_get_next_email`). Emails from
-priority-mapped senders are bulk-updated in place every 5 minutes instead.
+email, and `classifications.footprint` records which part of the config decided
+it (`engine/footprint.py`). When the triage queue is idle the worker scans the
+newest mail behind its loaded version (`_converge_and_get_next_email`): mail
+whose footprint the new config cannot reach is stamped current without
+re-running, and the first mail it can reach is re-triaged in-process. Mail with
+no footprint (classified before footprints existed) is always re-triaged.
 
 So **publishing a new config version silently re-labels historical mail.** No
 manual re-enqueue is needed after a rules change. Disable with
@@ -182,8 +185,10 @@ uv run ruff check .
 1. Create a feature branch
 2. Make changes and commit
 3. Push the branch and create a PR
-4. Wait for CI and Gemini Code Assist review
-5. Merge via GitHub after approval
+4. Wait for CI; run pr-review-loop (Gemini is disabled in
+   `.reviewers/config.json`)
+5. Merge once the pr-review-loop converges (one clean round) or Devon
+   says yes
 
 This applies to all changes, no matter how small.
 
@@ -201,5 +206,6 @@ gateway (see `~/Projects/cortex/CLAUDE.md` → "Triage Config Management").
 
 ## GitHub Integrations
 
-- **Gemini Code Assist**: Automatic code review on PRs
+- **Gemini Code Assist**: installed but DISABLED via `.reviewers/config.json`
+  `bots.gemini`
 - **Renovate**: Automated dependency updates

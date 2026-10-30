@@ -45,6 +45,7 @@ from triage.gmail import (
     QUOTA_MESSAGES_BATCH_MODIFY,
     get_rate_limiter,
 )
+from triage.services import trash_gate
 
 logger = get_logger(__name__)
 
@@ -68,6 +69,12 @@ class Config:
     visibility_timeout_minutes: int = (
         5  # How long a job can be in 'processing' before reset
     )
+
+
+# Target state for a message in SPAM: no managed labels, no system actions.
+# Non-empty on purpose -- an empty dict reads as "no classification", which
+# skips the job instead of stripping the labels.
+SPAM_TARGET: dict = {"add_label": []}
 
 
 @dataclass
@@ -523,8 +530,13 @@ class LabelingWorker:
         """Get the latest classification for multiple emails.
 
         Returns dict mapping gmail_id -> action_taken dict (or None if not found).
-        The action_taken dict contains: label, add_label, remove_label, archive,
-        mark_read, star.
+
+        A message in Gmail's SPAM gets SPAM_TARGET whatever its classification
+        says, so reconciling it removes every managed label and touches no
+        system label (cortex-kvyn).
+
+        trash survives only for mail trash_gate clears; the rest waits for
+        Devon to confirm its sender (cortex-gco6).
         """
         if not gmail_ids:
             return {}
@@ -541,8 +553,24 @@ class LabelingWorker:
                 (gmail_ids,),
             )
             rows = cur.fetchall()
+            cur.execute(
+                """
+                SELECT gmail_id FROM emails_raw
+                WHERE gmail_id = ANY(%s) AND 'SPAM' = ANY(label_ids)
+                """,
+                (gmail_ids,),
+            )
+            spam = {row[0] for row in cur.fetchall()}
 
-        return {gmail_id: action_taken for gmail_id, action_taken in rows}
+        result = {gmail_id: action_taken for gmail_id, action_taken in rows}
+        result.update({gmail_id: dict(SPAM_TARGET) for gmail_id in spam})
+        wanted = [g for g, action in result.items() if action and action.get("trash")]
+        if wanted:
+            with self._get_conn() as conn:
+                allowed = trash_gate.gate(conn, wanted)
+            for g in wanted:
+                result[g] = {**result[g], "trash": g in allowed}
+        return result
 
     def _get_gmail_current_labels(self, gmail_id: str) -> list[str] | None:
         """Query Gmail API for current Cortex/* label names on a message.
@@ -728,6 +756,8 @@ class LabelingWorker:
                 add_labels.append("STARRED")
             if important:
                 add_labels.append("IMPORTANT")
+            if classification.get("trash"):
+                add_labels.append("TRASH")
             if archive:
                 remove_labels.append("INBOX")
             if mark_read:
@@ -836,6 +866,8 @@ class LabelingWorker:
 
         if star:
             add_labels.append("STARRED")
+        if classification.get("trash"):
+            add_labels.append("TRASH")
         if archive:
             remove_labels.append("INBOX")
         if mark_read:
@@ -891,6 +923,7 @@ class LabelingWorker:
         # the steady-state path.
         with self._get_conn() as conn:
             ensure_queue_schema(conn)
+            trash_gate.ensure_trash_schema(conn)
 
     def run(self) -> None:
         """Main processing loop."""

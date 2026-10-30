@@ -463,6 +463,7 @@ merged:
 | `star`, `important` | **Aggressive: `any()`.** One `true` wins. |
 | `force_archive`, `force_mark_read` | Veto → forces `true`. |
 | `force_no_star`, `force_no_important` | Veto → forces `false`. |
+| `trash` | **Any chain** setting it asks for Gmail Trash, held until Devon approves it (see CLAUDE.md, cortex-gco6). |
 
 Omitting one of the four OPINION flags means "no opinion". Setting it to
 `false` is a **vote**, and a single dissenting vote blocks `archive` /

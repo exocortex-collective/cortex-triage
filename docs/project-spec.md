@@ -94,6 +94,7 @@ Each `auto_run` chain contributes an opinion. Merging (`merge.py`):
 | `star`, `important` | **Aggressive: `any()`.** One `true` wins. |
 | `force_archive`, `force_mark_read` | Veto — forces `true` regardless of the merge. |
 | `force_no_star`, `force_no_important` | Veto — forces `false` regardless of the merge. |
+| `trash` | **Any chain** setting it asks for Gmail Trash, held until Devon approves it (see CLAUDE.md, cortex-gco6). |
 
 A chain has "no opinion" on a flag when the field is absent (`None`). For the
 four OPINION flags -- `archive`, `mark_read`, `star`, `important` -- `false` is
@@ -125,18 +126,22 @@ thing -- and neither is emitted in the merged `Action`.
 ### Convergence: Automatic Backfill on Config Change
 
 `classifications.config_version_id` records which config version classified each
-email. The worker converges history to the active version during idle time
-(`_converge_priority_and_get_next_email` in `services/worker.py`):
+email. The worker converges history to its loaded version during idle time
+(`_converge_and_get_next_email` in `services/worker.py`):
 
 - Runs only when `_process_batch()` returned zero jobs, so it never delays live
   mail.
-- **Step 1** (at most every `priority_convergence_interval`, default 300s): bulk
-  `UPDATE` the `config_version_id` of every stale classification whose sender has
-  a *priority* mapping. No re-processing — a priority mapping produces the same
-  action regardless of the rules, so re-running them would be a no-op.
-- **Step 2**: select the single **newest** (`ORDER BY emails_raw.internal_date
-  DESC`) non-priority classification still behind the active version and
-  re-triage it in-process — not via the queue. One per idle poll.
+- Scans up to `convergence_batch_size` (500) of the **newest** classifications
+  behind the version (`ORDER BY emails_raw.internal_date DESC`), skipping spam.
+- Each has a **footprint** (`classifications.footprint`, `engine/footprint.py`):
+  a hash of the global settings, of the sender's own priority/fallback
+  mappings, and for every chain the email entered, of the rules up to where
+  evaluation stopped plus the intents, categories and prompts they call.
+  `is_affected` compares it with the loaded config; when nothing differs, the
+  new config cannot change the result. Unsure (no footprint, malformed) counts
+  as affected.
+- Unaffected mail is stamped current with one `UPDATE`, without re-running.
+  The first affected email is re-triaged in-process, not via the queue.
 - Failures are marked converged (`_mark_convergence_failed`) so one bad email
   can't wedge the walk.
 
