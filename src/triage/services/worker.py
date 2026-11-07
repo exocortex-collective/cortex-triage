@@ -1431,7 +1431,9 @@ class TriageWorker:
         failed = 0
         deadline = time.monotonic() + BATCH_SECONDS
         for i, job in enumerate(jobs):
-            if time.monotonic() > deadline:
+            # A shutdown polled between jobs stops here too, so the rest go
+            # back to the queue instead of waiting out the visibility timeout.
+            if time.monotonic() > deadline or not self.running:
                 self._release_jobs(jobs[i:])
                 break
             if self.process_job(job):
@@ -1449,10 +1451,15 @@ class TriageWorker:
     def _release_jobs(self, jobs: list[dict[str, Any]]) -> None:
         """Hand unstarted jobs back without spending an attempt; they keep
         their created_at, so their place in line is unchanged."""
+        released = 0
         with self._get_conn() as conn:
             for job in jobs:
-                release(conn, job["id"], 0, self._claim_token)
-        logger.info(f"Batch time limit reached; released {len(jobs)} jobs")
+                try:
+                    released += release(conn, job["id"], 0, self._claim_token)
+                except Exception as e:
+                    # The job stays claimed and the visibility timeout frees it.
+                    logger.warning(f"release of job {job['id']} failed: {e}")
+        logger.info(f"Batch stopped early; released {released} of {len(jobs)} jobs")
 
     def run(self) -> None:
         """Main processing loop."""

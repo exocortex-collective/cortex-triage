@@ -53,6 +53,24 @@ def test_a_batch_within_its_budget_runs_whole_and_polls_between_jobs(
     assert w._check_and_process_signals.call_count == 3
 
 
+def test_a_shutdown_polled_mid_batch_hands_the_rest_back(monkeypatch) -> None:
+    w = _worker(monkeypatch, [0.0, 0.0, 1.0, 2.0])
+
+    def stop() -> None:
+        w.running = False
+
+    w._check_and_process_signals.side_effect = stop
+    assert w._process_batch() == (1, 0)
+    assert [c.args[1] for c in worker_module.release.call_args_list] == [2, 3]
+
+
+def test_a_failed_release_does_not_stop_the_rest(monkeypatch) -> None:
+    w = _worker(monkeypatch, [0.0, 0.0, worker_module.BATCH_SECONDS + 1])
+    worker_module.release.side_effect = [RuntimeError("db gone"), True]
+    assert w._process_batch() == (1, 0)
+    assert [c.args[1] for c in worker_module.release.call_args_list] == [2, 3]
+
+
 def test_the_budget_is_about_a_minute() -> None:
     """Long enough to amortise a claim, short enough that live mail and a config
     reload are never held behind a whole LLM-heavy batch."""
