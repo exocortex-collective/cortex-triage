@@ -103,7 +103,7 @@ def evaluate_or_rules_only(
         action, results = evaluate_parallel(rules, email, llm, path)
         return action, results, False
     except LLMTruncatedError as e:
-        logger.warning(f"LLM answer truncated, classifying with rules only: {e}")
+        logger.warning(f"LLM truncated for {email.gmail_id}, rules only: {e}")
         ERRORS.labels(service="triage-worker", error_type="llm_truncated").inc()
         path.clear()
         action, results = evaluate_parallel(rules, email, None, path)
