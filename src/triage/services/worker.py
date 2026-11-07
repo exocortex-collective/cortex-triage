@@ -30,6 +30,7 @@ from cortex_utils.queue import (
     complete,
     ensure_queue_schema,
     fail_or_retry,
+    release,
     worker_identity,
 )
 from cortex_utils.triage_config import (
@@ -118,6 +119,11 @@ class Config:
 PATTERN_QUALITY_CONFIDENCE_THRESHOLD = 0.5
 
 QUESTION_INTERVAL_SECONDS = 900
+
+# A batch hands back what it has not reached after this long, so live mail,
+# config reloads and the heartbeat wait at most about one email past it
+# instead of a whole LLM-heavy batch (triage-1702: up to 31 minutes).
+BATCH_SECONDS = 60
 
 
 class GmailClient:
@@ -1423,15 +1429,30 @@ class TriageWorker:
 
         processed = 0
         failed = 0
-        for job in jobs:
+        deadline = time.monotonic() + BATCH_SECONDS
+        for i, job in enumerate(jobs):
+            if time.monotonic() > deadline:
+                self._release_jobs(jobs[i:])
+                break
             if self.process_job(job):
                 processed += 1
                 QUEUE_PROCESSED.labels(queue="triage", status="success").inc()
             else:
                 failed += 1
                 QUEUE_PROCESSED.labels(queue="triage", status="error").inc()
+            # Throttled to signal_poll_interval inside; each job keeps the
+            # rules it started with, so a reload between jobs is safe.
+            self._check_and_process_signals()
 
         return processed, failed
+
+    def _release_jobs(self, jobs: list[dict[str, Any]]) -> None:
+        """Hand unstarted jobs back without spending an attempt; they keep
+        their created_at, so their place in line is unchanged."""
+        with self._get_conn() as conn:
+            for job in jobs:
+                release(conn, job["id"], 0, self._claim_token)
+        logger.info(f"Batch time limit reached; released {len(jobs)} jobs")
 
     def run(self) -> None:
         """Main processing loop."""
