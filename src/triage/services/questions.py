@@ -141,14 +141,14 @@ def family(addr: str) -> str:
     i.forever21.com and forever21.com match."""
     # ponytail: two labels misgroups co.uk-style domains; use a public-suffix
     # list if that ever matters for proposals.
-    return ".".join(addr.rpartition("@")[2].split(".")[-2:])
+    return ".".join(addr.lower().rpartition("@")[2].split(".")[-2:])
 
 
 def _evidence(
     cur: Any, config: RulesConfig, addrs: list[str], allowed: set[str]
 ) -> dict[str, dict[str, Any]]:
-    """The best trusted proposal per sender: a label live mappings give this
-    sender's domain family (a person chose it), else the label most of its
+    """The best trusted proposal per sender: the one label live mappings for
+    its domain family agree on (a person chose it), else the label most of its
     mail already got from rules, if `allowed` holds it. Otherwise none."""
     prefix = config.label_prefix
     by_family: dict[str, Counter[tuple[str, bool, bool]]] = {}
@@ -172,7 +172,9 @@ def _evidence(
     proposals = {}
     for addr in addrs:
         votes = by_family.get(family(addr))
-        if votes:
+        # Only a family that agrees on one label: gmail.com's mappings are
+        # people, and a majority of them is not evidence about a stranger.
+        if votes and len({label for label, _, _ in votes}) == 1:
             (label, archive, mark_read), _ = votes.most_common(1)[0]
             proposals[addr] = {
                 "label": label,
