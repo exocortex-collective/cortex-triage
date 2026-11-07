@@ -5,7 +5,7 @@ import re
 import time
 from datetime import UTC, datetime
 from functools import lru_cache
-from typing import Protocol
+from typing import Any, Protocol
 
 import structlog
 from cortex_utils.triage_config.models import (
@@ -375,20 +375,24 @@ def _render_action(
     prefix: str,
     variables: VariableContext | None = None,
 ) -> Action:
-    """Apply label rendering to action.
+    """Render the action's label templates. `label` gets the prefix;
+    add_label and remove_label are raw names, so they are rendered only
+    (triage-4ed1)."""
 
-    Args:
-        action: Action with possibly templated label.
-        prefix: Label prefix to prepend.
-        variables: Optional variable context for substitution.
+    def raw(names: str | list[str] | None) -> str | list[str] | None:
+        if isinstance(names, str):
+            return _render_label(names, "", variables)
+        if names:
+            return [_render_label(n, "", variables) for n in names]
+        return names
 
-    Returns:
-        New action with rendered label.
-    """
+    update: dict[str, Any] = {
+        "add_label": raw(action.add_label),
+        "remove_label": raw(action.remove_label),
+    }
     if action.label:
-        rendered = _render_label(action.label, prefix, variables)
-        return action.model_copy(update={"label": rendered})
-    return action
+        update["label"] = _render_label(action.label, prefix, variables)
+    return action.model_copy(update=update)
 
 
 def matches_condition(
