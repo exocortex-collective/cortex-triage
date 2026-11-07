@@ -467,8 +467,12 @@ def test_a_family_that_disagrees_proposes_nothing(conn) -> None:
         ("dad@gmail.com", None, "Family", False, False),
         ("pal@gmail.com", None, "Commercial/Retail", False, False),
     )
+    _mappings(conn, ("aunt@msn.com", None, "Family", False, False))
     _mail(conn, "stranger@gmail.com", 10)
-    assert _proposed(conn)["stranger@gmail.com"] is None
+    _mail(conn, "stranger@msn.com", 10)
+    got = _proposed(conn)
+    assert got["stranger@gmail.com"] is None  # mappings disagree
+    assert got["stranger@msn.com"] is None  # one mapping is one person
 
 
 @live
@@ -521,7 +525,11 @@ def test_rules_evidence_takes_the_commonest_allowed_label_and_its_majority(
 
 @live
 def test_low_confidence_prefers_its_own_allowed_label_then_the_evidence(conn) -> None:
-    _mappings(conn, ("a@brand.com", None, "Commercial/Retail", True, False))
+    _mappings(
+        conn,
+        ("a@brand.com", None, "Commercial/Retail", True, False),
+        ("b@brand.com", None, "Commercial/Retail", True, False),
+    )
     _mail(
         conn,
         "own@brand.com",

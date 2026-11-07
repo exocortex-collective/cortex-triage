@@ -171,10 +171,13 @@ def _evidence(
             }
     proposals = {}
     for addr in addrs:
-        votes = by_family.get(family(addr))
-        # Only a family that agrees on one label: gmail.com's mappings are
-        # people, and a majority of them is not evidence about a stranger.
-        if votes and len({label for label, _, _ in votes}) == 1:
+        votes = by_family.get(family(addr), Counter())
+        # Two or more mappings that all agree: gmail.com's mappings are people
+        # with differing labels, and msn.com's single Family mapping is one
+        # person, so neither is evidence about a stranger at that domain.
+        # ponytail: two people at one webmail domain with the same label would
+        # still pass; add a mailbox-provider list if that ever shows up.
+        if len({label for label, _, _ in votes}) == 1 and sum(votes.values()) >= 2:
             (label, archive, mark_read), _ = votes.most_common(1)[0]
             proposals[addr] = {
                 "label": label,
