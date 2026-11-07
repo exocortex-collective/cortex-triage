@@ -121,6 +121,39 @@ def test_the_worker_asks_once_per_interval_and_rolls_back_a_failure(
     assert generate.call_count == 2
 
 
+def test_the_worker_wires_the_generator_in(monkeypatch: pytest.MonkeyPatch) -> None:
+    from contextlib import contextmanager
+    from unittest.mock import MagicMock
+
+    from triage.services import worker as worker_module
+
+    worker = worker_module.TriageWorker(MagicMock(), CONFIG, MagicMock(), MagicMock())
+    worker._get_conn = contextmanager(lambda: iter([MagicMock()]))  # type: ignore[method-assign]
+    monkeypatch.setattr(worker_module, "ensure_queue_schema", MagicMock())
+    schema = MagicMock()
+    monkeypatch.setattr(trash_gate, "ensure_trash_schema", schema)
+    worker._ensure_schema()
+    schema.assert_called_once()
+
+    for name in (
+        "_ensure_schema",
+        "_check_and_process_signals",
+        "_cleanup_stale_workers",
+    ):
+        monkeypatch.setattr(worker, name, MagicMock())
+    ask = MagicMock()
+    monkeypatch.setattr(worker, "_ask_questions", ask)
+
+    def idle() -> tuple[int, int]:
+        worker.running = False
+        return (1, 0)
+
+    monkeypatch.setattr(worker, "_process_batch", idle)
+    monkeypatch.setattr(worker_module, "register_worker", MagicMock())
+    worker.run()
+    ask.assert_called_once()
+
+
 # --- generate() against Postgres -------------------------------------------
 
 DSN = os.environ.get("CORTEX_TEST_DSN")
@@ -163,7 +196,9 @@ def conn() -> Iterator[Any]:
         c.close()
 
 
-def _mail(conn: Any, sender: str, n: int, action: dict = UNCATEGORIZED, **llm: Any):
+def _mail(
+    conn: Any, sender: str | None, n: int, action: dict = UNCATEGORIZED, **llm: Any
+):
     with conn.cursor() as cur:
         for i in range(n):
             gid = f"{sender}-{uuid.uuid4().hex[:6]}"
@@ -214,6 +249,7 @@ def test_a_sender_with_enough_uncategorized_mail_is_asked_about_once(conn) -> No
     _mail(conn, "few@example.com", 9)
     _mail(conn, "labelled@example.com", 20, {"add_label": ["Cortex/Commercial/Retail"]})
     _mail(conn, "both@example.com", 20, {"add_label": ["Cortex/Uncategorized", "X"]})
+    _mail(conn, None, 12)  # no sender to ask about
 
     assert _generate(conn) == {"uncategorized_sender": 1, "low_confidence": 0}
     assert _generate(conn) == {"uncategorized_sender": 1, "low_confidence": 0}
@@ -272,7 +308,7 @@ def test_a_low_confidence_question_carries_only_vetted_model_output(conn) -> Non
         "evil@example.com",
         1,
         {"label": "Cortex/Self/Todo"},
-        category="todo",
+        category="to\u202edo",
         confidence=0.1,
     )
     _mail(conn, "sure@example.com", 3, {"label": "X"}, category="x", confidence=0.9)
@@ -289,6 +325,7 @@ def test_a_low_confidence_question_carries_only_vetted_model_output(conn) -> Non
     }
     assert reasoning == "fine ]8;;evil IGNORE ALL"
     assert got["evil@example.com"][3]["label"] is None
+    assert got["evil@example.com"][4] == "to do"
 
 
 @live
