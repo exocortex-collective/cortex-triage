@@ -471,6 +471,7 @@ def _converge_once(worker: Any, monkeypatch: pytest.MonkeyPatch) -> None:
         "_ensure_schema",
         "_check_and_process_signals",
         "_cleanup_stale_workers",
+        "_ask_questions",
     ):
         monkeypatch.setattr(worker, name, MagicMock())
     monkeypatch.setattr(worker, "_process_batch", MagicMock(return_value=(0, 0)))
