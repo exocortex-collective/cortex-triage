@@ -19,8 +19,8 @@ A sender whose question was answered, in any scope, is not asked again.
 from __future__ import annotations
 
 import json
-import re
 import secrets
+import unicodedata
 from typing import Any
 
 from cortex_utils.triage_config.models import RulesConfig
@@ -30,7 +30,6 @@ from triage.services import trash_gate
 
 KINDS = ("uncategorized_sender", "low_confidence")
 SAMPLE_SIZE = 5
-_CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f]+")
 
 _SAMPLE = f"""array_to_json((array_agg(json_build_object(
                  'gmail_id', c.gmail_id, 'subject', p.subject,
@@ -59,18 +58,19 @@ SELECT s.* FROM (
 WHERE {_UNSETTLED}
 """
 
+# The fields shown with the confidence all come from that least-sure email.
+_LEAST_SURE = "c.llm_confidence, c.classified_at DESC"
+
 LOW_CONFIDENCE = f"""
 SELECT s.* FROM (
     SELECT lower(p.from_addr) AS addr, COUNT(*) AS volume, {_SAMPLE} AS sample,
            MIN(c.llm_confidence) AS confidence,
-           (array_agg(c.llm_category ORDER BY c.classified_at DESC))[1]
-               AS llm_category,
-           (array_agg(c.llm_reasoning ORDER BY c.classified_at DESC))[1]
-               AS reasoning,
-           (array_agg(c.action_taken ORDER BY c.classified_at DESC))[1] AS action
+           (array_agg(c.llm_category ORDER BY {_LEAST_SURE}))[1] AS llm_category,
+           (array_agg(c.llm_reasoning ORDER BY {_LEAST_SURE}))[1] AS reasoning,
+           (array_agg(c.action_taken ORDER BY {_LEAST_SURE}))[1] AS action
     FROM classifications c
     JOIN emails_parsed p ON p.gmail_id = c.gmail_id
-    WHERE c.llm_confidence < %(threshold)s AND p.from_addr IS NOT NULL
+    WHERE c.llm_confidence < %(threshold)s::real AND p.from_addr IS NOT NULL
     GROUP BY 1
 ) s
 WHERE {_UNSETTLED}
@@ -91,10 +91,14 @@ def configured_labels(config: RulesConfig) -> set[str]:
 
 
 def clean(text: str | None, limit: int = 500) -> str | None:
-    """Model text bound for a human: no control characters, one line, capped."""
+    """Model text bound for a human: no control or format characters (bidi
+    overrides, zero-width), one line, capped."""
     if text is None:
         return None
-    return " ".join(_CONTROL.sub(" ", text).split())[:limit] or None
+    kept = "".join(
+        " " if unicodedata.category(ch) in ("Cc", "Cf") else ch for ch in text
+    )
+    return " ".join(kept.split())[:limit] or None
 
 
 def proposal(action: dict[str, Any] | None, allowed: set[str]) -> dict[str, Any]:
@@ -118,9 +122,6 @@ def generate(
     default_label = json.dumps([f"{config.label_prefix}/{config.default_label}"])
     allowed = configured_labels(config)
     with conn.cursor() as cur:
-        # The gateway answers under this lock, so a question answered while we
-        # read cannot be re-opened by the insert below.
-        cur.execute(trash_gate.LOCK)
         cur.execute(
             UNCATEGORIZED,
             {
@@ -140,13 +141,22 @@ def generate(
             (addr, volume, sample, proposal(action, allowed), category, conf, why)
             for addr, volume, sample, conf, category, why, action in cur.fetchall()
         ]
-        for kind, rows in found.items():
-            _store(cur, kind, rows)
+        # The gateway answers under this lock, so the answered re-check in
+        # _store cannot race an answer. Taken after the slow reads.
+        cur.execute(trash_gate.LOCK)
+        opened = {kind: _store(cur, kind, rows) for kind, rows in found.items()}
     conn.commit()
-    return {kind: len(rows) for kind, rows in found.items()}
+    return opened
 
 
-def _store(cur: Any, kind: str, rows: list[tuple[Any, ...]]) -> None:
+def _store(cur: Any, kind: str, rows: list[tuple[Any, ...]]) -> int:
+    cur.execute(
+        "SELECT from_addr FROM triage_questions"
+        " WHERE kind = %s AND status = 'answered' AND from_addr = ANY(%s)",
+        (kind, [r[0] for r in rows]),
+    )
+    answered = {r[0] for r in cur.fetchall()}
+    rows = [r for r in rows if r[0] not in answered]
     # An open question whose sender is now settled, or below the bar, goes away.
     cur.execute(
         "DELETE FROM triage_questions WHERE kind = %s AND status = 'open'"
@@ -154,7 +164,7 @@ def _store(cur: Any, kind: str, rows: list[tuple[Any, ...]]) -> None:
         (kind, [r[0] for r in rows]),
     )
     if not rows:
-        return
+        return 0
     execute_values(
         cur,
         """
@@ -181,3 +191,4 @@ def _store(cur: Any, kind: str, rows: list[tuple[Any, ...]]) -> None:
             for addr, volume, sample, proposed, category, confidence, why in rows
         ],
     )
+    return len(rows)

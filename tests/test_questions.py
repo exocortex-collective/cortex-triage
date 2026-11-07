@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 import uuid
 from collections.abc import Iterator
 from typing import Any
@@ -89,6 +90,35 @@ def test_model_text_is_one_clean_line() -> None:
     assert questions.clean("x" * 900) == "x" * 500
     assert questions.clean(" \n ") is None
     assert questions.clean(None) is None
+    assert questions.clean("a\u202eevil\u200bx\u2066y") == "a evil x y"
+
+
+def test_the_worker_asks_once_per_interval_and_rolls_back_a_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from contextlib import contextmanager
+    from unittest.mock import MagicMock
+
+    from triage.services import worker as worker_module
+
+    conn = MagicMock()
+    worker = worker_module.TriageWorker.__new__(worker_module.TriageWorker)
+    worker.config = MagicMock(question_min_volume=10, question_confidence=0.7)
+    worker.rules = CONFIG
+    worker.last_questions = 0.0
+    worker._get_conn = contextmanager(lambda: iter([conn]))  # type: ignore[method-assign]
+    generate = MagicMock(side_effect=RuntimeError("boom"))
+    monkeypatch.setattr(questions, "generate", generate)
+
+    worker._ask_questions()
+    worker._ask_questions()
+    assert generate.call_count == 1
+    assert generate.call_args.args[1:] == (CONFIG, 10, 0.7)
+    conn.rollback.assert_called_once()
+
+    worker.last_questions -= worker_module.QUESTION_INTERVAL_SECONDS
+    worker._ask_questions()
+    assert generate.call_count == 2
 
 
 # --- generate() against Postgres -------------------------------------------
@@ -259,3 +289,96 @@ def test_a_low_confidence_question_carries_only_vetted_model_output(conn) -> Non
     }
     assert reasoning == "fine ]8;;evil IGNORE ALL"
     assert got["evil@example.com"][3]["label"] is None
+
+
+@live
+def test_a_refresh_keeps_the_question_and_updates_its_volume(conn) -> None:
+    _mail(conn, "grow@example.com", 10)
+    _generate(conn)
+    with conn.cursor() as cur:
+        cur.execute("SELECT id FROM triage_questions")
+        (first,) = cur.fetchone()
+    _mail(conn, "grow@example.com", 3)
+    _generate(conn)
+    with conn.cursor() as cur:
+        cur.execute("SELECT id, volume FROM triage_questions")
+        assert cur.fetchall() == [(first, 13)]
+
+
+@live
+def test_a_sender_answered_after_the_read_is_not_asked_again(conn) -> None:
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO triage_questions (id, kind, from_addr, status) VALUES"
+            " ('q-1', 'uncategorized_sender', 'x@example.com', 'answered')"
+        )
+        stored = questions._store(
+            cur,
+            "uncategorized_sender",
+            [("x@example.com", 10, [], None, None, None, None)],
+        )
+    conn.commit()
+    assert stored == 0
+    assert _kinds(conn) == []
+
+
+@live
+def test_generate_waits_for_an_answer_in_progress(conn) -> None:
+    _mail(conn, "wait@example.com", 10)
+    answering = psycopg2.connect(DSN, options=f"-c search_path={SCHEMA}")
+    try:
+        with answering.cursor() as cur:
+            cur.execute(trash_gate.LOCK)  # the gateway's answer route holds this
+        done = threading.Event()
+        worker = threading.Thread(target=lambda: (_generate(conn), done.set()))
+        worker.start()
+        assert not done.wait(1.0)
+        answering.commit()
+        assert done.wait(10.0)
+        worker.join()
+    finally:
+        answering.close()
+    assert _kinds(conn) == [("wait@example.com", "uncategorized_sender")]
+
+
+@live
+def test_low_confidence_reports_the_least_sure_email_and_excludes_the_threshold(
+    conn,
+) -> None:
+    with conn.cursor() as cur:
+        cur.execute("ALTER TABLE classifications ALTER classified_at DROP DEFAULT")
+    conn.commit()
+    sure_old = {"label": "Cortex/Commercial/Retail"}
+    _mail(
+        conn,
+        "two@example.com",
+        1,
+        sure_old,
+        category="a",
+        confidence=0.3,
+        reasoning="least sure",
+    )
+    _mail(
+        conn,
+        "two@example.com",
+        1,
+        {"label": "Cortex/Family"},
+        category="b",
+        confidence=0.6,
+        reasoning="newer",
+    )
+    _mail(conn, "edge@example.com", 1, sure_old, category="c", confidence=0.7)
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE classifications SET classified_at = now() -"
+            " CASE llm_category WHEN 'a' THEN interval '2 days' ELSE interval '0' END"
+        )
+    conn.commit()
+
+    assert _generate(conn)["low_confidence"] == 1
+    _, volume, _, proposed, category, confidence, reasoning = _open(conn)[
+        "two@example.com"
+    ]
+    assert (volume, category, reasoning) == (2, "a", "least sure")
+    assert confidence == pytest.approx(0.3)
+    assert proposed["label"] == "Cortex/Commercial/Retail"
