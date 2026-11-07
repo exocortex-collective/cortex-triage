@@ -17,6 +17,8 @@ import json
 import pathlib
 import re
 
+import pytest
+
 REPO = pathlib.Path(__file__).resolve().parent.parent
 
 # The one correct start command. Asserted whole rather than probed for
@@ -51,7 +53,7 @@ def _effective_argv(dockerfile: str) -> list[str]:
     joined = joined[joined.rfind("\nFROM ") + 1 :] if "\nFROM " in joined else joined
 
     def last(kind: str) -> str | None:
-        # re.I: docker instruction keywords are case-insensitive, so a
+        # re.IGNORECASE: docker instruction keywords are case-insensitive, so a
         # lowercase `cmd` is a real CMD.
         found = re.findall(rf"^\s*{kind}\s+(.+)$", joined, re.MULTILINE | re.IGNORECASE)
         return found[-1].strip() if found else None
@@ -83,9 +85,12 @@ def _uv_syncs(dockerfile: str) -> list[str]:
     syncs = []
     for body in re.findall(r"^\s*RUN\s+(.+)$", joined, re.MULTILINE | re.IGNORECASE):
         for segment in re.split(r"&&|\|\||;|\|", body):
-            # Leading RUN flags (--mount=...) sit before the command itself.
-            segment = re.sub(r"^\s*(?:--\S+\s+)*", "", segment)
-            if re.match(r"uv\s+sync\b", segment):
+            # RUN flags (--mount=...) and env assignments
+            # (UV_COMPILE_BYTECODE=1, which uv's own Docker guidance uses) sit
+            # before the command itself.
+            segment = re.sub(r"^\s*(?:(?:--\S+|\w+=\S*)\s+)*", "", segment)
+            # `uv --no-cache sync` puts a flag before the subcommand.
+            if re.match(r"uv\s+(?:-\S+\s+)*sync\b", segment):
                 syncs.append(segment)
     return syncs
 
@@ -120,3 +125,152 @@ def test_a_uv_sync_installs_the_project_itself():
         "every `uv sync` carries a --no-install-* flag, so the project itself "
         "is never installed and the baked venv cannot import it"
     )
+
+
+def _installs_the_project(dockerfile: str) -> bool:
+    """Whether some `uv sync` puts the project itself into the venv."""
+    return any("--no-install-" not in s for s in _uv_syncs(dockerfile))
+
+
+# The rules above are exercised by exactly ONE branch of the real Dockerfile,
+# so mutating any of the others away leaves every test green. These cases are
+# the regression test for the rules themselves: synthetic Dockerfiles, derived
+# from EXPECTED_START so they hold for whichever service this repo builds.
+_RIGHT = json.dumps(EXPECTED_START)
+_WRONG = json.dumps(["python"] + EXPECTED_START[1:])
+_VIA_UV = json.dumps(["uv", "run"] + EXPECTED_START)
+
+START_CASES = [
+    ("the exec-form start command", f"CMD {_RIGHT}", True),
+    (
+        "a stale earlier CMD with a correct final one",
+        f"CMD {_VIA_UV}\nCMD {_RIGHT}",
+        True,
+    ),
+    ("an ENTRYPOINT [] reset", f"ENTRYPOINT []\nCMD {_RIGHT}", True),
+    ("a lowercase cmd keyword", f"cmd {_RIGHT}", True),
+    (
+        "an earlier stage's CMD, which is dead",
+        f"FROM busybox AS build\nCMD {_WRONG}\nFROM python:3.11-slim\nCMD {_RIGHT}",
+        True,
+    ),
+    ("the correct CMD followed by a wrong one", f"CMD {_RIGHT}\nCMD {_WRONG}", False),
+    ("the command run through uv", f"CMD {_VIA_UV}", False),
+    ("a bare interpreter from PATH", f"CMD {_WRONG}", False),
+    (
+        "a shell wrapper hiding an install",
+        'CMD ["sh", "-c", "pip install -e . && x"]',
+        False,
+    ),
+    (
+        "a shell-form ENTRYPOINT, which discards the CMD",
+        f"ENTRYPOINT {EXPECTED_START[0]}\nCMD {_RIGHT}",
+        False,
+    ),
+    (
+        "an exec ENTRYPOINT with a shell-form CMD",
+        f'ENTRYPOINT ["{EXPECTED_START[0]}"]\nCMD {" ".join(EXPECTED_START[1:])}',
+        False,
+    ),
+    ("a lone shell-form CMD", "CMD " + " ".join(EXPECTED_START), False),
+]
+
+SYNC_CASES = [
+    ("a plain sync", "RUN uv sync --frozen --no-dev", True),
+    ("a sync after a cd", "RUN cd /app && uv sync --frozen", True),
+    (
+        "a sync behind a cache mount",
+        "RUN --mount=type=cache,target=/r uv sync --frozen",
+        True,
+    ),
+    (
+        "a sync behind an env assignment",
+        "RUN UV_COMPILE_BYTECODE=1 uv sync --frozen",
+        True,
+    ),
+    ("a flag before the subcommand", "RUN uv --no-cache sync --frozen", True),
+    (
+        "a flagged sync and a clean one",
+        "RUN uv sync --no-install-project\nRUN uv sync --frozen",
+        True,
+    ),
+    ("no sync at all", "RUN pip install .", False),
+    ("only a decoy", "RUN echo uv sync", False),
+    ("--no-install-project", "RUN uv sync --frozen --no-install-project", False),
+    ("--no-install-package", "RUN uv sync --frozen --no-install-package x", False),
+    ("--no-install-workspace", "RUN uv sync --frozen --no-install-workspace", False),
+    (
+        "a decoy beside a flagged sync",
+        "RUN echo uv sync\nRUN uv sync --no-install-project",
+        False,
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    "body,is_baked",
+    [(b, ok) for _, b, ok in START_CASES],
+    ids=[n for n, _, _ in START_CASES],
+)
+def test_the_start_command_rules(body: str, is_baked: bool):
+    dockerfile = "FROM python:3.11-slim\n" + body + "\n"
+    assert (_effective_argv(dockerfile) == EXPECTED_START) is is_baked
+
+
+@pytest.mark.parametrize(
+    "body,installs",
+    [(b, ok) for _, b, ok in SYNC_CASES],
+    ids=[n for n, _, _ in SYNC_CASES],
+)
+def test_the_uv_sync_rules(body: str, installs: bool):
+    dockerfile = "FROM python:3.11-slim\n" + body + "\n"
+    assert _installs_the_project(dockerfile) is installs
+
+
+# Rules 1-4 as a docker MODEL, asserted on the resolved argv itself. The
+# boolean cases above cannot see rule 4: rule 3 already turns shell form into
+# /bin/sh -c, so dropping rule 4 can never produce something EQUAL to
+# EXPECTED_START, only something differently wrong. Each expectation below was
+# measured against docker with a printf stub as the entrypoint.
+RESOLUTION_CASES = [
+    ("only the last CMD counts", 'CMD ["a"]\nCMD ["b"]', ["b"]),
+    (
+        "only the last ENTRYPOINT counts",
+        'ENTRYPOINT ["a"]\nENTRYPOINT ["b"]\nCMD ["c"]',
+        ["b", "c"],
+    ),
+    (
+        "CMD supplies arguments to an exec ENTRYPOINT",
+        'ENTRYPOINT ["a"]\nCMD ["b"]',
+        ["a", "b"],
+    ),
+    (
+        "a shell-form ENTRYPOINT discards the CMD",
+        'ENTRYPOINT a b\nCMD ["c"]',
+        ["/bin/sh", "-c", "a b"],
+    ),
+    ("a shell-form CMD runs through the shell", "CMD a b", ["/bin/sh", "-c", "a b"]),
+    (
+        "only the final build stage counts",
+        'FROM x\nCMD ["a"]\nFROM y\nCMD ["b"]',
+        ["b"],
+    ),
+    # The case that actually NEEDS rule 2: with a CMD only in an earlier
+    # stage, "the last CMD wins" alone would resurrect it.
+    (
+        "an earlier stage's CMD does not carry over",
+        'FROM x\nCMD ["a"]\nFROM y\nRUN true',
+        [],
+    ),
+    ("a trailing comment after the JSON", 'CMD ["a"] # note', ["a"]),
+    ("neither instruction", "RUN true", []),
+]
+
+
+@pytest.mark.parametrize(
+    "body,argv",
+    [(b, a) for _, b, a in RESOLUTION_CASES],
+    ids=[n for n, _, _ in RESOLUTION_CASES],
+)
+def test_the_resolution_rules(body: str, argv: list[str]):
+    assert _effective_argv("FROM python:3.11-slim\n" + body + "\n") == argv
