@@ -316,3 +316,27 @@ def test_a_single_add_label_string_renders_too() -> None:
     result = evaluate(config, _email(), Oracle())
     assert result.action is not None
     assert result.action.add_label == "Cortex/Kickstarter/example.net"
+
+
+def test_a_routed_add_label_renders_regex_variables_but_not_model_ones() -> None:
+    config = RulesConfig(
+        chains={
+            "main": [
+                Rule(
+                    llm=LLMConfig(model="m", prompt_version="v1", extract=["who"]),
+                    variables={
+                        "dom": Variable(from_regex={"pattern": r"@(.+)$", "group": 1})
+                    },
+                    routes={
+                        "x": Action(
+                            add_label=["A/{{who}}/{{dom}}"], remove_label="R/{{who}}"
+                        )
+                    },
+                )
+            ]
+        }
+    )
+    result = evaluate(config, _email(), Oracle(classify="x"))
+    assert result.action is not None
+    assert result.action.add_label == ["A/{{who}}/example.net"]
+    assert result.action.remove_label == "R/{{who}}"
