@@ -182,7 +182,7 @@ def conn() -> Iterator[Any]:
         )
         cur.execute(
             "CREATE TABLE triage_email_mappings (email_address TEXT,"
-            " deleted_at TIMESTAMPTZ)"
+            " deleted_at TIMESTAMPTZ, label TEXT, archive BOOLEAN, mark_read BOOLEAN)"
         )
     c.autocommit = False
     trash_gate.ensure_trash_schema(c)
@@ -419,3 +419,137 @@ def test_low_confidence_reports_the_least_sure_email_and_excludes_the_threshold(
     assert (volume, category, reasoning) == (2, "a", "least sure")
     assert confidence == pytest.approx(0.3)
     assert proposed["label"] == "Cortex/Commercial/Retail"
+
+
+def test_family_groups_subdomains() -> None:
+    assert questions.family("a@i.forever21.com") == "forever21.com"
+    assert questions.family("b@forever21.com") == "forever21.com"
+    assert questions.family("c@contact.joebiden.com") != questions.family(
+        "d@democrats.org"
+    )
+
+
+def _mappings(conn: Any, *rows: tuple[Any, ...]) -> None:
+    with conn.cursor() as cur:
+        for row in rows:
+            cur.execute(
+                "INSERT INTO triage_email_mappings VALUES (%s, %s, %s, %s, %s)", row
+            )
+    conn.commit()
+
+
+def _proposed(conn: Any) -> dict[str, Any]:
+    _generate(conn)
+    return {addr: row[3] for addr, row in _open(conn).items()}
+
+
+@live
+def test_a_family_that_agrees_proposes_its_label(conn) -> None:
+    _mappings(
+        conn,
+        ("News@Shop.Example.com", None, "Commercial/Retail", True, True),
+        ("deals@SHOP.Example.COM", None, "Commercial/Retail", True, True),
+        ("gone@shop.example.com", "2026-01-01", "Self/Todo", False, False),
+    )
+    _mail(conn, "promo@mail.shop.example.com", 10)
+    assert _proposed(conn)["promo@mail.shop.example.com"] == {
+        "label": "Cortex/Commercial/Retail",
+        "archive": True,
+        "mark_read": True,
+    }
+
+
+@live
+def test_a_family_that_disagrees_proposes_nothing(conn) -> None:
+    _mappings(
+        conn,
+        ("mom@gmail.com", None, "Family", False, False),
+        ("dad@gmail.com", None, "Family", False, False),
+        ("pal@gmail.com", None, "Commercial/Retail", False, False),
+    )
+    _mappings(conn, ("aunt@msn.com", None, "Family", False, False))
+    _mail(conn, "stranger@gmail.com", 10)
+    _mail(conn, "stranger@msn.com", 10)
+    got = _proposed(conn)
+    assert got["stranger@gmail.com"] is None  # mappings disagree
+    assert got["stranger@msn.com"] is None  # one mapping is one person
+
+
+@live
+def test_rules_evidence_takes_the_commonest_allowed_label_and_its_majority(
+    conn,
+) -> None:
+    _mappings(conn, ("x@elsewhere.org", None, "Hobby/Kites", False, False))
+    _mail(conn, "ruled@other.org", 10)
+    _mail(
+        conn,
+        "ruled@other.org",
+        2,
+        {
+            "add_label": ["Cortex/Commercial/Newsletter"],
+            "archive": True,
+            "mark_read": True,
+        },
+    )
+    _mail(
+        conn,
+        "ruled@other.org",
+        1,
+        {"add_label": ["Cortex/Commercial/Newsletter"], "archive": True},
+    )
+    _mail(conn, "ruled@other.org", 1, {"add_label": ["Cortex/Commercial/Newsletter"]})
+    _mail(conn, "ruled@other.org", 2, {"add_label": ["Cortex/Commercial/Retail"]})
+    _mail(
+        conn, "ruled@other.org", 5, {"add_label": ["Cortex/Orders/123"]}
+    )  # not allowed
+    _mail(conn, "kites@third.net", 10)
+    _mail(
+        conn, "kites@third.net", 2, {"add_label": ["Cortex/Hobby/Kites"]}
+    )  # mapped only
+    _mail(conn, "half@fifth.net", 10)
+    _mail(conn, "half@fifth.net", 1, {"add_label": ["Cortex/Family"], "archive": True})
+    _mail(conn, "half@fifth.net", 1, {"add_label": ["Cortex/Family"]})
+    _mail(conn, "odd@fourth.net", 10)
+    _mail(conn, "odd@fourth.net", 4, {"add_label": ["Cortex/Self/Todo"]})
+    got = _proposed(conn)
+    # 4 Newsletter beat 2 Retail; 3 of 4 archived is a majority, 2 of 4 read is not
+    assert got["ruled@other.org"] == {
+        "label": "Cortex/Commercial/Newsletter",
+        "archive": True,
+        "mark_read": False,
+    }
+    assert got["kites@third.net"]["label"] == "Cortex/Hobby/Kites"
+    assert got["half@fifth.net"]["archive"] is False  # half is not a majority
+    assert got["odd@fourth.net"] is None  # Self/Todo is neither configured nor mapped
+
+
+@live
+def test_low_confidence_prefers_its_own_allowed_label_then_the_evidence(conn) -> None:
+    _mappings(
+        conn,
+        ("a@brand.com", None, "Commercial/Retail", True, False),
+        ("b@brand.com", None, "Commercial/Retail", True, False),
+    )
+    _mail(
+        conn,
+        "own@brand.com",
+        1,
+        {"label": "Cortex/Family"},
+        category="f",
+        confidence=0.2,
+    )
+    _mail(
+        conn,
+        "bad@brand.com",
+        1,
+        {"label": "Cortex/Self/Todo"},
+        category="t",
+        confidence=0.2,
+    )
+    got = _proposed(conn)
+    assert got["own@brand.com"]["label"] == "Cortex/Family"
+    assert got["bad@brand.com"] == {
+        "label": "Cortex/Commercial/Retail",
+        "archive": True,
+        "mark_read": False,
+    }
