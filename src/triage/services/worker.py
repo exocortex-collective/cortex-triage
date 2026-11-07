@@ -16,7 +16,7 @@ from typing import Any
 
 import httpx
 import psycopg2
-from cortex_utils.llm import LLMClient, LLMError
+from cortex_utils.llm import LLMClient, LLMError, LLMTruncatedError
 from cortex_utils.logging import configure_logging, get_logger
 from cortex_utils.metrics import (
     EMAILS_CLASSIFIED,
@@ -85,6 +85,29 @@ _GET_ACTIVE_CONFIG_VERSION_SQL = """
 """
 
 logger = get_logger(__name__)
+
+
+def evaluate_or_rules_only(
+    rules: RulesConfig, email: Email, llm: LLMClient, path: list[tuple[str, int | None]]
+) -> tuple[Action | None, list[EvaluationResult], bool]:
+    """evaluate_parallel, or, if a model answer was truncated, again without
+    the model, so every LLM condition fails closed (cortex-hox9).
+
+    Retrying a truncation spends the same budget on the same prompt, so it
+    never succeeds; dead-lettering it left the mail unlabelled. Rules-only
+    still applies mappings and rule chains, and falls through to the default
+    label. The caller stores no footprint, so convergence re-triages the mail
+    with the model on the next config version.
+    """
+    try:
+        action, results = evaluate_parallel(rules, email, llm, path)
+        return action, results, False
+    except LLMTruncatedError as e:
+        logger.warning(f"LLM truncated for {email.gmail_id}, rules only: {e}")
+        ERRORS.labels(service="triage-worker", error_type="llm_truncated").inc()
+        path.clear()
+        action, results = evaluate_parallel(rules, email, None, path)
+        return action, results, True
 
 
 @dataclass
@@ -1324,7 +1347,7 @@ class TriageWorker:
             # A SIGHUP reload may swap both mid-job.
             rules, version = self.rules, self.config_version
             path: list[tuple[str, int | None]] = []
-            merged_action, chain_results = evaluate_parallel(
+            merged_action, chain_results, truncated = evaluate_or_rules_only(
                 rules, email, self.llm, path
             )
 
@@ -1386,7 +1409,7 @@ class TriageWorker:
                 email,
                 merged_result,
                 action_executed,
-                self._footprint(rules, path, email.from_addr),
+                None if truncated else self._footprint(rules, path, email.from_addr),
                 version,
             )
 
@@ -1513,9 +1536,11 @@ class TriageWorker:
 
                                 rules, version = self.rules, self.config_version
                                 path: list[tuple[str, int | None]] = []
-                                merged_action, chain_results = evaluate_parallel(
-                                    rules, email, self.llm, path
-                                )
+                                (
+                                    merged_action,
+                                    chain_results,
+                                    truncated,
+                                ) = evaluate_or_rules_only(rules, email, self.llm, path)
                                 matched_chains = [
                                     r.chain
                                     for r in chain_results
@@ -1599,7 +1624,13 @@ class TriageWorker:
                                     email,
                                     result,
                                     action_executed,
-                                    self._footprint(rules, path, email.from_addr),
+                                    (
+                                        None
+                                        if truncated
+                                        else self._footprint(
+                                            rules, path, email.from_addr
+                                        )
+                                    ),
                                     version,
                                 )
                                 method = "llm" if result.llm_category else "rule"

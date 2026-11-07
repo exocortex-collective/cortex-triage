@@ -395,6 +395,18 @@ def _render_action(
     return action.model_copy(update=update)
 
 
+def _needs_llm(condition: MatchCondition) -> bool:
+    """True if the condition, or any sub-condition, asks the model."""
+    if (
+        condition.subject_intent is not None
+        or condition.email_intent is not None
+        or condition.email_category is not None
+    ):
+        return True
+    subs = (condition.any_of or []) + (condition.all_of or [])
+    return any(_needs_llm(sub) for sub in subs)
+
+
 def matches_condition(
     condition: MatchCondition,
     email: Email,
@@ -1251,8 +1263,12 @@ def _evaluate_chain_inner(
         stop[0] = i
         rule_trace: list[str] = []
         # Check if rule matches
-        matched = matches_condition(
-            rule.match, email, llm_client, intents, email_categories, rule_trace
+        # Without a model a negated model condition would match, so the
+        # whole rule is skipped rather than evaluated (cortex-hox9).
+        matched = (llm_client is not None or not _needs_llm(rule.match)) and (
+            matches_condition(
+                rule.match, email, llm_client, intents, email_categories, rule_trace
+            )
         )
         _trace.append(f"  rule[{i}]: {matched}")
         _trace.extend(f"    {t}" for t in rule_trace)
