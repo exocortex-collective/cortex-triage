@@ -85,6 +85,32 @@ def test_retailer_is_never_a_creator(monkeypatch: pytest.MonkeyPatch) -> None:
     assert cp.creator_domains(mail, {TITLE}) == {}
 
 
+def test_subdomain_sender_counts_as_its_domain() -> None:
+    mail = corpus(*[("hi@news.widgetron.com", f"Widgetron news {i}") for i in range(3)])
+    assert set(cp.creator_domains(mail, {TITLE})) == {("widgetron.com", TITLE)}
+
+
+def test_own_volume_does_not_make_a_token_rare() -> None:
+    # 2,000 other mails with the token once: log(2000/1) = 7.6, under MIN_IDF.
+    # Counting the domain's own 3,000 mails would give log(5000) = 8.5.
+    others = [(f"n{i}@example{i % 40}.com", f"Weekly {i}") for i in range(1999)]
+    others.append(("x@example.com", "Widgetron mention"))
+    own = [("hi@widgetron.com", f"Widgetron {i}") for i in range(3000)]
+    assert cp.creator_domains(others + own, {TITLE}) == {}
+
+
+def test_short_title_token_is_ignored() -> None:
+    title = "Zq Pocket Laser"
+    mail = corpus(*[("hi@zqtools.com", f"zq deal {i}") for i in range(3)])
+    assert cp.creator_domains(mail, {title}) == {}
+
+
+def test_kickstarter_is_never_a_creator() -> None:
+    title = "Kickstarter Gold"
+    mail = corpus(*[(KS, f"Kickstarter digest {i}") for i in range(3)])
+    assert cp.creator_domains(mail, {title}) == {}
+
+
 DSN = os.environ.get("CORTEX_TEST_DSN")
 SCHEMA = f"t_campaigns_{uuid.uuid4().hex[:8]}"
 
@@ -98,13 +124,15 @@ def conn() -> Iterator[Any]:
         cur.execute(f"DROP SCHEMA IF EXISTS {SCHEMA} CASCADE")
         cur.execute(f"CREATE SCHEMA {SCHEMA}")
     c.commit()
-    cp.ensure_schema(c)
-    yield c
-    c.rollback()
-    with c.cursor() as cur:
-        cur.execute(f"DROP SCHEMA {SCHEMA} CASCADE")
-    c.commit()
-    c.close()
+    try:
+        cp.ensure_schema(c)
+        yield c
+    finally:
+        c.rollback()
+        with c.cursor() as cur:
+            cur.execute(f"DROP SCHEMA {SCHEMA} CASCADE")
+        c.commit()
+        c.close()
 
 
 def test_store_adds_campaigns_keeps_aliases_and_replaces_links(conn: Any) -> None:
@@ -126,3 +154,20 @@ def test_store_adds_campaigns_keeps_aliases_and_replaces_links(conn: Any) -> Non
         assert cur.fetchall() == [(other, TITLE), (TITLE, None)]
         cur.execute("SELECT domain, title, token, mails FROM triage_campaign_domains")
         assert cur.fetchall() == [("widgetron.com", other, "widgetron", 4)]
+
+
+def test_store_with_no_links_clears_them(conn: Any) -> None:
+    cp.store(conn, {TITLE}, {("widgetron.com", TITLE): ("widgetron", 3)})
+    cp.store(conn, {TITLE}, {})
+    with conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM triage_campaign_domains")
+        assert cur.fetchone() == (0,)
+
+
+def test_store_refuses_an_empty_registry(conn: Any) -> None:
+    cp.store(conn, {TITLE}, {("widgetron.com", TITLE): ("widgetron", 3)})
+    with pytest.raises(ValueError):
+        cp.store(conn, set(), {})
+    with conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM triage_campaign_domains")
+        assert cur.fetchone() == (1,)

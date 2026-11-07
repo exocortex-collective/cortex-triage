@@ -127,7 +127,7 @@ def creator_domains(
 
 
 # alias_of folds a renamed campaign into one label; it is set by hand
-# (Devon decides SAME vs SPLIT) and refresh() never touches it.
+# (Devon decides SAME vs SPLIT) and store() never touches it.
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS triage_campaigns (
     title TEXT PRIMARY KEY,
@@ -175,6 +175,9 @@ def store(
     Campaigns are only ever added: a title that leaves the mailbox keeps its
     row, its alias and any label already filed under it.
     """
+    if not campaigns:
+        # An empty read (wrong database, failed query) must not wipe the links.
+        raise ValueError("no campaigns derived; refusing to replace creator links")
     with conn.cursor() as cur:
         added = execute_values(
             cur,
