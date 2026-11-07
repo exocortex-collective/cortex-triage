@@ -61,6 +61,7 @@ from triage.db.worker_status import (
 from triage.engine.footprint import build_footprint, chain_hashes, is_affected
 from triage.engine.matcher import evaluate_parallel
 from triage.models.patterns import EmailPattern
+from triage.services import questions, trash_gate
 from triage.services.lifecycle import (
     LifecycleConfig,
     check_maintenance_needed,
@@ -106,12 +107,17 @@ class Config:
     # Convergence settings (idle-time config updates)
     enable_convergence: bool = True  # Enable/disable idle-time convergence
     convergence_batch_size: int = 500  # rows checked against footprints per idle poll
+    # Questions for Devon (cortex-kaij.4)
+    question_min_volume: int = 10  # uncategorized emails before a sender is asked about
+    question_confidence: float = 0.70  # llm confidence below this opens a question
 
 
 # Pattern quality filter: confidence threshold for irregular patterns
 # Irregular patterns with confidence below this threshold are only created
 # if the merchant is known (not "unknown")
 PATTERN_QUALITY_CONFIDENCE_THRESHOLD = 0.5
+
+QUESTION_INTERVAL_SECONDS = 900
 
 
 class GmailClient:
@@ -361,6 +367,7 @@ class TriageWorker:
         self._claim_token = worker_identity("triage-worker")
         self.last_signal_poll = time.time()
         self.last_cleanup = time.time()  # Track when we last cleaned up stale workers
+        self.last_questions = 0.0  # first loop pass asks
         self.config_version = config_version  # Track which DB config version is loaded
         self.jobs_processed = 0  # Track cumulative job count for status updates
         self._hashes: dict[str, list[str]] = {}
@@ -630,6 +637,25 @@ class TriageWorker:
         except Exception as e:
             logger.error(f"Lifecycle maintenance failed: {e}", exc_info=True)
 
+    def _ask_questions(self) -> None:
+        """Refresh the per-sender question queue, at most every interval."""
+        now = time.time()
+        if now - self.last_questions < QUESTION_INTERVAL_SECONDS:
+            return
+        self.last_questions = now
+        with self._get_conn() as conn:
+            try:
+                opened = questions.generate(
+                    conn,
+                    self.rules,
+                    self.config.question_min_volume,
+                    self.config.question_confidence,
+                )
+                logger.info(f"Questions open: {opened}")
+            except Exception as e:
+                conn.rollback()  # the pool must not get an aborted transaction back
+                logger.error(f"Question generation failed: {e}", exc_info=True)
+
     def _cleanup_stale_workers(self) -> None:
         """Clean up stale worker entries (>5 minutes without heartbeat).
 
@@ -684,6 +710,8 @@ class TriageWorker:
         # the steady-state path.
         with self._get_conn() as conn:
             ensure_queue_schema(conn)
+        with self._get_conn() as conn:
+            trash_gate.ensure_trash_schema(conn)  # owns triage_questions
 
         with self._get_conn() as conn, conn.cursor() as cur:
             cur.execute(
@@ -1429,6 +1457,7 @@ class TriageWorker:
 
                 # Cleanup stale worker entries periodically (every 5 minutes)
                 self._cleanup_stale_workers()
+                self._ask_questions()
 
                 processed, failed = self._process_batch()
 
@@ -2027,6 +2056,8 @@ def main() -> None:
         batch_size=args.batch_size,
         enable_convergence=os.environ.get("ENABLE_CONVERGENCE", "true").lower()
         == "true",
+        question_min_volume=int(os.environ.get("CORTEX_QUESTION_MIN_VOLUME", "10")),
+        question_confidence=float(os.environ.get("CORTEX_QUESTION_CONFIDENCE", "0.70")),
     )
 
     # Ensure config tables exist (safe on fresh databases)
