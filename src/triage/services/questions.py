@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 import secrets
 import unicodedata
+from collections import Counter
 from typing import Any
 
 from cortex_utils.triage_config.models import RulesConfig
@@ -114,14 +115,83 @@ def proposal(action: dict[str, Any] | None, allowed: set[str]) -> dict[str, Any]
     }
 
 
+# The labels a sender's mail already got from rules or chains, most common first.
+SENDER_LABELS = """
+SELECT lower(p.from_addr), l.label, COUNT(*),
+       COUNT(*) FILTER (WHERE (c.action_taken->>'archive')::boolean),
+       COUNT(*) FILTER (WHERE (c.action_taken->>'mark_read')::boolean)
+FROM classifications c
+JOIN emails_parsed p ON p.gmail_id = c.gmail_id
+CROSS JOIN LATERAL jsonb_array_elements_text(
+    CASE jsonb_typeof(c.action_taken->'add_label')
+         WHEN 'array' THEN c.action_taken->'add_label' ELSE '[]' END) AS l(label)
+WHERE lower(p.from_addr) = ANY(%(addrs)s) AND l.label <> %(default)s
+GROUP BY 1, 2
+ORDER BY 3 DESC
+"""
+
+MAPPINGS = """
+SELECT email_address, label, archive, mark_read FROM triage_email_mappings
+WHERE deleted_at IS NULL
+"""
+
+
+def family(addr: str) -> str:
+    """The sender's domain family: the last two labels of the domain, so
+    i.forever21.com and forever21.com match."""
+    # ponytail: two labels misgroups co.uk-style domains; use a public-suffix
+    # list if that ever matters for proposals.
+    return ".".join(addr.rpartition("@")[2].split(".")[-2:])
+
+
+def _evidence(
+    cur: Any, config: RulesConfig, addrs: list[str], allowed: set[str]
+) -> dict[str, dict[str, Any]]:
+    """The best trusted proposal per sender: a label live mappings give this
+    sender's domain family (a person chose it), else the label most of its
+    mail already got from rules, if `allowed` holds it. Otherwise none."""
+    prefix = config.label_prefix
+    by_family: dict[str, Counter[tuple[str, bool, bool]]] = {}
+    cur.execute(MAPPINGS)
+    for email, label, archive, mark_read in cur.fetchall():
+        by_family.setdefault(family(email), Counter())[
+            (f"{prefix}/{label}", bool(archive), bool(mark_read))
+        ] += 1
+    from_rules: dict[str, dict[str, Any]] = {}
+    cur.execute(
+        SENDER_LABELS,
+        {"addrs": addrs, "default": f"{prefix}/{config.default_label}"},
+    )
+    for addr, label, n, archived, read in cur.fetchall():
+        if addr not in from_rules and label in allowed:
+            from_rules[addr] = {
+                "label": label,
+                "archive": archived * 2 > n,
+                "mark_read": read * 2 > n,
+            }
+    proposals = {}
+    for addr in addrs:
+        votes = by_family.get(family(addr))
+        if votes:
+            (label, archive, mark_read), _ = votes.most_common(1)[0]
+            proposals[addr] = {
+                "label": label,
+                "archive": archive,
+                "mark_read": mark_read,
+            }
+        elif addr in from_rules:
+            proposals[addr] = from_rules[addr]
+    return proposals
+
+
 def generate(
     conn: Any, config: RulesConfig, min_volume: int, threshold: float
 ) -> dict[str, int]:
     """Open or refresh one question per unsettled sender, close the stale ones,
     commit; return how many are open per kind."""
     default_label = json.dumps([f"{config.label_prefix}/{config.default_label}"])
-    allowed = configured_labels(config)
     with conn.cursor() as cur:
+        allowed = configured_labels(config) | _mapping_labels(cur, config)
         cur.execute(
             UNCATEGORIZED,
             {
@@ -130,23 +200,49 @@ def generate(
                 "min_volume": min_volume,
             },
         )
+        uncategorized = cur.fetchall()
+        cur.execute(LOW_CONFIDENCE, {"kind": "low_confidence", "threshold": threshold})
+        low = cur.fetchall()
+        addrs = [r[0] for r in uncategorized] + [r[0] for r in low]
+        evidence = _evidence(cur, config, addrs, allowed)
         found: dict[str, list[tuple[Any, ...]]] = {
             "uncategorized_sender": [
-                (addr, volume, sample, None, None, None, None)
-                for addr, volume, sample in cur.fetchall()
-            ]
+                (addr, volume, sample, evidence.get(addr), None, None, None)
+                for addr, volume, sample in uncategorized
+            ],
+            "low_confidence": [
+                (
+                    addr,
+                    volume,
+                    sample,
+                    _first(proposal(action, allowed), evidence.get(addr)),
+                    category,
+                    conf,
+                    why,
+                )
+                for addr, volume, sample, conf, category, why, action in low
+            ],
         }
-        cur.execute(LOW_CONFIDENCE, {"kind": "low_confidence", "threshold": threshold})
-        found["low_confidence"] = [
-            (addr, volume, sample, proposal(action, allowed), category, conf, why)
-            for addr, volume, sample, conf, category, why, action in cur.fetchall()
-        ]
         # The gateway answers under this lock, so the answered re-check in
         # _store cannot race an answer. Taken after the slow reads.
         cur.execute(trash_gate.LOCK)
         opened = {kind: _store(cur, kind, rows) for kind, rows in found.items()}
     conn.commit()
     return opened
+
+
+def _mapping_labels(cur: Any, config: RulesConfig) -> set[str]:
+    """Labels a person chose for a live mapping, prefixed as applied."""
+    cur.execute(MAPPINGS)
+    return {f"{config.label_prefix}/{row[1]}" for row in cur.fetchall()}
+
+
+def _first(
+    own: dict[str, Any], fallback: dict[str, Any] | None
+) -> dict[str, Any] | None:
+    """A low_confidence question's own classification wins when it names an
+    allowed label."""
+    return own if own["label"] or fallback is None else fallback
 
 
 def _store(cur: Any, kind: str, rows: list[tuple[Any, ...]]) -> int:

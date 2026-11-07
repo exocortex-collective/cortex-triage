@@ -182,7 +182,7 @@ def conn() -> Iterator[Any]:
         )
         cur.execute(
             "CREATE TABLE triage_email_mappings (email_address TEXT,"
-            " deleted_at TIMESTAMPTZ)"
+            " deleted_at TIMESTAMPTZ, label TEXT, archive BOOLEAN, mark_read BOOLEAN)"
         )
     c.autocommit = False
     trash_gate.ensure_trash_schema(c)
@@ -419,3 +419,50 @@ def test_low_confidence_reports_the_least_sure_email_and_excludes_the_threshold(
     assert (volume, category, reasoning) == (2, "a", "least sure")
     assert confidence == pytest.approx(0.3)
     assert proposed["label"] == "Cortex/Commercial/Retail"
+
+
+def test_family_groups_subdomains() -> None:
+    assert questions.family("a@i.forever21.com") == "forever21.com"
+    assert questions.family("b@forever21.com") == "forever21.com"
+    assert questions.family("c@contact.joebiden.com") != questions.family(
+        "d@democrats.org"
+    )
+
+
+@live
+def test_a_proposal_comes_from_trusted_evidence_in_order(conn) -> None:
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO triage_email_mappings VALUES"
+            " ('news@shop.example.com', NULL, 'Commercial/Retail', true, true),"
+            " ('deals@shop.example.com', NULL, 'Commercial/Retail', true, true),"
+            " ('x@shop.example.com', NULL, 'Family', false, false),"
+            " ('gone@shop.example.com', now(), 'Self/Todo', false, false)"
+        )
+    conn.commit()
+    _mail(conn, "promo@mail.shop.example.com", 10)  # domain family has mappings
+    _mail(conn, "ruled@other.org", 10)
+    _mail(
+        conn,
+        "ruled@other.org",
+        3,
+        {"add_label": ["Cortex/Commercial/Newsletter"], "archive": True},
+    )
+    _mail(conn, "ruled@other.org", 2, {"add_label": ["Cortex/Orders/123"]})
+    _mail(conn, "odd@third.net", 10)
+    _mail(conn, "odd@third.net", 4, {"add_label": ["Cortex/Self/Todo"]})
+    _generate(conn)
+    proposed = {addr: row[3] for addr, row in _open(conn).items()}
+    assert proposed["promo@mail.shop.example.com"] == {
+        "label": "Cortex/Commercial/Retail",
+        "archive": True,
+        "mark_read": True,
+    }
+    assert proposed["ruled@other.org"] == {
+        "label": "Cortex/Commercial/Newsletter",
+        "archive": True,
+        "mark_read": False,
+    }
+    assert (
+        proposed["odd@third.net"] is None
+    )  # Self/Todo is neither configured nor mapped
