@@ -397,6 +397,11 @@ variables:
 - All variables must resolve successfully for the rule to match
 - If any variable fails to extract, the rule is skipped (falls through to next rule)
 - Variables are resolved after match conditions pass, before actions execute
+- **A value a model wrote never reaches a label.** An `llm` variable, or an
+  `llm.extract` field, is returned in the evaluation result (not stored), but
+  its `{{name}}` stays literal in the label. The model reads the email body, so its output is
+  attacker-chosen, and a label dispatches work (cortex-xhmk). Regex variables
+  still render, from mail headers and text the sender wrote.
 
 ## Chains and Jumps
 

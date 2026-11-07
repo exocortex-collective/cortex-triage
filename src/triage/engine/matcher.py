@@ -14,6 +14,7 @@ from cortex_utils.triage_config.models import (
     EmailMappingAction,
     EvaluationResult,
     MatchCondition,
+    Rule,
     RulesConfig,
 )
 
@@ -351,6 +352,22 @@ def _render_label(
         label = f"{prefix}/{label}"
 
     return label
+
+
+def _label_context(rule: Rule, ctx: VariableContext | None) -> VariableContext | None:
+    """The variables a label may use: none that a model wrote (cortex-xhmk).
+
+    The model reads the email body, so its text is attacker-chosen, and a label
+    is a target: labels dispatch work. llm.extract values are never passed in;
+    llm-sourced rule variables are dropped here. Their placeholders stay
+    literal, like any unresolved variable.
+    """
+    if ctx is None:
+        return None
+    model_written = {n for n, v in (rule.variables or {}).items() if v.llm}
+    return VariableContext(
+        values={k: v for k, v in ctx.values.items() if k not in model_written}
+    )
 
 
 def _render_action(
@@ -1332,8 +1349,8 @@ def _evaluate_chain_inner(
                 )
 
             if category in rule.routes:
-                # Merge standalone variables with LLM-extracted variables
-                # LLM-extracted variables take precedence in case of collision
+                # Recorded variables: LLM-extracted ones win a name collision.
+                # The label is rendered from var_ctx only (_label_context).
                 merged_values = (var_ctx.values if var_ctx else {}) | (
                     llm_var_ctx.values if llm_var_ctx else {}
                 )
@@ -1342,7 +1359,9 @@ def _evaluate_chain_inner(
                 )
 
                 action = _render_action(
-                    rule.routes[category], config.label_prefix, merged_ctx
+                    rule.routes[category],
+                    config.label_prefix,
+                    _label_context(rule, var_ctx),
                 )
                 _trace.append(f"  rule[{i}]: routed to action {action}")
                 return EvaluationResult(
@@ -1364,7 +1383,9 @@ def _evaluate_chain_inner(
 
         # Handle action
         if rule.action:
-            action = _render_action(rule.action, config.label_prefix, var_ctx)
+            action = _render_action(
+                rule.action, config.label_prefix, _label_context(rule, var_ctx)
+            )
             _trace.append(f"  rule[{i}]: matched with action {action}")
             return EvaluationResult(
                 matched=True,

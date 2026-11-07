@@ -1835,8 +1835,8 @@ class TestDynamicLabels:
         assert result.action.label == "Cortex/Orders/Amazon/111-2345678-9012345"
         assert result.variables == {"order_id": "111-2345678-9012345"}
 
-    def test_llm_variable_in_label(self) -> None:
-        """Test extracting variable via LLM and using in label."""
+    def test_llm_variable_is_recorded_but_not_put_in_label(self) -> None:
+        """An LLM-extracted variable never reaches a label (cortex-xhmk)."""
         from cortex_utils.triage_config.models import (
             LLMVariable,
             Variable,
@@ -1876,7 +1876,7 @@ class TestDynamicLabels:
 
         assert result.matched
         assert result.action is not None
-        assert result.action.label == "Cortex/Kickstarter/Cool Widget Pro"
+        assert result.action.label == "Cortex/Kickstarter/{{project}}"
         assert result.variables == {"project": "Cool Widget Pro"}
 
     def test_variable_failure_falls_through(self) -> None:
@@ -2025,7 +2025,7 @@ class TestDynamicLabels:
         assert result.action.mark_read is True
 
     def test_llm_classification_with_extraction(self) -> None:
-        """Test LLM classification that also extracts variables."""
+        """Extracted fields are recorded but never reach a label (cortex-xhmk)."""
         email = Email(
             id=1,
             gmail_id="test123",
@@ -2066,7 +2066,7 @@ class TestDynamicLabels:
 
         assert result.matched
         assert result.action is not None
-        assert result.action.label == "Cortex/Commercial/Acme Corp/Newsletter"
+        assert result.action.label == "Cortex/Commercial/{{company_name}}/Newsletter"
         assert result.llm_category == "subscription"
         assert result.variables == {"company_name": "Acme Corp"}
 
