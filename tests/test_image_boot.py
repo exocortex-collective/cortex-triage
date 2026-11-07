@@ -50,9 +50,8 @@ def _effective_argv(dockerfile: str) -> list[str]:
     the shell, so it never reaches the command -- but it is in the argv, and
     this returns the argv.
 
-    Only what the Dockerfile DECLARES. A base image's inherited CMD is not
-    visible here, so "no CMD" reads as [] where `docker inspect` would show
-    the parent's.
+    Only what the Dockerfile DECLARES; an inherited CMD or ENTRYPOINT from the
+    base image is not visible here.
     """
     # A command split across lines is ONE command; a per-line scan reads its
     # halves as unrelated.
@@ -70,9 +69,9 @@ def _effective_argv(dockerfile: str) -> list[str]:
             argv = json.loads(raw)
         except json.JSONDecodeError:
             return ["/bin/sh", "-c", raw]
-        if isinstance(argv, list) and all(isinstance(a, str) for a in argv):
-            return argv
-        return ["/bin/sh", "-c", raw]
+        # A JSON value that is not an array is shell form: measured, docker
+        # reads CMD "a", CMD 42 and CMD {"a": 1} all as /bin/sh -c <raw>.
+        return argv if isinstance(argv, list) else ["/bin/sh", "-c", raw]
 
     return [
         a for part in (last("ENTRYPOINT"), last("CMD")) if part for a in parse(part)
@@ -171,8 +170,8 @@ START_CASES = [
         'CMD ["sh", "-c", "pip install -e . && x"]',
         False,
     ),
-    # The case that found a live false pass: raw_decode ignored the tail, so
-    # this passed while docker read the whole line as shell form.
+    # Docker reads this whole line as shell form, so it is NOT the baked venv.
+    # A parser that stops at the end of the JSON array passes it.
     ("the right argv with a trailing comment", f"CMD {_RIGHT} # baked venv", False),
     (
         "a shell-form ENTRYPOINT, whose CMD never reaches the command",
@@ -275,6 +274,10 @@ RESOLUTION_CASES = [
     # has no trailing spaces. Measured: ["/bin/sh","-c","a b"].
     ("trailing whitespace is trimmed", "CMD a b   ", ["/bin/sh", "-c", "a b"]),
     ("CRLF line endings", 'CMD ["a"]\r', ["a"]),
+    # Non-array JSON is shell form. Each measured with docker inspect.
+    ("a bare JSON string", 'CMD "a"', ["/bin/sh", "-c", '"a"']),
+    ("a JSON number", "CMD 42", ["/bin/sh", "-c", "42"]),
+    ("a JSON object", 'CMD {"a": 1}', ["/bin/sh", "-c", '{"a": 1}']),
     ("neither instruction", "RUN true", []),
 ]
 
