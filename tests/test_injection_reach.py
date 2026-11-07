@@ -186,6 +186,26 @@ def test_a_model_sourced_variable_never_becomes_a_label() -> None:
     assert result.action.label == "Cortex/From/example.net/{{who}}"
 
 
+def test_a_routed_label_renders_regex_variables_but_not_model_ones() -> None:
+    config = RulesConfig(
+        chains={
+            "main": [
+                Rule(
+                    llm=LLMConfig(model="m", prompt_version="v1"),
+                    variables={
+                        "who": Variable(llm=LLMVariable(prompt="p", model="m")),
+                        "dom": Variable(from_regex={"pattern": r"@(.+)$", "group": 1}),
+                    },
+                    routes={"x": Action(label="From/{{dom}}/{{who}}")},
+                )
+            ]
+        }
+    )
+    result = evaluate(config, _email(), Oracle(classify="x"))
+    assert result.action is not None
+    assert result.action.label == "Cortex/From/example.net/{{who}}"
+
+
 # --- the live config ------------------------------------------------------
 
 RULES = os.environ.get("CORTEX_RULES_YAML")
