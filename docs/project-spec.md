@@ -154,7 +154,8 @@ rules change. Budget for the Gmail API writes on labels that actually change.
 - Targeted alternative: `POST /triage/rerun` (by `gmail_ids`, `label`, or
   `senders`) when you want a subset re-done *now*.
 - Mapping changes get their own targeted re-enqueue: the gateway's `/mappings`
-  writes re-enqueue that sender's mail at priority -200, delayed 60s so the
+  writes re-enqueue that sender's mail at priority -50 (above backfill, below
+  live mail; cortex-gateway #58), delayed 60s so the
   worker's `mappings_reload` signal lands first.
 
 ### Rules Configuration (YAML)
