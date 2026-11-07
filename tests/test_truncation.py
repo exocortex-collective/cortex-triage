@@ -7,9 +7,10 @@ from unittest.mock import MagicMock
 import pytest
 from cortex_utils.llm import LLMError, LLMTruncatedError
 from cortex_utils.triage_config import load_rules_from_string
-from cortex_utils.triage_config.models import Email
+from cortex_utils.triage_config.models import Email, MatchCondition
 
 from tests.test_footprint import _converge_once
+from triage.engine.matcher import _needs_llm
 from triage.services.worker import TriageWorker, evaluate_or_rules_only
 
 CONFIG = """
@@ -137,3 +138,23 @@ def test_convergence_stores_no_footprint_for_a_truncation(
     worker = _truncating_worker(monkeypatch)
     _converge_once(worker, monkeypatch)
     _assert_stored_without_a_footprint(worker)
+
+
+@pytest.mark.parametrize(
+    "match",
+    [
+        {"subject_intent": "is_spam"},
+        {"email_intent": "is_spam"},
+        {"email_category": "kind/x"},
+        {"any_of": [{"subject_contains": "a"}, {"email_category": "kind/x"}]},
+        {"all_of": [{"email_intent": "is_spam"}]},
+    ],
+)
+def test_a_rule_that_asks_the_model_needs_it(match: dict[str, object]) -> None:
+    assert _needs_llm(MatchCondition.model_validate(match))
+
+
+def test_a_rule_only_condition_does_not_need_the_model() -> None:
+    assert not _needs_llm(
+        MatchCondition.model_validate({"any_of": [{"subject_contains": "a"}]})
+    )
