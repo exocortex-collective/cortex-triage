@@ -271,3 +271,48 @@ def test_every_label_the_live_config_can_emit_is_written_in_it() -> None:
     # should fail this and be looked at: trash is held for approval
     # (cortex-gco6), but it is the one irreversible-looking action.
     assert not any("trash" in e for e in reached.values())
+
+
+def test_add_and_remove_labels_render_regex_variables_but_not_model_ones() -> None:
+    """triage-4ed1: add_label/remove_label templates render, from the same
+    model-free context as label, and get no prefix."""
+    config = RulesConfig(
+        chains={
+            "main": [
+                Rule(
+                    match=MatchCondition(),
+                    variables={
+                        "who": Variable(llm=LLMVariable(prompt="p", model="m")),
+                        "dom": Variable(from_regex={"pattern": r"@(.+)$", "group": 1}),
+                    },
+                    action=Action(
+                        add_label=["Cortex/From/{{dom}}", "Cortex/By/{{who}}"],
+                        remove_label="Old/{{dom}}",
+                    ),
+                )
+            ]
+        }
+    )
+    result = evaluate(config, _email(), Oracle())
+    assert result.action is not None
+    assert result.action.add_label == ["Cortex/From/example.net", "Cortex/By/{{who}}"]
+    assert result.action.remove_label == "Old/example.net"
+
+
+def test_a_single_add_label_string_renders_too() -> None:
+    config = RulesConfig(
+        chains={
+            "main": [
+                Rule(
+                    match=MatchCondition(),
+                    variables={
+                        "dom": Variable(from_regex={"pattern": r"@(.+)$", "group": 1})
+                    },
+                    action=Action(add_label="Cortex/Kickstarter/{{dom}}"),
+                )
+            ]
+        }
+    )
+    result = evaluate(config, _email(), Oracle())
+    assert result.action is not None
+    assert result.action.add_label == "Cortex/Kickstarter/example.net"
