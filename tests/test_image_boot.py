@@ -10,18 +10,19 @@ with --network none:
     pre-fix image   -> rc=2, dns error fetching hatchling
     fixed image     -> reaches the worker's own env validation
 
-Unlike cortex-utils, this image needs no change to its `uv sync`: the sync
-runs against a src/triage/__init__.py stub and installs the project EDITABLE,
-so the venv's .pth points at /app/src, which the later `COPY src/` fills in.
-Only the start command had to change. Verified by running
-`/app/.venv/bin/python -c "import triage.services.worker"` in the pre-fix
-image with --network none, which succeeds.
+SCOPE, because it is narrower than it looks: this covers the IMAGE DEFAULT
+only. A compose `command:` OVERRIDES the image CMD, and in Portainer stack 48
+nine of twelve cortex services pass their own `uv run python -m ...`, so the
+image being correct does not make production correct. The stack commands are
+tracked in cortex-4da6 and have to change too.
 """
 
 from __future__ import annotations
 
+import json
 import pathlib
 import re
+import shlex
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
 
@@ -31,23 +32,62 @@ REPO = pathlib.Path(__file__).resolve().parent.parent
 VENV_BIN = "/app/.venv/bin/"
 
 
+def _start_argv(dockerfile: str) -> list[str]:
+    """The argv a container starts with: ENTRYPOINT then CMD, PARSED.
+
+    Parsed rather than matched as text. A substring check passes on an argv
+    that merely MENTIONS the venv -- ["sh", "-c", "... /app/.venv/bin/python
+    ..."], or a trailing "# /app/.venv/bin/" comment -- and both of those
+    still resolve the project at boot.
+    """
+    # A command split across lines is ONE command; a per-line scan reads its
+    # halves as unrelated.
+    joined = re.sub(r"\\\n\s*", " ", dockerfile)
+    argv: list[str] = []
+    for kind in ("ENTRYPOINT", "CMD"):
+        for m in re.finditer(rf"^\s*{kind}\s+(.+)$", joined, re.M | re.I):
+            raw = m.group(1).strip()
+            if raw.startswith("["):
+                # raw_decode, so a trailing comment after the JSON is ignored
+                # rather than making this blow up.
+                argv += json.JSONDecoder().raw_decode(raw)[0]
+            else:
+                argv += shlex.split(raw, comments=True)
+    return argv
+
+
 def test_the_start_command_is_the_baked_venv():
-    """Asserts the PROPERTY -- the start command IS the baked venv -- rather
-    than forbidding a spelling. Blacklisting "uv run" does not work: `uvx`,
-    `uv  run`, `uv<TAB>run` and a bare `python` all walk past it."""
-    # Line-continuations joined first: a command split across lines is ONE
-    # command, and a per-line scan reads its halves as unrelated.
-    joined = re.sub(r"\\\n\s*", " ", (REPO / "Dockerfile").read_text())
-    cmds = re.findall(r"^\s*(?:CMD|ENTRYPOINT)\s+(.+)$", joined, re.M | re.I)
-    assert cmds, "the Dockerfile declares no CMD or ENTRYPOINT"
-    # Joined, so an ENTRYPOINT holding the interpreter and a CMD holding only
-    # its arguments are judged as the one command they combine into.
-    start = " ".join(cmds)
-    assert VENV_BIN in start, (
-        f"the start command must invoke the baked venv by its absolute path, "
-        f"or it is resolving the project at boot: {start}"
+    """Asserts the PROPERTY -- the container STARTS with the baked venv --
+    rather than forbidding a spelling. Blacklisting "uv run" does not work:
+    uvx, "uv  run", a tab between the words, and a bare python all walk past
+    it."""
+    argv = _start_argv((REPO / "Dockerfile").read_text())
+    assert argv, "the Dockerfile declares no CMD or ENTRYPOINT"
+
+    # The FIRST token. A substring check over the whole command is what this
+    # replaced, and it passed on an sh -c wrapper and on a trailing comment.
+    assert argv[0].startswith(VENV_BIN), (
+        f"the container must START with the baked venv's absolute path, or it "
+        f"resolves the project at boot: {argv}"
     )
-    # `\buvx?\b`, not the substring "uv": that would refuse `uvicorn`.
+    # \buvx?\b, not the substring "uv": that would refuse uvicorn.
     assert not re.search(
-        r"\buvx?\b", start
-    ), f"the start command goes through uv, so it needs pypi at boot: {start}"
+        r"\buvx?\b", " ".join(argv)
+    ), f"the start command goes through uv, so it needs pypi at boot: {argv}"
+
+
+def test_the_venv_contains_the_project_at_build_time():
+    """The other half of the bug, and why the start command alone is not
+    enough: pointing at the baked venv only works if the project is IN it.
+
+    A `uv sync` carrying --no-install-project leaves no .pth, so the boot
+    fails with ModuleNotFoundError instead of a network error -- a different
+    symptom, the same outage.
+    """
+    joined = re.sub(r"\\\n\s*", " ", (REPO / "Dockerfile").read_text())
+    syncs = re.findall(r"^\s*RUN\s+.*\buv\s+sync\b.*$", joined, re.M)
+    assert syncs, "the Dockerfile never runs `uv sync`, so no venv is built"
+    assert [s for s in syncs if "--no-install-project" not in s], (
+        "every `uv sync` carries --no-install-project, so the project itself "
+        "is never installed and the baked venv cannot import it"
+    )
