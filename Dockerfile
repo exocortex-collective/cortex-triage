@@ -33,4 +33,4 @@ VOLUME /app/secrets
 USER appuser
 
 # Run the triage worker service
-CMD ["uv", "run", "python", "-m", "triage.services.worker"]
+CMD ["/app/.venv/bin/python", "-m", "triage.services.worker"]
