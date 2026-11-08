@@ -30,8 +30,9 @@ DUCKDB_API_URL = os.environ.get("DUCKDB_API_URL")
 # Support both LLM_URL (new) and OLLAMA_URL (legacy) for backward compatibility
 LLM_URL = os.environ.get("LLM_URL") or os.environ.get("OLLAMA_URL")
 
-# LLM model for extraction (default: qwen2.5:3b - fast and good at extraction)
-LLM_MODEL = os.environ.get("LLM_MODEL") or os.environ.get("OLLAMA_MODEL", "qwen2.5:3b")
+# Defaults to one of the two models valid keeps resident; a third model makes
+# ollama evict one of them and reload it.
+LLM_MODEL = os.environ.get("LLM_MODEL") or os.environ.get("OLLAMA_MODEL", "qwen2.5:7b")
 
 # Merchant name validation bounds
 MIN_MERCHANT_LENGTH = 2  # Minimum chars for valid merchant name
