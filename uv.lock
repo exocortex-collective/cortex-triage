@@ -419,7 +419,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "black", marker = "extra == 'dev'", specifier = ">=23.0.0" },
-    { name = "cortex-utils", git = "https://github.com/devonjones/cortex-utils.git?rev=ff1ef5e" },
+    { name = "cortex-utils", git = "https://github.com/devonjones/cortex-utils.git?rev=1d8d7ec" },
     { name = "discord-py", specifier = ">=2.3.0" },
     { name = "duckdb", specifier = ">=0.9.0" },
     { name = "google-api-python-client", specifier = ">=2.100.0" },
@@ -442,7 +442,7 @@ provides-extras = ["dev"]
 [[package]]
 name = "cortex-utils"
 version = "0.1.0"
-source = { git = "https://github.com/devonjones/cortex-utils.git?rev=ff1ef5e#ff1ef5e9e9e417bd6d46b76a7509a2726011d5da" }
+source = { git = "https://github.com/devonjones/cortex-utils.git?rev=1d8d7ec#1d8d7ece930525241a07553eef7796b246b8e068" }
 dependencies = [
     { name = "click" },
     { name = "docker" },
