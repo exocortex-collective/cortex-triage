@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import select
 import signal
 import subprocess
 import sys
@@ -454,6 +455,9 @@ def _child(tmp_path: Path, install: bool) -> int:
     )
     try:
         assert proc.stdout is not None
+        # Bounded: readline() on a child that hangs before printing would
+        # otherwise block until the CI job's own limit, with no diagnostic.
+        assert select.select([proc.stdout], [], [], 30)[0], "child never spoke"
         assert proc.stdout.readline().strip() == "ready"
         proc.terminate()
         return proc.wait(timeout=30)

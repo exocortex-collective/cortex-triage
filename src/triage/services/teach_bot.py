@@ -516,7 +516,7 @@ def _shutdown_on_sigterm(signum: int, frame: object) -> None:
     signal.signal(signal.SIGTERM, signal.SIG_IGN)
     # Nothing is logged here: a log call interrupted mid-write to stderr
     # raises RuntimeError("reentrant call") instead, and then the raise below
-    # never runs -- the exact failure this handler exists to prevent.
+    # never runs.
     raise KeyboardInterrupt
 
 
