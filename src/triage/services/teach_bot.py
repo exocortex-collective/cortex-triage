@@ -507,18 +507,16 @@ class TeachBot(commands.Bot):
 
 
 def _shutdown_on_sigterm(signum: int, frame: object) -> None:
-    """Take SIGTERM down the path Ctrl-C already takes.
+    """Turn SIGTERM into the ``KeyboardInterrupt`` ``Bot.run`` already exits on.
 
-    ``discord.py``'s ``Bot.run`` exits cleanly on ``KeyboardInterrupt`` and
-    installs no SIGTERM handler of its own. This process is PID 1 in its
-    container, and the kernel drops a signal that a namespace init has no
-    handler for -- so without this, SIGTERM did nothing at all and the only
-    thing that could stop the bot was the SIGKILL docker sends once the stop
-    grace expires. That grace is 90s against a docker daemon shutdown budget
-    of 15s, so a daemon restart exited first and left the container dead with
-    RestartCount 0 and the restart policy never engaged. triage-3603.
+    Needed because this process is PID 1 in its container, where the kernel
+    drops a signal that has no handler. Measurements in triage-3603.
     """
-    logger.info(f"Received signal {signum}; shutting down")
+    # A repeat SIGTERM would raise inside asyncio's cleanup and abort it.
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    # Nothing is logged here: a log call interrupted mid-write to stderr
+    # raises RuntimeError("reentrant call") instead, and then the raise below
+    # never runs -- the exact failure this handler exists to prevent.
     raise KeyboardInterrupt
 
 
@@ -529,6 +527,8 @@ def main() -> None:
     # Installed before run() so a stop arriving during startup is not lost.
     signal.signal(signal.SIGTERM, _shutdown_on_sigterm)
     bot.run(config.token)
+    # Logged here rather than in the handler, where it is not signal-safe.
+    logger.info("Teach bot stopped")
 
 
 if __name__ == "__main__":

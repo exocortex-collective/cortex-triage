@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+import signal
+import subprocess
+import sys
+from collections.abc import Iterator
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
@@ -404,34 +409,89 @@ def test_apply_one_retries_on_failure(monkeypatch: pytest.MonkeyPatch) -> None:
 
 # --- SIGTERM (triage-3603) -------------------------------------------------
 #
-# What these cannot test: the reason the bug mattered is that the bot runs as
-# PID 1 in its container, and the kernel drops a signal a namespace init has
-# no handler for. pytest is not PID 1, so a subprocess here would be killed by
-# the DEFAULT disposition and pass with or without the fix. These assert the
-# two things that are testable and that the container evidence turns into a
-# clean exit: a handler is installed, and it is installed before run() blocks.
+# What none of these reproduce is PID 1, where the kernel drops a signal that
+# has no handler at all -- that is why the bug existed, and it is measured on
+# the container in triage-3603 rather than here.
+
+# Stands in for the real entry point. `run` emulates discord.py's Bot.run,
+# which catches KeyboardInterrupt and returns (discord/client.py:934).
+_CHILD = """
+import asyncio, types
+import triage.services.teach_bot as tb
+
+async def _ready_then_wait():
+    print("ready", flush=True)
+    await asyncio.sleep(30)
+
+def _run(self, token):
+    try:
+        asyncio.run(_ready_then_wait())
+    except KeyboardInterrupt:
+        pass
+
+tb.start_metrics_server = lambda port: None
+tb.TeachConfig.from_env = classmethod(lambda cls: types.SimpleNamespace(token="x"))
+tb.TeachBot.__init__ = lambda self, config: None
+tb.TeachBot.run = _run
+INSTALL
+tb.main()
+"""
+
+
+def _child(tmp_path: Path, install: bool) -> int:
+    """Run the entry point in a subprocess, SIGTERM it, return its exit code.
+
+    With the handler installed the process exits 0. Without it the default
+    disposition kills the child, which Popen reports as -SIGTERM.
+    """
+    script = tmp_path / "child.py"
+    body = _CHILD.replace(
+        "INSTALL", "" if install else "tb.signal.signal = lambda *a: None"
+    )
+    script.write_text(body)
+    proc = subprocess.Popen(
+        [sys.executable, str(script)], stdout=subprocess.PIPE, text=True
+    )
+    try:
+        assert proc.stdout is not None
+        assert proc.stdout.readline().strip() == "ready"
+        proc.terminate()
+        return proc.wait(timeout=30)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait(timeout=10)
 
 
 @pytest.fixture
-def restore_sigterm():
+def restore_sigterm() -> Iterator[None]:
     """Keep a test's handler out of the rest of the session."""
-    import signal
-
     previous = signal.getsignal(signal.SIGTERM)
     yield
-    signal.signal(signal.SIGTERM, previous)
+    # getsignal returns None for a handler installed from C, and signal.signal
+    # refuses None.
+    signal.signal(signal.SIGTERM, previous if previous is not None else signal.SIG_DFL)
 
 
-def test_main_installs_a_sigterm_handler_before_running(monkeypatch, restore_sigterm):
-    import signal
+def test_sigterm_exits_the_process_cleanly(tmp_path: Path) -> None:
+    assert _child(tmp_path, install=True) == 0
 
+
+def test_without_the_handler_sigterm_kills_the_process(tmp_path: Path) -> None:
+    # The control for the test above: the two outcomes have to differ, or
+    # exit 0 would prove nothing about the handler.
+    assert _child(tmp_path, install=False) == -signal.SIGTERM
+
+
+def test_main_installs_a_sigterm_handler_before_running(
+    monkeypatch: pytest.MonkeyPatch, restore_sigterm: None
+) -> None:
     seen: dict[str, object] = {}
 
-    def fake_run(self, token):  # noqa: ANN001, ANN202
-        # Read it from inside run(): a handler installed afterwards would be
-        # too late for a stop arriving during startup.
+    def fake_run(self: object, token: str) -> None:
+        # Read from inside run(): a handler installed after it would be too
+        # late for a stop arriving during startup.
         seen["handler"] = signal.getsignal(signal.SIGTERM)
-        seen["token"] = token
 
     monkeypatch.setattr(tb, "start_metrics_server", lambda port: None)
     monkeypatch.setattr(
@@ -445,8 +505,9 @@ def test_main_installs_a_sigterm_handler_before_running(monkeypatch, restore_sig
     assert seen["handler"] is tb._shutdown_on_sigterm
 
 
-def test_sigterm_handler_raises_the_exception_discord_exits_on(restore_sigterm):
-    # discord.py's Bot.run() catches KeyboardInterrupt and returns; anything
-    # else would propagate as a crash instead of a clean shutdown.
+def test_handler_raises_and_disarms_itself(restore_sigterm: None) -> None:
+    # The raise is what Bot.run exits on. The SIG_IGN is so a second SIGTERM
+    # cannot re-raise inside asyncio's cleanup and abort it.
     with pytest.raises(KeyboardInterrupt):
         tb._shutdown_on_sigterm(15, None)
+    assert signal.getsignal(signal.SIGTERM) is signal.SIG_IGN
