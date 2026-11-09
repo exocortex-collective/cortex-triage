@@ -400,3 +400,53 @@ def test_apply_one_retries_on_failure(monkeypatch: pytest.MonkeyPatch) -> None:
     bot._apply_add = boom  # type: ignore[method-assign]
     job = tb.ApplyJob(job_id=4, proposal_id=6, attempts=0, max_attempts=3)
     assert bot._apply_one(job) == "retrying"
+
+
+# --- SIGTERM (triage-3603) -------------------------------------------------
+#
+# What these cannot test: the reason the bug mattered is that the bot runs as
+# PID 1 in its container, and the kernel drops a signal a namespace init has
+# no handler for. pytest is not PID 1, so a subprocess here would be killed by
+# the DEFAULT disposition and pass with or without the fix. These assert the
+# two things that are testable and that the container evidence turns into a
+# clean exit: a handler is installed, and it is installed before run() blocks.
+
+
+@pytest.fixture
+def restore_sigterm():
+    """Keep a test's handler out of the rest of the session."""
+    import signal
+
+    previous = signal.getsignal(signal.SIGTERM)
+    yield
+    signal.signal(signal.SIGTERM, previous)
+
+
+def test_main_installs_a_sigterm_handler_before_running(monkeypatch, restore_sigterm):
+    import signal
+
+    seen: dict[str, object] = {}
+
+    def fake_run(self, token):  # noqa: ANN001, ANN202
+        # Read it from inside run(): a handler installed afterwards would be
+        # too late for a stop arriving during startup.
+        seen["handler"] = signal.getsignal(signal.SIGTERM)
+        seen["token"] = token
+
+    monkeypatch.setattr(tb, "start_metrics_server", lambda port: None)
+    monkeypatch.setattr(
+        tb.TeachConfig, "from_env", classmethod(lambda cls: make_bot().config)
+    )
+    monkeypatch.setattr(tb.TeachBot, "__init__", lambda self, config: None)
+    monkeypatch.setattr(tb.TeachBot, "run", fake_run)
+
+    tb.main()
+
+    assert seen["handler"] is tb._shutdown_on_sigterm
+
+
+def test_sigterm_handler_raises_the_exception_discord_exits_on(restore_sigterm):
+    # discord.py's Bot.run() catches KeyboardInterrupt and returns; anything
+    # else would propagate as a crash instead of a clean shutdown.
+    with pytest.raises(KeyboardInterrupt):
+        tb._shutdown_on_sigterm(15, None)

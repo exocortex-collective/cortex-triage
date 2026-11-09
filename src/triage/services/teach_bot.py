@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import signal
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -505,10 +506,28 @@ class TeachBot(commands.Bot):
             )
 
 
+def _shutdown_on_sigterm(signum: int, frame: object) -> None:
+    """Take SIGTERM down the path Ctrl-C already takes.
+
+    ``discord.py``'s ``Bot.run`` exits cleanly on ``KeyboardInterrupt`` and
+    installs no SIGTERM handler of its own. This process is PID 1 in its
+    container, and the kernel drops a signal that a namespace init has no
+    handler for -- so without this, SIGTERM did nothing at all and the only
+    thing that could stop the bot was the SIGKILL docker sends once the stop
+    grace expires. That grace is 90s against a docker daemon shutdown budget
+    of 15s, so a daemon restart exited first and left the container dead with
+    RestartCount 0 and the restart policy never engaged. triage-3603.
+    """
+    logger.info(f"Received signal {signum}; shutting down")
+    raise KeyboardInterrupt
+
+
 def main() -> None:
     start_metrics_server(port=int(os.getenv("METRICS_PORT", "8096")))
     config = TeachConfig.from_env()
     bot = TeachBot(config)
+    # Installed before run() so a stop arriving during startup is not lost.
+    signal.signal(signal.SIGTERM, _shutdown_on_sigterm)
     bot.run(config.token)
 
 
