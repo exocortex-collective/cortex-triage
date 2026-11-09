@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import signal
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -505,11 +506,29 @@ class TeachBot(commands.Bot):
             )
 
 
+def _shutdown_on_sigterm(signum: int, frame: object) -> None:
+    """Turn SIGTERM into the ``KeyboardInterrupt`` ``Bot.run`` already exits on.
+
+    Needed because this process is PID 1 in its container, where the kernel
+    drops a signal that has no handler. Measurements in triage-3603.
+    """
+    # A repeat SIGTERM would raise inside asyncio's cleanup and abort it.
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    # Nothing is logged here: a log call interrupted mid-write to stderr
+    # raises RuntimeError("reentrant call") instead, and then the raise below
+    # never runs.
+    raise KeyboardInterrupt
+
+
 def main() -> None:
     start_metrics_server(port=int(os.getenv("METRICS_PORT", "8096")))
     config = TeachConfig.from_env()
     bot = TeachBot(config)
+    # Installed before run() so a stop arriving during startup is not lost.
+    signal.signal(signal.SIGTERM, _shutdown_on_sigterm)
     bot.run(config.token)
+    # Logged here rather than in the handler, where it is not signal-safe.
+    logger.info("Teach bot stopped")
 
 
 if __name__ == "__main__":
