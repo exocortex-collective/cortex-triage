@@ -178,9 +178,14 @@ def test_the_kill_switch_stops_convergence(conn: Any) -> None:
 
 def test_deferred_mail_stays_behind_and_is_skipped(conn: Any) -> None:
     worker = _worker(conn)
+    with conn.cursor() as cur:  # a second candidate, behind the deferred one
+        cur.execute(
+            "UPDATE classifications SET footprint = NULL WHERE gmail_id = 'old_clean'"
+        )
+    conn.commit()
     worker._defer_convergence("affected")
     assert _versions(conn)["affected"] == 1
-    assert worker._converge_and_get_next_email() is None
+    assert worker._converge_and_get_next_email() == {"gmail_id": "old_clean"}
     with conn.cursor() as cur:
         cur.execute(
             "SELECT convergence_failures FROM classifications"
