@@ -43,7 +43,8 @@ CREATE TABLE triage_email_mappings (
 );
 CREATE TABLE classifications (
     gmail_id TEXT, config_version_id INT, action_taken JSONB, footprint JSONB,
-    classified_at TIMESTAMPTZ DEFAULT now()
+    classified_at TIMESTAMPTZ DEFAULT now(),
+    convergence_failures INT NOT NULL DEFAULT 0, convergence_failed_at TIMESTAMPTZ
 );
 INSERT INTO triage_config_versions VALUES (2, TRUE, 'Cortex');
 """

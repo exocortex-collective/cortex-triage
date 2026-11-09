@@ -20,7 +20,7 @@ from psycopg2.extras import Json
 
 from tests.test_footprint import BASE, FB
 from triage.engine.footprint import build_footprint, chain_hashes
-from triage.services.worker import TriageWorker
+from triage.services.worker import CONVERGENCE_RETRY_AFTER, TriageWorker
 
 DSN = os.environ.get("CORTEX_TEST_DSN")
 
@@ -35,7 +35,8 @@ CREATE TABLE emails_raw (
 );
 CREATE TABLE emails_parsed (gmail_id TEXT PRIMARY KEY, from_addr TEXT);
 CREATE TABLE classifications (
-    gmail_id TEXT, config_version_id INT, footprint JSONB
+    gmail_id TEXT, config_version_id INT, footprint JSONB,
+    convergence_failures INT NOT NULL DEFAULT 0, convergence_failed_at TIMESTAMPTZ
 );
 """
 
@@ -173,3 +174,63 @@ def test_the_kill_switch_stops_convergence(conn: Any) -> None:
     worker.config.enable_convergence = False
     assert worker._converge_and_get_next_email() is None
     assert _versions(conn)["new_clean"] == 1
+
+
+def test_deferred_mail_stays_behind_and_is_skipped(conn: Any) -> None:
+    worker = _worker(conn)
+    worker._defer_convergence("affected")
+    assert _versions(conn)["affected"] == 1
+    assert worker._converge_and_get_next_email() is None
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT convergence_failures FROM classifications"
+            " WHERE gmail_id = 'affected'"
+        )
+        assert cur.fetchone() == (1,)
+
+
+def test_deferred_mail_is_retried_after_the_window(conn: Any) -> None:
+    worker = _worker(conn)
+    worker._defer_convergence("affected")
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE classifications SET convergence_failed_at ="
+            " NOW() - %s - interval '1 second'",
+            (CONVERGENCE_RETRY_AFTER,),
+        )
+    conn.commit()
+    assert worker._converge_and_get_next_email() == {"gmail_id": "affected"}
+
+
+def test_a_successful_store_clears_the_failures() -> None:
+    c = psycopg2.connect(DSN, options="-c search_path=t_converge_ddl")
+    c.autocommit = True
+    with c.cursor() as cur:
+        cur.execute("DROP SCHEMA IF EXISTS t_converge_ddl CASCADE")
+        cur.execute("CREATE SCHEMA t_converge_ddl")
+    c.autocommit = False
+    try:
+        worker = _worker(c)
+        worker._ensure_schema()
+        email = MagicMock(id=1, gmail_id="g")
+        result = MagicMock(action=None)
+        result.configure_mock(chain="main", rule_index=0, llm_category=None)
+        result.configure_mock(llm_confidence=None, llm_reasoning=None)
+        worker._store_classification(email, result, False, None, 1)
+        worker._defer_convergence("g")
+        with c.cursor() as cur:
+            cur.execute("SELECT convergence_failures FROM classifications")
+            assert cur.fetchone() == (1,)
+        worker._store_classification(email, result, False, None, 2)
+        with c.cursor() as cur:
+            cur.execute(
+                "SELECT convergence_failures, convergence_failed_at, config_version_id"
+                " FROM classifications"
+            )
+            assert cur.fetchone() == (0, None, 2)
+    finally:
+        c.rollback()
+        c.autocommit = True
+        with c.cursor() as cur:
+            cur.execute("DROP SCHEMA IF EXISTS t_converge_ddl CASCADE")
+        c.close()

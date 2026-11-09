@@ -11,12 +11,12 @@ import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
 import httpx
 import psycopg2
-from cortex_utils.llm import LLMClient, LLMError, LLMTruncatedError
+from cortex_utils.llm import LLMClient, LLMError, LLMHTTPError, LLMTruncatedError
 from cortex_utils.logging import configure_logging, get_logger
 from cortex_utils.metrics import (
     EMAILS_CLASSIFIED,
@@ -110,6 +110,13 @@ def evaluate_or_rules_only(
         return action, results, True
 
 
+def is_transient(e: LLMError) -> bool:
+    """A failure that says the LLM was busy or down, not that the mail is bad."""
+    if isinstance(e, LLMHTTPError):
+        return e.retryable
+    return isinstance(e.__cause__, httpx.RequestError)
+
+
 @dataclass
 class Config:
     postgres_host: str
@@ -147,6 +154,9 @@ QUESTION_INTERVAL_SECONDS = 900
 # config reloads and the heartbeat wait at most about one email past it
 # instead of a whole LLM-heavy batch (triage-1702: up to 31 minutes).
 BATCH_SECONDS = 60
+
+# How long the convergence scan skips an email after a transient LLM failure.
+CONVERGENCE_RETRY_AFTER = timedelta(hours=1)
 
 
 class GmailClient:
@@ -517,6 +527,26 @@ class TriageWorker:
                 exc_info=True,
             )
 
+    def _defer_convergence(self, gmail_id: str) -> None:
+        """Leave a convergence email behind after a transient LLM failure.
+
+        Unlike _mark_convergence_failed it does not stamp the version, so the
+        mail still counts as behind; the scan skips it for
+        CONVERGENCE_RETRY_AFTER and then tries again.
+        """
+        try:
+            with self._get_conn() as conn, conn.cursor() as cursor:
+                cursor.execute(
+                    "UPDATE classifications SET"
+                    " convergence_failures = convergence_failures + 1,"
+                    " convergence_failed_at = NOW()"
+                    " WHERE gmail_id = %s",
+                    (gmail_id,),
+                )
+                conn.commit()
+        except Exception as e:
+            logger.error(f"Failed to defer convergence for {gmail_id}: {e}")
+
     def _converge_and_get_next_email(self) -> dict[str, Any] | None:
         """Stamp mail the loaded config cannot change; return the next to re-triage.
 
@@ -542,10 +572,16 @@ class TriageWorker:
                     LEFT JOIN emails_parsed ep ON ep.gmail_id = c.gmail_id
                     WHERE c.config_version_id < %s
                       AND NOT 'SPAM' = ANY(COALESCE(er.label_ids, '{}'))
+                      AND (c.convergence_failed_at IS NULL
+                           OR c.convergence_failed_at < NOW() - %s)
                     ORDER BY er.internal_date DESC
                     LIMIT %s
                     """,
-                    (version, self.config.convergence_batch_size),
+                    (
+                        version,
+                        CONVERGENCE_RETRY_AFTER,
+                        self.config.convergence_batch_size,
+                    ),
                 )
                 hashes = self._chain_hashes(rules)
                 unaffected: list[str] = []
@@ -773,6 +809,12 @@ class TriageWorker:
                     -- Which part of the config decided it (triage-70be)
                     ALTER TABLE classifications
                         ADD COLUMN IF NOT EXISTS footprint JSONB;
+
+                    -- Convergence LLM calls that failed transiently (triage-6c9f)
+                    ALTER TABLE classifications
+                        ADD COLUMN IF NOT EXISTS convergence_failures INT
+                            NOT NULL DEFAULT 0,
+                        ADD COLUMN IF NOT EXISTS convergence_failed_at TIMESTAMPTZ;
 
                     CREATE INDEX IF NOT EXISTS idx_classifications_email
                     ON classifications(email_id);
@@ -1278,6 +1320,8 @@ class TriageWorker:
                         action_taken = EXCLUDED.action_taken,
                         action_executed = EXCLUDED.action_executed,
                         footprint = EXCLUDED.footprint,
+                        convergence_failures = 0,
+                        convergence_failed_at = NULL,
                         classified_at = NOW()
                 """,
                 (
@@ -1644,8 +1688,11 @@ class TriageWorker:
                             ERRORS.labels(
                                 service="triage-worker", error_type="llm_error"
                             ).inc()
-                            # Mark as processed to prevent infinite retry
-                            self._mark_convergence_failed(gmail_id)
+                            if is_transient(e):
+                                self._defer_convergence(gmail_id)
+                                time.sleep(self.config.poll_interval)
+                            else:
+                                self._mark_convergence_failed(gmail_id)
                         except Exception as e:
                             logger.error(
                                 f"Convergence failed to process {gmail_id}: {e}",
