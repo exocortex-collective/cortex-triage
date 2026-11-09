@@ -112,9 +112,14 @@ def evaluate_or_rules_only(
 
 def is_transient(e: LLMError) -> bool:
     """A failure that says the LLM was busy or down, not that the mail is bad."""
-    if isinstance(e, LLMHTTPError):
-        return e.retryable
-    return isinstance(e.__cause__, httpx.RequestError)
+    cause: BaseException | None = e
+    while cause is not None:
+        if isinstance(cause, LLMHTTPError):
+            return cause.retryable
+        if isinstance(cause, httpx.RequestError):
+            return True
+        cause = cause.__cause__
+    return False
 
 
 @dataclass
@@ -545,7 +550,9 @@ class TriageWorker:
                 )
                 conn.commit()
         except Exception as e:
-            logger.error(f"Failed to defer convergence for {gmail_id}: {e}")
+            logger.error(
+                f"Failed to defer convergence for {gmail_id}: {e}", exc_info=True
+            )
 
     def _converge_and_get_next_email(self) -> dict[str, Any] | None:
         """Stamp mail the loaded config cannot change; return the next to re-triage.
