@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 from unittest.mock import MagicMock
 
+import httpx
 import pytest
 from cortex_utils.llm import LLMError
 from cortex_utils.triage_config import load_rules_from_string
@@ -509,3 +510,20 @@ def test_convergence_gives_up_on_mail_it_cannot_triage(
     monkeypatch.setattr(worker, "_mark_convergence_failed", MagicMock())
     _converge_once(worker, monkeypatch)
     worker._mark_convergence_failed.assert_called_once_with("g")
+
+
+def test_convergence_defers_mail_when_the_llm_times_out(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    worker = _reloading_worker(monkeypatch)
+    try:
+        raise LLMError("LLM network error") from httpx.ReadTimeout("timed out")
+    except LLMError as e:
+        timeout = e
+    monkeypatch.setattr(worker, "_execute_action", MagicMock(side_effect=timeout))
+    monkeypatch.setattr(worker, "_mark_convergence_failed", MagicMock())
+    monkeypatch.setattr(worker, "_defer_convergence", MagicMock())
+    monkeypatch.setattr("triage.services.worker.time.sleep", MagicMock())
+    _converge_once(worker, monkeypatch)
+    worker._defer_convergence.assert_called_once_with("g")
+    worker._mark_convergence_failed.assert_not_called()
